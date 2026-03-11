@@ -32,11 +32,23 @@ DHAN_EXCHANGE_MAP = {
     Exchange.CDS: "NSE_CURRENCY",
 }
 
+def _dhan_const(*names: str, default=None):
+    """Read constant from dhanhq module across SDK versions."""
+    for name in names:
+        if hasattr(dhanhq, name):
+            return getattr(dhanhq, name)
+    if default is not None:
+        return default
+    raise AttributeError(f"dhanhq has none of constants: {', '.join(names)}")
+
+
 DHAN_ORDER_TYPE_MAP = {
-    OrderType.MARKET: dhanhq.MARKET,
-    OrderType.LIMIT: dhanhq.LIMIT,
-    OrderType.SL: dhanhq.STOP_LOSS,
-    OrderType.SL_M: dhanhq.STOP_LOSS_MARKET,
+    OrderType.MARKET: _dhan_const("MARKET", default="MARKET"),
+    OrderType.LIMIT: _dhan_const("LIMIT", default="LIMIT"),
+    # Different dhanhq versions expose these as STOP_LOSS/STOP_LOSS_MARKET
+    # or SL/SLM respectively.
+    OrderType.SL: _dhan_const("STOP_LOSS", "SL", default="SL"),
+    OrderType.SL_M: _dhan_const("STOP_LOSS_MARKET", "SLM", default="SLM"),
 }
 
 DHAN_PRODUCT_MAP = {
