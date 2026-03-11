@@ -328,6 +328,7 @@ class IndicatorsEngine:
         """Aggregate indicators into directional signals."""
         score = 0
         max_score = 0
+        if max_score == 0:
             b.overall_signal = "neutral"
             return
 
