@@ -113,17 +113,17 @@ async def start_engine(req: EngineStartRequest, background_tasks: BackgroundTask
     if engine and engine._running:
         raise HTTPException(400, "Engine already running")
 
-    # Load config and create engine
-    import yaml
-    from pathlib import Path
-
-    config_path = Path(__file__).parent.parent / "config" / "config.yaml"
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
+    # Load config with full env-var expansion (same as main.py)
+    from config.loader import load_config
+    import copy
+    config = copy.deepcopy(load_config())   # deep copy so we can mutate safely
 
     # Override mode
     if req.mode == "paper":
         config["app"]["environment"] = "paper"
+        for broker_cfg in config.get("brokers", {}).values():
+            if isinstance(broker_cfg, dict):
+                broker_cfg["sandbox"] = True
 
     new_engine = TradingEngine(config)
 
