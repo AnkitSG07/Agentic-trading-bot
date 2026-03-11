@@ -1,0 +1,142 @@
+## ============================================================
+## AGENTIC TRADING BOT - MASTER CONFIGURATION
+## Indian Markets | Zerodha + Dhan | Multi-Strategy AI
+## ============================================================
+
+app:
+  name: "AgentTrader India"
+  version: "1.0.0"
+  environment: "production"  # paper | production
+  log_level: "INFO"
+
+## ─── MARKET SETTINGS ───────────────────────────────────────
+market:
+  exchange: ["NSE", "BSE", "NFO", "MCX"]
+  timezone: "Asia/Kolkata"
+  sessions:
+    pre_open: "09:00"
+    open: "09:15"
+    close: "15:30"
+    post_close: "15:45"
+  holidays_file: "config/market_holidays.json"
+
+## ─── BROKER CREDENTIALS ────────────────────────────────────
+brokers:
+  zerodha:
+    enabled: true
+    api_key: "${ZERODHA_API_KEY}"
+    api_secret: "${ZERODHA_API_SECRET}"
+    user_id: "${ZERODHA_USER_ID}"
+    totp_secret: "${ZERODHA_TOTP_SECRET}"
+    redirect_url: "http://localhost:5000/auth/zerodha/callback"
+    sandbox: false
+
+  dhan:
+    enabled: true
+    client_id: "${DHAN_CLIENT_ID}"
+    access_token: "${DHAN_ACCESS_TOKEN}"
+    sandbox: false
+
+## ─── AI AGENT SETTINGS ─────────────────────────────────────
+agent:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 4096
+  temperature: 0.1
+  decision_interval_seconds: 60       # How often agent evaluates market
+  strategy_review_interval: 3600      # Full strategy review every hour
+  max_concurrent_strategies: 5
+  confidence_threshold: 0.65          # Min confidence to place trade
+
+## ─── RISK MANAGEMENT ────────────────────────────────────────
+risk:
+  max_capital_per_trade_pct: 5.0      # Max 5% of capital per trade
+  max_open_positions: 10
+  max_daily_loss_pct: 2.0             # Kill switch: stop if day loss > 2%
+  max_drawdown_pct: 8.0               # Kill switch: stop if drawdown > 8%
+  stop_loss_pct: 1.5                  # Default SL per trade
+  target_pct: 3.0                     # Default target per trade
+  trailing_stop: true
+  trailing_stop_pct: 0.8
+  position_sizing_method: "kelly"     # fixed | kelly | volatility_adjusted
+
+## ─── STRATEGIES ─────────────────────────────────────────────
+strategies:
+  momentum:
+    enabled: true
+    lookback_period: 20
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+    volume_multiplier: 1.5
+
+  mean_reversion:
+    enabled: true
+    bb_period: 20
+    bb_std: 2.0
+    rsi_period: 14
+
+  options_selling:
+    enabled: true
+    instruments: ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+    strategy_types: ["iron_condor", "short_strangle", "bull_put_spread"]
+    delta_target: 0.2
+    dte_min: 3
+    dte_max: 21
+    iv_rank_threshold: 50
+
+  breakout:
+    enabled: true
+    atr_period: 14
+    breakout_multiplier: 1.5
+
+## ─── DATA SETTINGS ──────────────────────────────────────────
+data:
+  redis:
+    host: "${REDIS_HOST:-localhost}"
+    port: 6379
+    db: 0
+    tick_ttl: 86400
+
+  postgres:
+    host: "${POSTGRES_HOST:-localhost}"
+    port: 5432
+    database: "trading_bot"
+    user: "${POSTGRES_USER:-trader}"
+    password: "${POSTGRES_PASSWORD}"
+    pool_size: 10
+
+  websocket:
+    reconnect_delay: 5
+    max_reconnect_attempts: 10
+    heartbeat_interval: 30
+
+## ─── NOTIFICATIONS ──────────────────────────────────────────
+notifications:
+  telegram:
+    enabled: true
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+    alerts:
+      - trade_entry
+      - trade_exit
+      - stop_loss_hit
+      - daily_pnl
+      - system_error
+      - kill_switch_triggered
+
+  email:
+    enabled: false
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    from_email: "${EMAIL_FROM}"
+    to_email: "${EMAIL_TO}"
+
+## ─── BACKTESTING ────────────────────────────────────────────
+backtest:
+  data_source: "zerodha"             # zerodha | local
+  default_capital: 1000000           # 10 Lakhs
+  slippage_pct: 0.05
+  brokerage_per_order: 20            # Zerodha flat ₹20
+  stt_equity_delivery: 0.001
+  stt_equity_intraday: 0.00025
+  stt_options_sell: 0.0005
