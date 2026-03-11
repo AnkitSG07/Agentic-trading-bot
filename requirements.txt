@@ -21,7 +21,7 @@ anthropic==0.34.0          # Claude API
 # ── Data & Analysis ──────────────────────────────────────────
 pandas==2.2.2
 numpy==1.26.4
-pandas-ta==0.3.14b         # Technical indicators
+pandas-ta @ git+https://github.com/twopirllc/pandas-ta.git@0.3.14b0         # Technical indicators
 pytz==2024.1
 
 # ── Database ─────────────────────────────────────────────────
