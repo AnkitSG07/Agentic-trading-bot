@@ -26,4 +26,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["python", "main.py", "--mode", "paper"]
+# Start in API-only mode by default
+# Engine can be started via POST /api/engine/start from the dashboard
+CMD ["python", "main.py", "--api-only", "--log-level", "INFO"]
