@@ -46,14 +46,19 @@ def setup_logging(level: str = "INFO") -> None:
 # ─── DATABASE INIT ────────────────────────────────────────────────────────────
 
 async def init_database(config: dict) -> None:
-    db_cfg = config.get("data", {}).get("postgres", {})
-    url = (
-        f"postgresql://{db_cfg.get('user', 'trader')}:"
-        f"{db_cfg.get('password', 'password')}@"
-        f"{db_cfg.get('host', 'localhost')}:"
-        f"{db_cfg.get('port', 5432)}/"
-        f"{db_cfg.get('database', 'trading_bot')}"
-    )
+    # Prefer managed database URL in cloud deployments (e.g., Render).
+    url = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+
+    if not url:
+        db_cfg = config.get("data", {}).get("postgres", {})
+        url = (
+            f"postgresql://{db_cfg.get('user', 'trader')}:"
+            f"{db_cfg.get('password', 'password')}@"
+            f"{db_cfg.get('host', 'localhost')}:"
+            f"{db_cfg.get('port', 5432)}/"
+            f"{db_cfg.get('database', 'trading_bot')}"
+        )
+
     from database.repository import init_db
     await init_db(url)
     logging.getLogger("main").info("✅ Database connected")
