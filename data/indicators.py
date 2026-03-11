@@ -9,9 +9,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
-import numpy as np
 import pandas as pd
-import pandas_ta as ta
 
 logger = logging.getLogger("data.indicators")
 
@@ -76,6 +74,88 @@ class IndicatorBundle:
 class IndicatorsEngine:
     """Compute technical indicators from OHLCV data."""
 
+    @staticmethod
+    def _ema(series: pd.Series, length: int) -> pd.Series:
+        return series.ewm(span=length, adjust=False).mean()
+
+    @staticmethod
+    def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(alpha=1 / length, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1 / length, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, pd.NA)
+        return 100 - (100 / (1 + rs))
+
+    @staticmethod
+    def _macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+        macd_line = series.ewm(span=fast, adjust=False).mean() - series.ewm(span=slow, adjust=False).mean()
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        hist = macd_line - signal_line
+        return pd.DataFrame({"macd": macd_line, "signal": signal_line, "hist": hist})
+
+    @staticmethod
+    def _stoch(high: pd.Series, low: pd.Series, close: pd.Series, k: int = 14, d: int = 3) -> pd.DataFrame:
+        lowest_low = low.rolling(k).min()
+        highest_high = high.rolling(k).max()
+        k_pct = ((close - lowest_low) / (highest_high - lowest_low).replace(0, pd.NA)) * 100
+        d_pct = k_pct.rolling(d).mean()
+        return pd.DataFrame({"k": k_pct, "d": d_pct})
+
+    @staticmethod
+    def _bbands(close: pd.Series, length: int = 20, std_mult: float = 2.0) -> pd.DataFrame:
+        mid = close.rolling(length).mean()
+        std = close.rolling(length).std()
+        upper = mid + (std_mult * std)
+        lower = mid - (std_mult * std)
+        return pd.DataFrame({"upper": upper, "mid": mid, "lower": lower})
+
+    @staticmethod
+    def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        return tr.ewm(alpha=1 / length, adjust=False).mean()
+
+    @staticmethod
+    def _vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
+        typical_price = (high + low + close) / 3
+        pv = typical_price * volume
+        return pv.cumsum() / volume.cumsum().replace(0, pd.NA)
+
+    @staticmethod
+    def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+        atr = IndicatorsEngine._atr(high, low, close, length)
+        hl2 = (high + low) / 2
+        upperband = hl2 + multiplier * atr
+        lowerband = hl2 - multiplier * atr
+
+        final_upper = upperband.copy()
+        final_lower = lowerband.copy()
+        direction = pd.Series(1, index=close.index, dtype="int64")
+        st = pd.Series(index=close.index, dtype="float64")
+
+        for i in range(1, len(close)):
+            if close.iloc[i - 1] <= final_upper.iloc[i - 1]:
+                final_upper.iloc[i] = min(upperband.iloc[i], final_upper.iloc[i - 1])
+            if close.iloc[i - 1] >= final_lower.iloc[i - 1]:
+                final_lower.iloc[i] = max(lowerband.iloc[i], final_lower.iloc[i - 1])
+
+            if close.iloc[i] > final_upper.iloc[i - 1]:
+                direction.iloc[i] = 1
+            elif close.iloc[i] < final_lower.iloc[i - 1]:
+                direction.iloc[i] = -1
+            else:
+                direction.iloc[i] = direction.iloc[i - 1]
+
+            st.iloc[i] = final_lower.iloc[i] if direction.iloc[i] == 1 else final_upper.iloc[i]
+
+        return pd.DataFrame({"supertrend": st, "direction": direction})
+
     def compute(self, df: pd.DataFrame, symbol: str = "", timeframe: str = "day") -> IndicatorBundle:
         """
         Compute all indicators from a OHLCV DataFrame.
@@ -124,13 +204,13 @@ class IndicatorsEngine:
         close = df["close"]
 
         if len(df) >= 9:
-            b.ema_9 = float(ta.ema(close, length=9).iloc[-1])
+            b.ema_9 = float(self._ema(close, length=9).iloc[-1])
         if len(df) >= 21:
-            b.ema_21 = float(ta.ema(close, length=21).iloc[-1])
+            b.ema_21 = float(self._ema(close, length=21).iloc[-1])
         if len(df) >= 50:
-            b.ema_50 = float(ta.ema(close, length=50).iloc[-1])
+            b.ema_50 = float(self._ema(close, length=50).iloc[-1])
         if len(df) >= 200:
-            b.ema_200 = float(ta.ema(close, length=200).iloc[-1])
+            b.ema_200 = float(self._ema(close, length=200).iloc[-1])
 
         # Determine trend
         ltp = float(close.iloc[-1])
@@ -150,22 +230,22 @@ class IndicatorsEngine:
         low = df["low"]
 
         # RSI
-        rsi_series = ta.rsi(close, length=14)
+        rsi_series = self._rsi(close, length=14)
         if rsi_series is not None and not rsi_series.empty:
             b.rsi = float(rsi_series.iloc[-1])
 
         # MACD
-        macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+        macd_df = self._macd(close, fast=12, slow=26, signal=9)
         if macd_df is not None and not macd_df.empty:
-            b.macd = float(macd_df["MACD_12_26_9"].iloc[-1])
-            b.macd_signal = float(macd_df["MACDs_12_26_9"].iloc[-1])
-            b.macd_histogram = float(macd_df["MACDh_12_26_9"].iloc[-1])
+            b.macd = float(macd_df["macd"].iloc[-1])
+            b.macd_signal = float(macd_df["signal"].iloc[-1])
+            b.macd_histogram = float(macd_df["hist"].iloc[-1])
 
         # Stochastic
-        stoch_df = ta.stoch(high, low, close, k=14, d=3)
+        stoch_df = self._stoch(high, low, close, k=14, d=3)
         if stoch_df is not None and not stoch_df.empty:
-            b.stoch_k = float(stoch_df.iloc[:, 0].iloc[-1])
-            b.stoch_d = float(stoch_df.iloc[:, 1].iloc[-1])
+            b.stoch_k = float(stoch_df["k"].iloc[-1])
+            b.stoch_d = float(stoch_df["d"].iloc[-1])
 
     # ── Volatility ───────────────────────────────────────────────────────────
 
@@ -175,18 +255,18 @@ class IndicatorsEngine:
         low = df["low"]
 
         # Bollinger Bands
-        bb_df = ta.bbands(close, length=20, std=2.0)
+        bb_df = self._bbands(close, length=20, std_mult=2.0)
         if bb_df is not None and not bb_df.empty:
-            b.bb_upper = float(bb_df["BBU_20_2.0"].iloc[-1])
-            b.bb_middle = float(bb_df["BBM_20_2.0"].iloc[-1])
-            b.bb_lower = float(bb_df["BBL_20_2.0"].iloc[-1])
+            b.bb_upper = float(bb_df["upper"].iloc[-1])
+            b.bb_middle = float(bb_df["mid"].iloc[-1])
+            b.bb_lower = float(bb_df["lower"].iloc[-1])
             b.bb_width = float(
-                (bb_df["BBU_20_2.0"].iloc[-1] - bb_df["BBL_20_2.0"].iloc[-1])
-                / bb_df["BBM_20_2.0"].iloc[-1] * 100
+                (bb_df["upper"].iloc[-1] - bb_df["lower"].iloc[-1])
+                / bb_df["mid"].iloc[-1] * 100
             )
 
         # ATR
-        atr_series = ta.atr(high, low, close, length=14)
+        atr_series = self._atr(high, low, close, length=14)
         if atr_series is not None and not atr_series.empty:
             b.atr = float(atr_series.iloc[-1])
             b.atr_pct = float(b.atr / close.iloc[-1] * 100)
@@ -202,7 +282,7 @@ class IndicatorsEngine:
 
         # VWAP (intraday use only, but compute for reference)
         try:
-            vwap_series = ta.vwap(df["high"], df["low"], close, volume)
+            vwap_series = self._vwap(df["high"], df["low"], close, volume)
             if vwap_series is not None and not vwap_series.empty:
                 b.vwap = float(vwap_series.iloc[-1])
         except Exception:
@@ -220,14 +300,10 @@ class IndicatorsEngine:
         if len(df) < 14:
             return
         try:
-            st_df = ta.supertrend(df["high"], df["low"], df["close"], length=10, multiplier=3.0)
+            st_df = self._supertrend(df["high"], df["low"], df["close"], length=10, multiplier=3.0)
             if st_df is not None and not st_df.empty:
-                st_col = [c for c in st_df.columns if "SUPERT_" in c and "d" not in c.lower()]
-                dir_col = [c for c in st_df.columns if "SUPERTd_" in c]
-                if st_col:
-                    b.supertrend = float(st_df[st_col[0]].iloc[-1])
-                if dir_col:
-                    b.supertrend_direction = int(st_df[dir_col[0]].iloc[-1])
+                b.supertrend = float(st_df["supertrend"].iloc[-1])
+                b.supertrend_direction = int(st_df["direction"].iloc[-1])
         except Exception as e:
             logger.debug(f"Supertrend error: {e}")
 
@@ -252,58 +328,6 @@ class IndicatorsEngine:
         """Aggregate indicators into directional signals."""
         score = 0
         max_score = 0
-
-        # RSI signals
-        if b.rsi is not None:
-            max_score += 2
-            if b.rsi < 30:
-                b.rsi_signal = "oversold"
-                score += 2
-            elif b.rsi > 70:
-                b.rsi_signal = "overbought"
-                score -= 2
-            elif b.rsi > 55:
-                score += 1
-            elif b.rsi < 45:
-                score -= 1
-
-        # MACD signals
-        if b.macd is not None and b.macd_signal is not None:
-            max_score += 2
-            if b.macd > b.macd_signal and b.macd_histogram and b.macd_histogram > 0:
-                b.macd_signal_str = "bullish"
-                score += 2
-            elif b.macd < b.macd_signal:
-                b.macd_signal_str = "bearish"
-                score -= 2
-
-        # Trend signals
-        if b.trend == "bullish":
-            max_score += 2
-            score += 2
-        elif b.trend == "bearish":
-            max_score += 2
-            score -= 2
-
-        # Supertrend
-        if b.supertrend_direction is not None:
-            max_score += 1
-            score += b.supertrend_direction  # +1 or -1
-
-        # Bollinger Band signals
-        if b.ltp and b.bb_upper and b.bb_lower and b.bb_middle:
-            max_score += 1
-            if b.ltp <= b.bb_lower:
-                b.bb_signal = "lower_touch"
-                score += 1
-            elif b.ltp >= b.bb_upper:
-                b.bb_signal = "upper_touch"
-                score -= 1
-            elif b.bb_width and b.bb_width < 2.0:
-                b.bb_signal = "squeeze"
-
-        # Overall score
-        if max_score == 0:
             b.overall_signal = "neutral"
             return
 
