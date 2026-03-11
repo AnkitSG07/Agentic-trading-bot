@@ -10,6 +10,9 @@ from decimal import Decimal
 from typing import AsyncGenerator, Optional
 import uuid
 
+import asyncpg
+from urllib.parse import urlparse
+
 from sqlalchemy import text, select, update, and_, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -40,6 +43,27 @@ async def init_db(database_url: str) -> None:
     else:
         async_url = database_url
 
+    # ─── AUTO-CREATE DATABASE LOGIC ──────────────────────────────────────────
+    try:
+        # Parse the URL to get the target database name
+        parsed = urlparse(async_url.replace("postgresql+asyncpg://", "postgresql://"))
+        db_name = parsed.path.lstrip('/')
+        
+        # Connect to the default 'postgres' database to check/create
+        default_url = async_url.replace(f"/{db_name}", "/postgres").replace("postgresql+asyncpg://", "postgresql://")
+        
+        conn = await asyncpg.connect(default_url)
+        exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", db_name)
+        
+        if not exists:
+            logger.info(f"🛠️ Database '{db_name}' not found. Creating it automatically...")
+            await conn.execute(f'CREATE DATABASE "{db_name}"')
+            logger.info(f"✅ Database '{db_name}' created successfully!")
+        
+        await conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Auto-create DB check skipped (might already exist or lack permissions): {e}")
+    # ─────────────────────────────────────────────────────────────────────────
 
     _engine = create_async_engine(
         async_url,
@@ -53,28 +77,34 @@ async def init_db(database_url: str) -> None:
         _engine, class_=AsyncSession, expire_on_commit=False
     )
 
-    async with _engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # Create TimescaleDB hypertable for tick_data if not exists
-        await conn.execute(text("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM timescaledb_information.hypertables
-                    WHERE hypertable_name = 'tick_data'
-                ) THEN
-                    PERFORM create_hypertable('tick_data', 'timestamp',
-                        if_not_exists => TRUE,
-                        chunk_time_interval => INTERVAL '1 day'
-                    );
-                END IF;
-            EXCEPTION WHEN others THEN
-                -- TimescaleDB not available, continue without hypertable
-                NULL;
-            END $$;
-        """))
+    try:
+        async with _engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            # Create TimescaleDB hypertable for tick_data if not exists
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM timescaledb_information.hypertables
+                        WHERE hypertable_name = 'tick_data'
+                    ) THEN
+                        PERFORM create_hypertable('tick_data', 'timestamp',
+                            if_not_exists => TRUE,
+                            chunk_time_interval => INTERVAL '1 day'
+                        );
+                    END IF;
+                EXCEPTION WHEN others THEN
+                    -- TimescaleDB not available, continue without hypertable
+                    NULL;
+                END $$;
+            """))
 
-    logger.info("✅ Database initialized")
+        logger.info("✅ Database initialized")
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}")
+        _engine = None
+        _session_factory = None
+        raise e
 
 
 async def close_db() -> None:
