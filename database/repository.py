@@ -32,8 +32,14 @@ async def init_db(database_url: str) -> None:
     """Initialize async database engine and create all tables."""
     global _engine, _session_factory
 
-    # Convert psycopg2 URL to asyncpg
-    async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
+    # Convert sync postgres URLs to asyncpg (support postgres:// and postgresql://)
+    if database_url.startswith("postgres://"):
+        async_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif database_url.startswith("postgresql://"):
+        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    else:
+        async_url = database_url
+
 
     _engine = create_async_engine(
         async_url,
