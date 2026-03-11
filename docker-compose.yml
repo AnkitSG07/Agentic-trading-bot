@@ -1,0 +1,115 @@
+## ============================================================
+## AgentTrader India - Docker Compose
+## Services: Trading Bot + API + Redis + PostgreSQL + Dashboard
+## ============================================================
+
+version: "3.9"
+
+services:
+
+  # ── Core Trading Bot + API ───────────────────────────────────
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agenttrader-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"       # FastAPI
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+    networks:
+      - trading-net
+    command: python main.py --mode paper
+
+  # ── React Dashboard ──────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile.dashboard
+    container_name: agenttrader-dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    networks:
+      - trading-net
+    depends_on:
+      - trading-bot
+
+  # ── PostgreSQL (TimescaleDB) ─────────────────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: agenttrader-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trading_bot
+      POSTGRES_USER: ${POSTGRES_USER:-trader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trader} -d trading_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trading-net
+
+  # ── Redis (Tick Cache + Celery) ──────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: agenttrader-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trading-net
+
+  # ── Celery Worker (Scheduled Tasks) ─────────────────────────
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agenttrader-celery
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - trading-net
+    command: celery -A core.tasks worker --loglevel=info --concurrency=2
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  trading-net:
+    driver: bridge
