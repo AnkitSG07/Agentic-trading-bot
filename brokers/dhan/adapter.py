@@ -435,7 +435,7 @@ class DhanBroker(BaseBroker):
     async def subscribe_ticks(self, instruments: list[Instrument], callback: Callable) -> None:
         """Connect Dhan MarketFeed WebSocket."""
         subscription_list = [
-            (inst.exchange.value, int(inst.instrument_token), marketfeed.Quote)
+            (inst.exchange.value, str(inst.instrument_token), marketfeed.Quote)
             for inst in instruments
             if inst.instrument_token
         ]
@@ -446,18 +446,23 @@ class DhanBroker(BaseBroker):
                 self._tick_callbacks[key] = []
             self._tick_callbacks[key].append(callback)
 
-        async def on_message(inst_token, data):
-            cbs = self._tick_callbacks.get(str(inst_token), [])
-            for cb in cbs:
-                await cb(data)
+        async def on_message(ws, message):
+            if isinstance(message, dict):
+                inst_token = str(message.get("security_id", ""))
+                cbs = self._tick_callbacks.get(inst_token, [])
+                for cb in cbs:
+                    await cb(message)
 
         self._ws_feed = marketfeed.DhanFeed(
             self.client_id,
             self.access_token,
             subscription_list,
-            version="v2",
-            on_message=on_message,
+            version="v2"
         )
+        
+        # Explicitly assign the callback instead of using the constructor parameter
+        self._ws_feed.on_message = on_message
+        
         asyncio.create_task(self._ws_feed.connect())
         logger.info(f"✅ Dhan WebSocket subscribed to {len(instruments)} instruments")
 
