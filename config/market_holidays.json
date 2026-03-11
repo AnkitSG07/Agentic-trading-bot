@@ -1,0 +1,9 @@
+{
+  "exchange": "NSE",
+  "timezone": "Asia/Kolkata",
+  "holidays": [
+    {"date": "2025-01-26", "name": "Republic Day"},
+    {"date": "2025-08-15", "name": "Independence Day"},
+    {"date": "2025-10-02", "name": "Gandhi Jayanti"}
+  ]
+}
