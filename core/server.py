@@ -28,6 +28,28 @@ logger = logging.getLogger("api")
 ws_clients: list[WebSocket] = []
 
 
+def _get_allowed_origins() -> list[str]:
+    """Build CORS allowlist from env vars with safe local defaults."""
+    defaults = {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    }
+
+    configured = {
+        o.strip().rstrip("/")
+        for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
+        if o.strip()
+    }
+
+    frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+    if frontend_url:
+        configured.add(frontend_url)
+
+    return sorted(defaults | configured)
+
+
 # ─── LIFESPAN ────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -49,7 +71,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_get_allowed_origins(),
+    # Render deployments usually serve frontend + backend on different
+    # subdomains, so keep a safe default regex while still allowing strict
+    # per-origin overrides via CORS_ALLOW_ORIGINS / FRONTEND_URL.
+    allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.onrender\.com"),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
