@@ -1,0 +1,585 @@
+"""
+FastAPI Backend Server - Fully Wired
+Uses engine singleton (get_engine()) — no global engine variable.
+All endpoints pull live data from the running engine and brokers.
+"""
+
+import asyncio
+import json
+import logging
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime
+from decimal import Decimal
+from typing import Optional
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from core.engine import get_engine, set_engine, TradingEngine
+from database.repository import (
+    AgentDecisionRepository, DailySummaryRepository,
+    PositionRepository, RiskEventRepository, TradeRepository,
+)
+
+logger = logging.getLogger("api")
+ws_clients: list[WebSocket] = []
+
+
+# ─── LIFESPAN ────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🌐 API server online")
+    yield
+    logger.info("🌐 API server shutting down")
+    engine = get_engine()
+    if engine and engine._running:
+        await engine.stop()
+
+
+app = FastAPI(
+    title="AgentTrader India",
+    description="Agentic Trading Bot — Zerodha + Dhan + Claude AI",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ─── MODELS ──────────────────────────────────────────────────────────────────
+
+class ManualOrderRequest(BaseModel):
+    symbol: str
+    exchange: str = "NSE"
+    side: str
+    quantity: int
+    order_type: str = "MARKET"
+    price: Optional[float] = None
+    product: str = "MIS"
+    stop_loss: Optional[float] = None
+
+class KillSwitchResetRequest(BaseModel):
+    override_code: str
+
+class EngineStartRequest(BaseModel):
+    mode: str = "paper"
+
+
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+def require_engine():
+    engine = get_engine()
+    if not engine:
+        raise HTTPException(503, "Engine not running. POST /api/engine/start first.")
+    return engine
+
+def require_broker():
+    engine = require_engine()
+    if not engine.primary_broker:
+        raise HTTPException(503, "No broker connected.")
+    return engine.primary_broker
+
+
+# ─── HEALTH ──────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    engine = get_engine()
+    return {
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "engine_running": engine._running if engine else False,
+        "broker": engine._primary_broker_name if engine else None,
+        "kill_switch": engine.risk._kill_switch if engine else False,
+    }
+
+
+# ─── ENGINE CONTROL ──────────────────────────────────────────────────────────
+
+@app.post("/api/engine/start")
+async def start_engine(req: EngineStartRequest, background_tasks: BackgroundTasks):
+    """Start the trading engine in the background."""
+    engine = get_engine()
+    if engine and engine._running:
+        raise HTTPException(400, "Engine already running")
+
+    # Load config and create engine
+    import yaml
+    from pathlib import Path
+
+    config_path = Path(__file__).parent.parent / "config" / "config.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    # Override mode
+    if req.mode == "paper":
+        config["app"]["environment"] = "paper"
+
+    new_engine = TradingEngine(config)
+
+    async def _run():
+        try:
+            await new_engine.start()
+        except Exception as e:
+            logger.error(f"Engine crashed: {e}", exc_info=True)
+            set_engine(None)
+
+    background_tasks.add_task(_run)
+    return {"status": "starting", "mode": req.mode}
+
+
+@app.post("/api/engine/stop")
+async def stop_engine():
+    engine = get_engine()
+    if not engine or not engine._running:
+        raise HTTPException(400, "Engine not running")
+    asyncio.create_task(engine.stop())
+    return {"status": "stopping"}
+
+
+@app.get("/api/engine/status")
+async def engine_status():
+    engine = get_engine()
+    if not engine:
+        return {"running": False, "broker": None, "positions": 0}
+    return {
+        "running": engine._running,
+        "broker": engine._primary_broker_name,
+        "positions": len(engine.tracker.get_all()),
+        "kill_switch": engine.risk._kill_switch,
+        "trading_allowed": engine.risk.is_trading_allowed,
+    }
+
+
+# ─── PORTFOLIO ───────────────────────────────────────────────────────────────
+
+@app.get("/api/portfolio/positions")
+async def get_positions():
+    broker = require_broker()
+    try:
+        positions = await broker.get_positions()
+        return {
+            "positions": [
+                {
+                    "symbol": p.instrument.symbol,
+                    "exchange": p.instrument.exchange.value,
+                    "side": p.side.value,
+                    "quantity": p.quantity,
+                    "average_price": float(p.average_price),
+                    "ltp": float(p.ltp),
+                    "pnl": float(p.pnl),
+                    "pnl_pct": round(p.pnl_pct, 2),
+                    "product": p.product.value,
+                    "broker": p.broker,
+                }
+                for p in positions
+            ],
+            "total_unrealized_pnl": sum(float(p.pnl) for p in positions),
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/portfolio/holdings")
+async def get_holdings():
+    broker = require_broker()
+    try:
+        holdings = await broker.get_holdings()
+        return {
+            "holdings": [
+                {
+                    "symbol": h.instrument.symbol,
+                    "quantity": h.quantity,
+                    "average_price": float(h.average_price),
+                    "ltp": float(h.ltp),
+                    "pnl": float(h.pnl),
+                    "pnl_pct": round(float(h.pnl) / (float(h.average_price) * h.quantity) * 100, 2) if h.average_price and h.quantity else 0,
+                }
+                for h in holdings
+            ],
+            "total_pnl": sum(float(h.pnl) for h in holdings),
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/portfolio/funds")
+async def get_funds():
+    broker = require_broker()
+    try:
+        f = await broker.get_funds()
+        return {
+            "available_cash": float(f.available_cash),
+            "used_margin": float(f.used_margin),
+            "total_balance": float(f.total_balance),
+            "unrealised_pnl": float(f.unrealised_pnl),
+            "realised_pnl": float(f.realised_pnl),
+            "utilization_pct": round(float(f.used_margin) / float(f.total_balance) * 100, 1) if f.total_balance else 0,
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ─── ORDERS ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/orders")
+async def get_orders(status: Optional[str] = None):
+    broker = require_broker()
+    try:
+        orders = await broker.get_order_history()
+        result = [
+            {
+                "order_id": o.order_id,
+                "symbol": o.instrument.symbol,
+                "exchange": o.instrument.exchange.value,
+                "side": o.side.value,
+                "quantity": o.quantity,
+                "filled_quantity": o.filled_quantity,
+                "order_type": o.order_type.value,
+                "price": float(o.price) if o.price else None,
+                "trigger_price": float(o.trigger_price) if o.trigger_price else None,
+                "average_price": float(o.average_price) if o.average_price else None,
+                "status": o.status.value,
+                "tag": o.tag,
+                "placed_at": o.placed_at.isoformat(),
+                "rejection_reason": o.rejection_reason,
+            }
+            for o in orders
+        ]
+        if status:
+            result = [o for o in result if o["status"] == status.upper()]
+        return {"orders": result, "total": len(result)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/orders/manual")
+async def place_manual_order(req: ManualOrderRequest):
+    engine = require_engine()
+    broker = require_broker()
+    try:
+        from brokers.base import Exchange as Ex, Instrument, InstrumentType, OrderSide, OrderType, ProductType
+
+        inst = engine._instrument_cache.get(req.symbol) or Instrument(
+            req.symbol, Ex(req.exchange), InstrumentType.EQ
+        )
+        order = await broker.place_order(
+            instrument=inst,
+            side=OrderSide(req.side),
+            quantity=req.quantity,
+            order_type=OrderType(req.order_type),
+            product=ProductType(req.product),
+            price=Decimal(str(req.price)) if req.price else None,
+            tag="MANUAL",
+        )
+
+        # Place SL if provided
+        sl_order_id = None
+        if req.stop_loss:
+            exit_side = OrderSide.SELL if req.side == "BUY" else OrderSide.BUY
+            sl_ord = await broker.place_order(
+                instrument=inst, side=exit_side, quantity=req.quantity,
+                order_type=OrderType.SL_M, product=ProductType(req.product),
+                trigger_price=Decimal(str(req.stop_loss)), tag="MANUAL_SL",
+            )
+            sl_order_id = sl_ord.order_id
+
+        return {
+            "status": "placed",
+            "order_id": order.order_id,
+            "sl_order_id": sl_order_id,
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.delete("/api/orders/{order_id}")
+async def cancel_order(order_id: str):
+    broker = require_broker()
+    success = await broker.cancel_order(order_id)
+    return {"status": "cancelled" if success else "error"}
+
+
+@app.post("/api/orders/{order_id}/squareoff")
+async def square_off_order(order_id: str):
+    """Square off a specific position by symbol."""
+    broker = require_broker()
+    positions = await broker.get_positions()
+    target = next((p for p in positions if p.instrument.symbol == order_id or
+                   str(order_id) in str(p.instrument.symbol)), None)
+    if not target:
+        raise HTTPException(404, f"No open position for {order_id}")
+    order = await broker.square_off_position(target)
+    return {"status": "squared_off", "order_id": order.order_id}
+
+
+# ─── RISK ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/risk/summary")
+async def risk_summary():
+    engine = require_engine()
+    return engine.risk.get_daily_summary()
+
+
+@app.get("/api/risk/events")
+async def risk_events(limit: int = 50):
+    events = await RiskEventRepository.get_recent(limit)
+    return {
+        "events": [
+            {
+                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                "type": e.event_type,
+                "severity": e.severity,
+                "symbol": e.symbol,
+                "description": e.description,
+                "pnl": float(e.pnl_at_event) if e.pnl_at_event else None,
+                "drawdown": e.drawdown_at_event,
+            }
+            for e in events
+        ]
+    }
+
+
+@app.post("/api/risk/kill-switch/reset")
+async def reset_kill_switch(req: KillSwitchResetRequest):
+    engine = require_engine()
+    success = engine.risk.reset_kill_switch(req.override_code)
+    if not success:
+        raise HTTPException(403, "Invalid override code")
+    return {"status": "reset"}
+
+
+# ─── MARKET DATA ─────────────────────────────────────────────────────────────
+
+@app.get("/api/market/indices")
+async def get_indices():
+    engine = require_engine()
+    return await engine.nse_feed.get_index_data()
+
+
+@app.get("/api/market/quote/{symbol}")
+async def get_quote(symbol: str, exchange: str = "NSE"):
+    engine = require_engine()
+    try:
+        inst = await engine._get_instrument(symbol, exchange)
+        quotes = await engine.primary_broker.get_quote([inst])
+        if symbol not in quotes:
+            raise HTTPException(404, f"No quote for {symbol}")
+        q = quotes[symbol]
+        return {
+            "symbol": symbol, "ltp": float(q.ltp),
+            "open": float(q.open), "high": float(q.high),
+            "low": float(q.low), "close": float(q.close),
+            "volume": q.volume, "oi": q.oi,
+            "bid": float(q.bid), "ask": float(q.ask),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/market/options/{symbol}")
+async def get_option_chain(symbol: str):
+    engine = require_engine()
+    chain = await engine.nse_feed.get_option_chain(symbol)
+    return chain
+
+
+@app.get("/api/market/pcr/{symbol}")
+async def get_pcr(symbol: str = "NIFTY"):
+    engine = require_engine()
+    pcr = await engine.nse_feed.get_pcr(symbol)
+    return {"symbol": symbol, "pcr": pcr}
+
+
+# ─── AGENT ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/agent/decisions")
+async def agent_decisions(limit: int = 20):
+    decisions = await AgentDecisionRepository.get_recent(limit)
+    return {
+        "decisions": [
+            {
+                "timestamp": d.timestamp.isoformat(),
+                "market_regime": d.market_regime,
+                "signals_generated": d.signals_generated,
+                "signals_executed": d.signals_executed,
+                "signals_rejected": d.signals_rejected,
+                "nifty": d.nifty_ltp,
+                "vix": d.india_vix,
+                "pcr": d.pcr,
+            }
+            for d in decisions
+        ]
+    }
+
+
+@app.get("/api/agent/in-memory-decisions")
+async def agent_in_memory(limit: int = 20):
+    """Quick access to agent decisions stored in memory (no DB needed)."""
+    engine = require_engine()
+    return {"decisions": engine.agent.decision_history[-limit:]}
+
+
+# ─── ANALYTICS ───────────────────────────────────────────────────────────────
+
+@app.get("/api/analytics/performance")
+async def performance(days: int = 30):
+    stats = await PositionRepository.get_performance_stats(days)
+    return stats
+
+
+@app.get("/api/analytics/daily-history")
+async def daily_history(days: int = 30):
+    history = await DailySummaryRepository.get_history(days)
+    return {
+        "history": [
+            {
+                "date": d.date,
+                "net_pnl": float(d.net_pnl or 0),
+                "pnl_pct": d.pnl_pct or 0,
+                "total_trades": d.total_trades,
+                "win_rate": d.win_rate,
+                "drawdown": d.max_drawdown_pct,
+                "kill_switch": d.kill_switch_triggered,
+            }
+            for d in history
+        ]
+    }
+
+
+@app.get("/api/analytics/trade-history")
+async def trade_history(symbol: Optional[str] = None, days: int = 30):
+    positions = await PositionRepository.get_history(days, symbol)
+    return {
+        "trades": [
+            {
+                "symbol": p.symbol,
+                "side": p.side,
+                "quantity": p.quantity,
+                "entry_price": float(p.entry_price),
+                "exit_price": float(p.exit_price) if p.exit_price else None,
+                "realized_pnl": float(p.realized_pnl or 0),
+                "net_pnl": float(p.net_pnl or 0),
+                "strategy": p.strategy,
+                "exit_reason": p.exit_reason,
+                "opened_at": p.opened_at.isoformat(),
+                "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+            }
+            for p in positions
+        ]
+    }
+
+
+# ─── WEBSOCKET ───────────────────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    ws_clients.append(websocket)
+    logger.info(f"WS client connected ({len(ws_clients)} total)")
+
+    try:
+        while True:
+            engine = get_engine()
+            if engine and engine.primary_broker and engine._running:
+                try:
+                    positions = await engine.primary_broker.get_positions()
+                    funds = await engine.primary_broker.get_funds()
+                    risk = engine.risk.get_daily_summary()
+                    index_data = await engine.nse_feed.get_index_data()
+
+                    payload = {
+                        "type": "live_update",
+                        "timestamp": datetime.now().isoformat(),
+                        "indices": index_data,
+                        "funds": {
+                            "available": float(funds.available_cash),
+                            "used_margin": float(funds.used_margin),
+                            "total": float(funds.total_balance),
+                        },
+                        "pnl": {
+                            "realized": risk["realized_pnl"],
+                            "unrealized": risk["unrealized_pnl"],
+                            "total": risk["total_pnl"],
+                            "pct": risk["daily_pnl_pct"],
+                        },
+                        "positions": [
+                            {
+                                "symbol": p.instrument.symbol,
+                                "side": p.side.value,
+                                "qty": p.quantity,
+                                "avg": float(p.average_price),
+                                "ltp": float(p.ltp),
+                                "pnl": float(p.pnl),
+                            }
+                            for p in positions
+                        ],
+                        "risk": {
+                            "kill_switch": risk["kill_switch"],
+                            "drawdown_pct": risk["drawdown_pct"],
+                            "daily_pnl_pct": risk["daily_pnl_pct"],
+                            "trading_allowed": risk["trading_allowed"],
+                            "trades_today": risk["total_trades"],
+                            "win_rate": risk["win_rate"],
+                        },
+                        "ticks": {
+                            sym: data.get("last_price") or data.get("ltp")
+                            for sym, data in list(engine._tick_data.items())[:15]
+                        },
+                        "agent_decisions": engine.agent.decision_history[-3:],
+                        "engine_running": engine._running,
+                    }
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as e:
+                    logger.debug(f"WS payload error: {e}")
+            else:
+                await websocket.send_text(json.dumps({
+                    "type": "status",
+                    "engine_running": False,
+                    "timestamp": datetime.now().isoformat(),
+                }))
+
+            await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
+        ws_clients.remove(websocket)
+        logger.info(f"WS disconnected ({len(ws_clients)} remaining)")
+
+
+async def broadcast(message: dict) -> None:
+    text = json.dumps(message)
+    dead = []
+    for c in ws_clients:
+        try:
+            await c.send_text(text)
+        except Exception:
+            dead.append(c)
+    for c in dead:
+        ws_clients.remove(c)
+
+
+# ─── ENTRYPOINT ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
+    )
+    uvicorn.run(
+        "core.server:app",
+        host="0.0.0.0",
+        port=int(os.getenv("API_PORT", 8000)),
+        reload=False,
+    )
