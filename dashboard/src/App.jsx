@@ -11,14 +11,17 @@ import {
 } from "lucide-react";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-// In dev these fall back to localhost.
-// On Render/Vercel set VITE_API_BASE and VITE_WS_URL at build time.
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
-// Derive WS URL from API_BASE automatically when not set explicitly:
-// http://host → ws://host,  https://host → wss://host
-const WS_URL =
-  import.meta.env.VITE_WS_URL ??
+// Automatically detect environment
+const isProduction = window.location.hostname !== "localhost";
+const API_BASE = import.meta.env.VITE_API_BASE ?? 
+  (isProduction 
+    ? "https://agentic-trading-bot-188e.onrender.com" 
+    : "http://localhost:8000");
+
+const WS_URL = import.meta.env.VITE_WS_URL ?? 
   API_BASE.replace(/^http/, "ws") + "/ws";
+
+console.log("🔧 API Configuration:", { API_BASE, WS_URL, isProduction });
 
 // ─── HOOKS ───────────────────────────────────────────────────────────────────
 
@@ -30,12 +33,24 @@ function useAPI(endpoint, interval = null) {
   const fetch_ = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}${endpoint}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // Handle 503 gracefully (engine not started)
+        if (res.status === 503) {
+          console.warn(`⚠️ Engine not started for ${endpoint}`);
+          setData(null);
+          setError(null);
+          setLoading(false);
+          return;
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
       const json = await res.json();
       setData(json);
       setError(null);
     } catch (e) {
+      console.error(`❌ API error ${endpoint}:`, e.message);
       setError(e.message);
+      setData(null);
     } finally {
       setLoading(false);
     }
@@ -61,10 +76,12 @@ function useWebSocket() {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
+    console.log("🔌 Connecting to WebSocket:", WS_URL);
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      console.log("✅ WebSocket connected");
       setConnected(true);
       clearInterval(reconnectRef.current);
     };
@@ -73,15 +90,19 @@ function useWebSocket() {
       try {
         const data = JSON.parse(e.data);
         setLiveData(data);
-      } catch {}
+      } catch (err) {
+        console.error("WebSocket parse error:", err);
+      }
     };
 
     ws.onclose = () => {
+      console.log("❌ WebSocket disconnected, reconnecting...");
       setConnected(false);
       reconnectRef.current = setTimeout(connect, 3000);
     };
 
-    ws.onerror = () => {
+    ws.onerror = (err) => {
+      console.error("WebSocket error:", err);
       ws.close();
     };
   }, []);
@@ -201,28 +222,42 @@ export default function TradingDashboard() {
         body: JSON.stringify({ mode: "paper" }),
       });
       const d = await res.json();
-      if (d.status === "starting") setEngineRunning(true);
+      console.log("Engine start response:", d);
+      if (d.status === "starting") {
+        setEngineRunning(true);
+        alert("✅ Engine starting in paper trading mode!");
+      }
     } catch (e) {
-      console.error(e);
+      console.error("Start engine error:", e);
+      alert("❌ Failed to start engine: " + e.message);
     } finally {
       setTimeout(() => setStartingEngine(false), 3000);
     }
   };
 
   const handleStopEngine = async () => {
-    await fetch(`${API_BASE}/api/engine/stop`, { method: "POST" });
+    try {
+      await fetch(`${API_BASE}/api/engine/stop`, { method: "POST" });
+      alert("Engine stopping...");
+    } catch (e) {
+      console.error("Stop engine error:", e);
+    }
   };
 
   const handleResetKillSwitch = async () => {
     const code = prompt("Enter admin override code:");
     if (!code) return;
-    const res = await fetch(`${API_BASE}/api/risk/kill-switch/reset`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ override_code: code }),
-    });
-    const d = await res.json();
-    alert(d.status === "reset" ? "Kill switch reset ✅" : "Invalid code ❌");
+    try {
+      const res = await fetch(`${API_BASE}/api/risk/kill-switch/reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ override_code: code }),
+      });
+      const d = await res.json();
+      alert(d.status === "reset" ? "Kill switch reset ✅" : "Invalid code ❌");
+    } catch (e) {
+      alert("Error: " + e.message);
+    }
   };
 
   // Extract live values
@@ -273,7 +308,7 @@ export default function TradingDashboard() {
               { label: "NIFTY 50", val: indices.nifty, prev: 22000 },
               { label: "BANK NIFTY", val: indices.banknifty, prev: 47000 },
               { label: "INDIA VIX", val: indices.vix, prev: 14, warn: (indices.vix || 0) > 18 },
-              { label: "PCR", val: liveData?.agent_decisions?.[0]?.pcr || null },
+              { label: "PCR", val: agentDecisions[0]?.pcr || null },
             ].map(item => {
               const chg = item.prev ? ((item.val || item.prev) - item.prev) / item.prev * 100 : 0;
               return (
@@ -340,6 +375,19 @@ export default function TradingDashboard() {
             >
               Reset
             </button>
+          </div>
+        )}
+
+        {/* Engine Not Running Banner */}
+        {!engineRunning && (
+          <div style={{
+            background: "#0ea5e912", border: "1px solid #0ea5e9",
+            borderRadius: 10, padding: "12px 20px", marginBottom: 16,
+            display: "flex", alignItems: "center", gap: 12,
+          }}>
+            <Power size={16} color="#0ea5e9" />
+            <span style={{ color: "#0ea5e9", fontWeight: 700 }}>Engine not running</span>
+            <span style={{ color: "#94a3b8", fontSize: 12 }}>Click "START ENGINE" to begin trading</span>
           </div>
         )}
 
@@ -496,7 +544,7 @@ export default function TradingDashboard() {
             {activeTab === "positions" && (
               positions.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
-                  No open positions
+                  {engineRunning ? "No open positions" : "Start the engine to see positions"}
                 </div>
               ) : (
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -529,7 +577,9 @@ export default function TradingDashboard() {
             {/* ORDERS */}
             {activeTab === "orders" && (
               orders.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>No orders today</div>
+                <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
+                  {engineRunning ? "No orders today" : "Start the engine to see orders"}
+                </div>
               ) : (
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
@@ -614,7 +664,7 @@ export default function TradingDashboard() {
                 <div style={{ fontWeight: 600, fontSize: 12, color: "#64748b", marginBottom: 12 }}>
                   Last 14 Days Performance
                 </div>
-                {dailyHistory?.history ? (
+                {dailyHistory?.history && dailyHistory.history.length > 0 ? (
                   <ResponsiveContainer width="100%" height={200}>
                     <BarChart data={dailyHistory.history.slice().reverse()}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#0f172a" />
@@ -623,10 +673,7 @@ export default function TradingDashboard() {
                       <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 11 }}
                         formatter={v => [`₹${v.toLocaleString("en-IN")}`, "Net P&L"]} />
                       <ReferenceLine y={0} stroke="#1e293b" />
-                      <Bar dataKey="net_pnl" fill="#10b981" radius={[3, 3, 0, 0]}
-                        label={false}
-                        // Color bars by value
-                      />
+                      <Bar dataKey="net_pnl" fill="#10b981" radius={[3, 3, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 ) : (
@@ -671,3 +718,26 @@ export default function TradingDashboard() {
     </div>
   );
 }
+```
+
+---
+
+## **5. Render Environment Variables**
+
+### **Backend Service Environment Variables:**
+```
+CORS_ALLOW_ORIGINS=https://agentic-trading-bot-1.onrender.com
+FRONTEND_URL=https://agentic-trading-bot-1.onrender.com
+POSTGRES_HOST=<your-render-postgres-hostname>
+POSTGRES_USER=trader
+POSTGRES_PASSWORD=<your-password>
+POSTGRES_DB=trading_bot
+REDIS_HOST=<your-redis-hostname>
+REDIS_PORT=6379
+API_PORT=8000
+```
+
+### **Frontend Service Build Environment Variables:**
+```
+VITE_API_BASE=https://agentic-trading-bot-188e.onrender.com
+VITE_WS_URL=wss://agentic-trading-bot-188e.onrender.com/ws
