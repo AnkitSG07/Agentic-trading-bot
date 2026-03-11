@@ -10,8 +10,6 @@ import {
   Cpu, Radio, Database, BarChart2,
 } from "lucide-react";
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
-// Automatically detect environment
 const isProduction = window.location.hostname !== "localhost";
 const API_BASE = import.meta.env.VITE_API_BASE ?? 
   (isProduction 
@@ -23,8 +21,6 @@ const WS_URL = import.meta.env.VITE_WS_URL ??
 
 console.log("🔧 API Configuration:", { API_BASE, WS_URL, isProduction });
 
-// ─── HOOKS ───────────────────────────────────────────────────────────────────
-
 function useAPI(endpoint, interval = null) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -34,7 +30,6 @@ function useAPI(endpoint, interval = null) {
     try {
       const res = await fetch(`${API_BASE}${endpoint}`);
       if (!res.ok) {
-        // Handle 503 gracefully (engine not started)
         if (res.status === 503) {
           console.warn(`⚠️ Engine not started for ${endpoint}`);
           setData(null);
@@ -118,8 +113,6 @@ function useWebSocket() {
   return { liveData, connected };
 }
 
-// ─── COMPONENTS ──────────────────────────────────────────────────────────────
-
 const StatCard = ({ label, value, sub, trend, color = "#22d3ee", icon: Icon, loading }) => (
   <div style={{
     background: "rgba(15,23,42,0.85)", border: "1px solid rgba(255,255,255,0.07)",
@@ -184,8 +177,6 @@ const PnLValue = ({ value, size = 18 }) => (
   </span>
 );
 
-// ─── MAIN DASHBOARD ───────────────────────────────────────────────────────────
-
 export default function TradingDashboard() {
   const { liveData, connected } = useWebSocket();
   const [activeTab, setActiveTab] = useState("positions");
@@ -194,14 +185,12 @@ export default function TradingDashboard() {
   const [engineRunning, setEngineRunning] = useState(false);
   const [startingEngine, setStartingEngine] = useState(false);
 
-  // REST data (refreshed less frequently)
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
   const { data: agentData, refetch: refetchAgent } = useAPI("/api/agent/in-memory-decisions", 5000);
   const { data: riskEvents } = useAPI("/api/risk/events?limit=20", 30000);
   const { data: dailyHistory } = useAPI("/api/analytics/daily-history?days=14", 300000);
 
-  // Track P&L history for chart
   useEffect(() => {
     if (!liveData?.pnl) return;
     setLastUpdate(new Date());
@@ -209,7 +198,7 @@ export default function TradingDashboard() {
     setPnlHistory(prev => {
       const now = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
       const next = [...prev, { time: now, pnl: Math.round(liveData.pnl.total || 0) }];
-      return next.slice(-80); // Keep last 80 points
+      return next.slice(-80);
     });
   }, [liveData]);
 
@@ -260,7 +249,6 @@ export default function TradingDashboard() {
     }
   };
 
-  // Extract live values
   const pnl = liveData?.pnl || {};
   const risk = liveData?.risk || {};
   const funds = liveData?.funds || {};
@@ -276,14 +264,12 @@ export default function TradingDashboard() {
   return (
     <div style={{ minHeight: "100vh", background: "#060b14", color: "#e2e8f0", fontFamily: "'Inter', system-ui, sans-serif" }}>
 
-      {/* Ambient background */}
       <div style={{
         position: "fixed", top: -300, left: "30%", width: 700, height: 500,
         borderRadius: "50%", background: "radial-gradient(ellipse, #0ea5e912, transparent 70%)",
         pointerEvents: "none", zIndex: 0,
       }} />
 
-      {/* Header */}
       <header style={{
         borderBottom: "1px solid rgba(255,255,255,0.06)",
         background: "rgba(6,11,20,0.96)", backdropFilter: "blur(20px)",
@@ -291,7 +277,6 @@ export default function TradingDashboard() {
       }}>
         <div style={{ maxWidth: 1700, margin: "0 auto", padding: "0 24px", height: 58, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
 
-          {/* Logo */}
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ background: "linear-gradient(135deg,#0ea5e9,#6366f1)", borderRadius: 9, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Zap size={16} color="white" fill="white" />
@@ -302,7 +287,6 @@ export default function TradingDashboard() {
             </div>
           </div>
 
-          {/* Live Index Ticker */}
           <div style={{ display: "flex", gap: 28 }}>
             {[
               { label: "NIFTY 50", val: indices.nifty, prev: 22000 },
@@ -327,7 +311,6 @@ export default function TradingDashboard() {
             })}
           </div>
 
-          {/* Status controls */}
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <Pulse active={connected} color="#10b981" />
@@ -337,7 +320,6 @@ export default function TradingDashboard() {
             </div>
             <div style={{ fontSize: 10, color: "#1e293b" }}>{lastUpdate.toLocaleTimeString("en-IN")}</div>
 
-            {/* Engine toggle */}
             <button
               onClick={engineRunning ? handleStopEngine : handleStartEngine}
               disabled={startingEngine}
@@ -359,7 +341,6 @@ export default function TradingDashboard() {
 
       <main style={{ maxWidth: 1700, margin: "0 auto", padding: "20px 24px", position: "relative", zIndex: 1 }}>
 
-        {/* Kill Switch Banner */}
         {killSwitch && (
           <div style={{
             background: "#ef444412", border: "1px solid #ef4444",
@@ -378,7 +359,6 @@ export default function TradingDashboard() {
           </div>
         )}
 
-        {/* Engine Not Running Banner */}
         {!engineRunning && (
           <div style={{
             background: "#0ea5e912", border: "1px solid #0ea5e9",
@@ -391,7 +371,6 @@ export default function TradingDashboard() {
           </div>
         )}
 
-        {/* Regime Bar */}
         {agentDecisions[0] && (
           <div style={{
             background: "rgba(14,165,233,0.05)", border: "1px solid rgba(14,165,233,0.12)",
@@ -410,7 +389,6 @@ export default function TradingDashboard() {
           </div>
         )}
 
-        {/* Stat Cards */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 14, marginBottom: 20 }}>
           <StatCard label="Today P&L" value={<PnLValue value={pnl.total || 0} size={22} />}
             sub={`${(pnl.pct || 0) >= 0 ? "+" : ""}${(pnl.pct || 0).toFixed(2)}%`}
@@ -428,10 +406,8 @@ export default function TradingDashboard() {
             trend={-(risk.drawdown_pct || 0)} color={(risk.drawdown_pct || 0) < 2 ? "#10b981" : "#ef4444"} icon={AlertTriangle} />
         </div>
 
-        {/* Charts Row */}
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginBottom: 20 }}>
 
-          {/* P&L Chart */}
           <div style={{ background: "rgba(15,23,42,0.85)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, padding: "18px 22px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <div>
@@ -459,7 +435,6 @@ export default function TradingDashboard() {
             </ResponsiveContainer>
           </div>
 
-          {/* Risk Gauges */}
           <div style={{ background: "rgba(15,23,42,0.85)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, padding: "18px 22px" }}>
             <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Risk Monitor</div>
             <div style={{ fontSize: 10, color: "#334155", marginBottom: 16 }}>Live limits</div>
@@ -486,7 +461,6 @@ export default function TradingDashboard() {
               );
             })}
 
-            {/* Kill Switch Status */}
             <div style={{
               marginTop: 16, paddingTop: 14, borderTop: "1px solid #1e293b",
               display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -505,7 +479,6 @@ export default function TradingDashboard() {
           </div>
         </div>
 
-        {/* Tabs */}
         <div style={{ background: "rgba(15,23,42,0.85)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, overflow: "hidden" }}>
           <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "0 20px" }}>
             {[
@@ -540,7 +513,6 @@ export default function TradingDashboard() {
 
           <div style={{ padding: "0 20px 20px", minHeight: 300 }}>
 
-            {/* POSITIONS */}
             {activeTab === "positions" && (
               positions.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
@@ -574,7 +546,6 @@ export default function TradingDashboard() {
               )
             )}
 
-            {/* ORDERS */}
             {activeTab === "orders" && (
               orders.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
@@ -605,7 +576,6 @@ export default function TradingDashboard() {
               )
             )}
 
-            {/* AI SIGNALS */}
             {activeTab === "signals" && (
               <div>
                 {agentDecisions.length === 0 ? (
@@ -636,7 +606,6 @@ export default function TradingDashboard() {
               </div>
             )}
 
-            {/* LIVE TICKS */}
             {activeTab === "ticks" && (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, paddingTop: 14 }}>
                 {Object.entries(ticks).length === 0 ? (
@@ -658,7 +627,6 @@ export default function TradingDashboard() {
               </div>
             )}
 
-            {/* HISTORY */}
             {activeTab === "history" && (
               <div style={{ paddingTop: 14 }}>
                 <div style={{ fontWeight: 600, fontSize: 12, color: "#64748b", marginBottom: 12 }}>
@@ -718,26 +686,3 @@ export default function TradingDashboard() {
     </div>
   );
 }
-```
-
----
-
-## **5. Render Environment Variables**
-
-### **Backend Service Environment Variables:**
-```
-CORS_ALLOW_ORIGINS=https://agentic-trading-bot-1.onrender.com
-FRONTEND_URL=https://agentic-trading-bot-1.onrender.com
-POSTGRES_HOST=<your-render-postgres-hostname>
-POSTGRES_USER=trader
-POSTGRES_PASSWORD=<your-password>
-POSTGRES_DB=trading_bot
-REDIS_HOST=<your-redis-hostname>
-REDIS_PORT=6379
-API_PORT=8000
-```
-
-### **Frontend Service Build Environment Variables:**
-```
-VITE_API_BASE=https://agentic-trading-bot-188e.onrender.com
-VITE_WS_URL=wss://agentic-trading-bot-188e.onrender.com/ws
