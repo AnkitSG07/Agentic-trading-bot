@@ -47,6 +47,14 @@ def _get_allowed_origins() -> list[str]:
     if frontend_url:
         configured.add(frontend_url)
 
+    # Explicitly add Render frontend domains
+    configured.add("https://agentic-trading-bot-1.onrender.com")
+    
+    # Add any Render service URL
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if render_url:
+        configured.add(render_url)
+
     return sorted(defaults | configured)
 
 
@@ -72,10 +80,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_get_allowed_origins(),
-    # Render deployments usually serve frontend + backend on different
-    # subdomains, so keep a safe default regex while still allowing strict
-    # per-origin overrides via CORS_ALLOW_ORIGINS / FRONTEND_URL.
-    allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.onrender\.com"),
+    allow_origin_regex=r"https://.*\.onrender\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -108,6 +113,10 @@ def require_engine():
     if not engine:
         raise HTTPException(503, "Engine not running. POST /api/engine/start first.")
     return engine
+
+def get_engine_or_none():
+    """Return engine if running, None otherwise (don't raise)."""
+    return get_engine()
 
 def require_broker():
     engine = require_engine()
@@ -353,27 +362,46 @@ async def square_off_order(order_id: str):
 
 @app.get("/api/risk/summary")
 async def risk_summary():
-    engine = require_engine()
+    engine = get_engine_or_none()
+    if not engine:
+        return {
+            "date": datetime.now().date().isoformat(),
+            "starting_capital": 0,
+            "realized_pnl": 0,
+            "unrealized_pnl": 0,
+            "total_pnl": 0,
+            "daily_pnl_pct": 0,
+            "drawdown_pct": 0,
+            "total_trades": 0,
+            "win_rate": 0,
+            "kill_switch": False,
+            "kill_switch_reason": "",
+            "trading_allowed": False,
+        }
     return engine.risk.get_daily_summary()
 
 
 @app.get("/api/risk/events")
 async def risk_events(limit: int = 50):
-    events = await RiskEventRepository.get_recent(limit)
-    return {
-        "events": [
-            {
-                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
-                "type": e.event_type,
-                "severity": e.severity,
-                "symbol": e.symbol,
-                "description": e.description,
-                "pnl": float(e.pnl_at_event) if e.pnl_at_event else None,
-                "drawdown": e.drawdown_at_event,
-            }
-            for e in events
-        ]
-    }
+    try:
+        events = await RiskEventRepository.get_recent(limit)
+        return {
+            "events": [
+                {
+                    "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                    "type": e.event_type,
+                    "severity": e.severity,
+                    "symbol": e.symbol,
+                    "description": e.description,
+                    "pnl": float(e.pnl_at_event) if e.pnl_at_event else None,
+                    "drawdown": e.drawdown_at_event,
+                }
+                for e in events
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Risk events error: {e}")
+        return {"events": []}
 
 
 @app.post("/api/risk/kill-switch/reset")
@@ -389,7 +417,9 @@ async def reset_kill_switch(req: KillSwitchResetRequest):
 
 @app.get("/api/market/indices")
 async def get_indices():
-    engine = require_engine()
+    engine = get_engine_or_none()
+    if not engine:
+        return {"nifty": 22000.0, "banknifty": 47000.0, "vix": 14.0}
     return await engine.nse_feed.get_index_data()
 
 
@@ -417,14 +447,18 @@ async def get_quote(symbol: str, exchange: str = "NSE"):
 
 @app.get("/api/market/options/{symbol}")
 async def get_option_chain(symbol: str):
-    engine = require_engine()
+    engine = get_engine_or_none()
+    if not engine:
+        return {}
     chain = await engine.nse_feed.get_option_chain(symbol)
     return chain
 
 
 @app.get("/api/market/pcr/{symbol}")
 async def get_pcr(symbol: str = "NIFTY"):
-    engine = require_engine()
+    engine = get_engine_or_none()
+    if not engine:
+        return {"symbol": symbol, "pcr": 1.0}
     pcr = await engine.nse_feed.get_pcr(symbol)
     return {"symbol": symbol, "pcr": pcr}
 
@@ -433,28 +467,34 @@ async def get_pcr(symbol: str = "NIFTY"):
 
 @app.get("/api/agent/decisions")
 async def agent_decisions(limit: int = 20):
-    decisions = await AgentDecisionRepository.get_recent(limit)
-    return {
-        "decisions": [
-            {
-                "timestamp": d.timestamp.isoformat(),
-                "market_regime": d.market_regime,
-                "signals_generated": d.signals_generated,
-                "signals_executed": d.signals_executed,
-                "signals_rejected": d.signals_rejected,
-                "nifty": d.nifty_ltp,
-                "vix": d.india_vix,
-                "pcr": d.pcr,
-            }
-            for d in decisions
-        ]
-    }
+    try:
+        decisions = await AgentDecisionRepository.get_recent(limit)
+        return {
+            "decisions": [
+                {
+                    "timestamp": d.timestamp.isoformat(),
+                    "market_regime": d.market_regime,
+                    "signals_generated": d.signals_generated,
+                    "signals_executed": d.signals_executed,
+                    "signals_rejected": d.signals_rejected,
+                    "nifty": d.nifty_ltp,
+                    "vix": d.india_vix,
+                    "pcr": d.pcr,
+                }
+                for d in decisions
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Agent decisions error: {e}")
+        return {"decisions": []}
 
 
 @app.get("/api/agent/in-memory-decisions")
 async def agent_in_memory(limit: int = 20):
     """Quick access to agent decisions stored in memory (no DB needed)."""
-    engine = require_engine()
+    engine = get_engine_or_none()
+    if not engine:
+        return {"decisions": []}
     return {"decisions": engine.agent.decision_history[-limit:]}
 
 
@@ -462,50 +502,69 @@ async def agent_in_memory(limit: int = 20):
 
 @app.get("/api/analytics/performance")
 async def performance(days: int = 30):
-    stats = await PositionRepository.get_performance_stats(days)
-    return stats
+    try:
+        stats = await PositionRepository.get_performance_stats(days)
+        return stats
+    except Exception as e:
+        logger.error(f"Performance error: {e}")
+        return {
+            "total_trades": 0,
+            "total_pnl": 0,
+            "win_rate": 0,
+            "avg_win": 0,
+            "avg_loss": 0,
+            "profit_factor": 0,
+        }
 
 
 @app.get("/api/analytics/daily-history")
 async def daily_history(days: int = 30):
-    history = await DailySummaryRepository.get_history(days)
-    return {
-        "history": [
-            {
-                "date": d.date,
-                "net_pnl": float(d.net_pnl or 0),
-                "pnl_pct": d.pnl_pct or 0,
-                "total_trades": d.total_trades,
-                "win_rate": d.win_rate,
-                "drawdown": d.max_drawdown_pct,
-                "kill_switch": d.kill_switch_triggered,
-            }
-            for d in history
-        ]
-    }
+    try:
+        history = await DailySummaryRepository.get_history(days)
+        return {
+            "history": [
+                {
+                    "date": d.date,
+                    "net_pnl": float(d.net_pnl or 0),
+                    "pnl_pct": d.pnl_pct or 0,
+                    "total_trades": d.total_trades,
+                    "win_rate": d.win_rate,
+                    "drawdown": d.max_drawdown_pct,
+                    "kill_switch": d.kill_switch_triggered,
+                }
+                for d in history
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Daily history error: {e}")
+        return {"history": []}
 
 
 @app.get("/api/analytics/trade-history")
 async def trade_history(symbol: Optional[str] = None, days: int = 30):
-    positions = await PositionRepository.get_history(days, symbol)
-    return {
-        "trades": [
-            {
-                "symbol": p.symbol,
-                "side": p.side,
-                "quantity": p.quantity,
-                "entry_price": float(p.entry_price),
-                "exit_price": float(p.exit_price) if p.exit_price else None,
-                "realized_pnl": float(p.realized_pnl or 0),
-                "net_pnl": float(p.net_pnl or 0),
-                "strategy": p.strategy,
-                "exit_reason": p.exit_reason,
-                "opened_at": p.opened_at.isoformat(),
-                "closed_at": p.closed_at.isoformat() if p.closed_at else None,
-            }
-            for p in positions
-        ]
-    }
+    try:
+        positions = await PositionRepository.get_history(days, symbol)
+        return {
+            "trades": [
+                {
+                    "symbol": p.symbol,
+                    "side": p.side,
+                    "quantity": p.quantity,
+                    "entry_price": float(p.entry_price),
+                    "exit_price": float(p.exit_price) if p.exit_price else None,
+                    "realized_pnl": float(p.realized_pnl or 0),
+                    "net_pnl": float(p.net_pnl or 0),
+                    "strategy": p.strategy,
+                    "exit_reason": p.exit_reason,
+                    "opened_at": p.opened_at.isoformat(),
+                    "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+                }
+                for p in positions
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Trade history error: {e}")
+        return {"trades": []}
 
 
 # ─── WEBSOCKET ───────────────────────────────────────────────────────────────
