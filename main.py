@@ -4,10 +4,10 @@ AgentTrader India v2.0 - Main Entry Point
 Fully wired: DB init, engine singleton, API server, Celery.
 
 Usage:
-    python main.py                  # Paper trading (safe default)
+    python main.py                  # API-only mode (safe default)
+    python main.py --mode paper     # Paper trading
     python main.py --mode production  # Live trading
     python main.py --mode backtest    # Backtest
-    python main.py --api-only         # API + dashboard only (no trading)
 """
 
 import argparse
@@ -193,11 +193,15 @@ async def run_backtest(config: dict) -> None:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="AgentTrader India v2.0")
-    parser.add_argument("--mode", choices=["production", "paper", "backtest"], default="paper")
+    parser.add_argument("--mode", choices=["production", "paper", "backtest"], default=None)
     parser.add_argument("--api-only", action="store_true")
     parser.add_argument("--no-db", action="store_true", help="Skip DB init (for testing)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
+
+    # Default to API-only mode if no mode specified
+    if args.mode is None and not args.api_only:
+        args.api_only = True
 
     config = load_config()
     setup_logging(config.get("app", {}).get("log_level", args.log_level))
@@ -205,26 +209,38 @@ async def main() -> None:
 
     logger.info("=" * 60)
     logger.info("🤖  AgentTrader India v2.0")
-    logger.info(f"    Mode    : {args.mode.upper()}")
+    if args.api_only:
+        logger.info("    Mode    : API-ONLY (engine starts via API)")
+    else:
+        logger.info(f"    Mode    : {args.mode.upper()}")
     logger.info(f"    Brokers : Zerodha + Dhan")
     logger.info(f"    AI      : Claude (Multi-Strategy)")
     logger.info("=" * 60)
 
     # Initialize database (unless skipped)
+    db_initialized = False
     if not args.no_db:
         try:
             await init_database(config)
+            db_initialized = True
         except Exception as e:
-            logger.warning(f"DB init failed (continuing without DB): {e}")
+            logger.error(f"❌ DB init failed: {e}")
+            logger.warning("⚠️  Running without database - limited functionality")
 
     if args.api_only:
         logger.info("🌐 API-only mode — engine must be started via POST /api/engine/start")
         await run_api_server(config)
 
     elif args.mode == "backtest":
+        if not db_initialized:
+            logger.error("Backtest requires database. Remove --no-db flag.")
+            return
         await run_backtest(config)
 
     else:
+        if not db_initialized:
+            logger.error("Trading mode requires database. Remove --no-db flag.")
+            return
         # Run trading engine + API server concurrently
         logger.info(f"🚀 Starting engine ({args.mode}) + API server together...")
         await asyncio.gather(
