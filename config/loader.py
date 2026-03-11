@@ -13,7 +13,7 @@ import yaml
 from dotenv import load_dotenv
 
 # Load .env once when the module is first imported
-load_dotenv(Path(__file__).parent / ".env", override=False)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 
 def _expand(value):
