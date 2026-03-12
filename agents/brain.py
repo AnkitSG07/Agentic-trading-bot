@@ -3,21 +3,6 @@ AI Agent Brain - The intelligence core of the trading bot.
 Uses Gemini API to make multi-strategy trading decisions based on
 real-time market data, technical indicators, and portfolio state.
 
-Fixes applied:
-1.  _generate_text wrapped in asyncio.to_thread (non-blocking)
-2.  Exponential backoff between model fallbacks on rate limits
-3.  PERMISSION_DENIED (403) caught as unavailable model error
-4.  Safe .text access via candidates traversal (handles blocked responses)
-5.  confidence_threshold validated at __init__ time (clamped to [0.30, 0.95])
-6.  Decision history capped at 200 entries (memory leak fix)
-7.  Signal quantity validated > 0 before accepting
-8.  _extract_json: robust JSON extraction handles prose preamble, single-line
-    fences, trailing markdown, and nested fences (replaces _strip_code_fences)
-9.  review_strategy validates each parameter_adjustments field individually —
-    one bad field (e.g. non-numeric confidence_threshold) no longer discards
-    the entire review result
-10. _generate_text returns (text, model_used) — decision record now stores the
-    actual Gemini model used, not always self.model
 """
 
 import asyncio
