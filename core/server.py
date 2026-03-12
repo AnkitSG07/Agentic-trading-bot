@@ -640,7 +640,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                         "agent_decisions": engine.agent.decision_history[-3:],
                         "agent_status": engine._agent_status,
-                        "agent_events": engine._agent_events[-30:],    
+                        "agent_events": engine._agent_events[-30:],
+                        "agent_progress": {
+                            "stage": engine._agent_status.get("stage"),
+                            "progress_pct": engine._agent_status.get("progress_pct", 0),
+                            "selected_strategy": engine._agent_status.get("selected_strategy"),
+                            "cycle_id": engine._agent_status.get("cycle_id"),
+                            "last_cycle_duration_ms": engine._agent_status.get("last_cycle_duration_ms"),
+                        },
                         "engine_running": engine._running,
                     }
                     await websocket.send_text(json.dumps(payload))
