@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qs, urlparse
 
 import pyotp
 from kiteconnect import KiteConnect, KiteTicker
@@ -130,8 +131,15 @@ class ZerodhaBroker(BaseBroker):
                 )
                 resp.raise_for_status()
 
-                # Step 3: Extract request token from redirect
-                request_token = resp.url.split("request_token=")[1].split("&")[0]
+                # Step 3: Follow authorize redirect and extract request token
+                auth_resp = session.get(login_url, allow_redirects=True)
+                redirect_url = auth_resp.url or resp.url
+                request_token = parse_qs(urlparse(redirect_url).query).get("request_token", [None])[0]
+                if not request_token:
+                    raise ValueError(
+                        "Unable to extract request_token from Zerodha redirect URL. "
+                        f"Final URL: {redirect_url}"
+                    )
             else:
                 raise ValueError(
                     "TOTP secret required for automated login. "
