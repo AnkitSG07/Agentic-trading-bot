@@ -636,8 +636,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                         "ticks": {
                             sym: data.get("last_price") or data.get("ltp")
-                            for sym, data in list(engine._tick_data.items())[:15]
+                            for sym, data in engine._tick_data.items()
+                            if (data.get("last_price") or data.get("ltp")) is not None
                         },
+                        "options_chain": engine._latest_options_chain,
+                        "watchlist": engine._latest_watchlist,
                         "agent_decisions": engine.agent.decision_history[-3:],
                         "agent_status": engine._agent_status,
                         "agent_events": engine._agent_events[-30:],
