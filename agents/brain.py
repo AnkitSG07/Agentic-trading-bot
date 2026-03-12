@@ -292,7 +292,8 @@ class TradingAgent:
         returns actionable trading signals.
         """
         prompt = self._build_prompt(context)
-
+        started_at = datetime.utcnow()
+        
         try:
             raw_text = self._generate_text(
                 prompt,
@@ -303,6 +304,30 @@ class TradingAgent:
             decision = json.loads(self._strip_code_fences(raw_text))
             signals = self._parse_signals(decision, context)
 
+            latency_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
+
+            normalized_signals = [
+                {
+                    "action": s.action.value,
+                    "symbol": s.symbol,
+                    "exchange": s.exchange,
+                    "strategy": s.strategy,
+                    "quantity": s.quantity,
+                    "entry_price": float(s.entry_price) if s.entry_price is not None else None,
+                    "stop_loss": float(s.stop_loss) if s.stop_loss is not None else None,
+                    "target": float(s.target) if s.target is not None else None,
+                    "confidence": s.confidence,
+                    "rationale": s.rationale,
+                    "risk_reward": s.risk_reward,
+                    "timeframe": s.timeframe,
+                    "product": s.product,
+                    "priority": s.priority,
+                    "tags": s.tags,
+                    "is_actionable": s.is_actionable,
+                }
+                for s in signals
+            ]
+
             # Log the decision
             self.decision_history.append({
                 "timestamp": context.timestamp.isoformat(),
@@ -311,7 +336,13 @@ class TradingAgent:
                 "market_commentary": decision.get("market_commentary"),
                 "risk_assessment": decision.get("risk_assessment"),
                 "signals_count": len(signals),
+                "signals": normalized_signals,
+                "signals_raw": decision.get("signals", []),
+                "positions_to_exit": decision.get("positions_to_exit", []),
                 "session_recommendation": decision.get("session_recommendation"),
+                "raw_response": decision,
+                "model_used": self.model,
+                "latency_ms": latency_ms,
             })
 
             logger.info(
