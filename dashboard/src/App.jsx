@@ -380,6 +380,19 @@ export default function TradingDashboard() {
   const selectedStrategy = agentStatus?.selected_strategy || latestSignals[0]?.strategy || null;
   const liveCycleId = agentStatus?.cycle_id || "preview";
   const isPreviewMode = latestSignals.length === 0;
+  const nowInIndia = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const day = nowInIndia.getDay();
+  const minutesNow = nowInIndia.getHours() * 60 + nowInIndia.getMinutes();
+  const isTradingDay = day >= 1 && day <= 5;
+  const isMarketOpenNow = isTradingDay && minutesNow >= (9 * 60 + 15) && minutesNow < (15 * 60 + 30);
+
+  const processingMessage = !engineRunning
+    ? "Engine is stopped. Start engine to run AI decisions."
+    : !isMarketOpenNow
+      ? "Market is closed (after 3:30 PM IST). AI scanning is paused until next session."
+      : isPreviewMode
+        ? "AI is collecting market context..."
+        : "Evaluating signal confidence and risk gates.";
 
   const pnlColor = (pnl.total || 0) >= 0 ? "#10b981" : "#ef4444";
   const rowPadding = uiSettings.compactMode ? "8px 8px" : "13px 8px";
@@ -1032,7 +1045,7 @@ export default function TradingDashboard() {
                     <div style={{ border: "1px solid #1f2937", borderRadius: 8, padding: "10px 12px", background: "#0b1220" }}>
                       <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>Now processing</div>
                       <div style={{ fontSize: 11, color: "#e2e8f0" }}>
-                        {isPreviewMode ? "AI is collecting market context..." : "Evaluating signal confidence and risk gates."}
+                        {processingMessage}
                       </div>
                       <div style={{ fontSize: 10, color: "#475569", marginTop: 6 }}>
                         Last update: {new Date().toLocaleTimeString("en-IN")}
