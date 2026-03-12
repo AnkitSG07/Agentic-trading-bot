@@ -193,7 +193,8 @@ class TradingAgent:
         self.model = config.get("model", "gemini-2.5-flash")
         self.fallback_models = config.get("fallback_models", [
             "gemini-2.0-flash",
-            "gemini-1.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash-lite",
         ])
         self.max_tokens = config.get("max_tokens", 4096)
         self.temperature = config.get("temperature", 0.1)
@@ -207,6 +208,18 @@ class TradingAgent:
     def _is_unsupported_system_instruction_error(self, err: Exception) -> bool:
         msg = str(err).lower()
         return "developer instruction is not enabled" in msg
+
+    def _is_unavailable_model_error(self, err: Exception) -> bool:
+        msg = str(err).lower()
+        unavailable_tokens = (
+            "404",
+            "not_found",
+            "model is not found",
+            "is not found for api version",
+            "not supported for generatecontent",
+            "unknown model",
+        )
+        return any(token in msg for token in unavailable_tokens)
 
     def _extract_response_text(self, response: Any) -> str:
         text = getattr(response, "text", None)
@@ -257,6 +270,9 @@ class TradingAgent:
                         f"Model {model} does not support system/developer instructions; trying fallback model."
                     )
                     continue
+                if self._is_unavailable_model_error(e) and idx < len(models) - 1:
+                    logger.warning(f"Model {model} is unavailable/unsupported; trying fallback model.")
+                    continue    
                 raise
 
         raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
