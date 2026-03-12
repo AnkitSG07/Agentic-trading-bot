@@ -104,9 +104,15 @@ class ZerodhaBroker(BaseBroker):
                 session = requests.Session()
 
                 # Step 1: Get login page
+                password = self.config.get("password")
+                if not password:
+                    raise ValueError(
+                        "Zerodha password missing. Set ZERODHA_PASSWORD in .env"
+                    )
+
                 resp = session.post(
                     "https://kite.zerodha.com/api/login",
-                    data={"user_id": self.user_id, "password": self.config["password"]},
+                    data={"user_id": self.user_id, "password": password},
                 )
                 resp.raise_for_status()
                 request_id = resp.json()["data"]["request_id"]
