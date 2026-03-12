@@ -149,6 +149,7 @@ const Badge = ({ text, type }) => {
     NO_ACTION: "#475569", HOLD: "#475569",
     trending_up: "#10b981", trending_down: "#ef4444",
     ranging: "#f59e0b", high_volatility: "#f43f5e",
+    risk_passed: "#10b981", risk_rejected: "#ef4444", preview_layout: "#22d3ee",
   };
   const c = palette[text] || palette[type] || "#64748b";
   return (
@@ -176,6 +177,42 @@ const PnLValue = ({ value, size = 18 }) => (
     {value >= 0 ? "+" : ""}₹{Math.abs(value).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
   </span>
 );
+
+const DEFAULT_MOCK_SIGNALS = [
+  {
+    symbol: "RELIANCE",
+    action: "BUY",
+    strategy: "breakout",
+    confidence: 0.82,
+    entry_price: 2450,
+    stop_loss: 2420,
+    target: 2510,
+    rationale: "MACD bullish crossover with 1.8x volume and resistance breakout.",
+    risk_status: "approved",
+  },
+  {
+    symbol: "NIFTY",
+    action: "NO_ACTION",
+    strategy: "scalping",
+    confidence: 0.41,
+    entry_price: null,
+    stop_loss: null,
+    target: null,
+    rationale: "Weak confluence and choppy range, waiting for clean setup.",
+    risk_status: "rejected",
+  },
+  {
+    symbol: "HDFCBANK",
+    action: "SELL",
+    strategy: "mean_reversion",
+    confidence: 0.74,
+    entry_price: 1612,
+    stop_loss: 1628,
+    target: 1578,
+    rationale: "RSI reverted from overbought zone with lower high near resistance.",
+    risk_status: "approved",
+  },
+];
 
 export default function TradingDashboard() {
   const { liveData, connected } = useWebSocket();
@@ -297,6 +334,13 @@ export default function TradingDashboard() {
   const agentStatus = liveData?.agent_status || agentData?.agent_status || {};
   const orders = ordersData?.orders || [];
   const killSwitch = risk.kill_switch;
+  const latestDecision = agentDecisions.length ? agentDecisions[agentDecisions.length - 1] : null;
+  const latestSignals = (latestDecision?.signals || latestDecision?.signals_raw || []).slice(0, 3);
+  const reasoningSignals = latestSignals.length > 0 ? latestSignals : DEFAULT_MOCK_SIGNALS;
+  const progressPct = Number(agentStatus?.progress_pct || 0);
+  const selectedStrategy = agentStatus?.selected_strategy || latestSignals[0]?.strategy || null;
+  const liveCycleId = agentStatus?.cycle_id || "preview";
+  const isPreviewMode = latestSignals.length === 0;
 
   const pnlColor = (pnl.total || 0) >= 0 ? "#10b981" : "#ef4444";
 
@@ -617,6 +661,74 @@ export default function TradingDashboard() {
 
             {activeTab === "signals" && (
               <div>
+                <div style={{
+                  background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 10,
+                  padding: "14px 16px", marginBottom: 10,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                    <span style={{ fontSize: 10, color: "#334155", letterSpacing: 1.2, textTransform: "uppercase" }}>
+                      Live AI Reasoning
+                    </span>
+                    {isPreviewMode && <Badge text="preview_layout" />}
+                    <span style={{ marginLeft: "auto", fontFamily: "monospace", fontSize: 10, color: "#475569" }}>
+                      cycle {liveCycleId}
+                    </span>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 12, marginBottom: 12 }}>
+                    <div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 11, color: "#94a3b8" }}>Stage:</span>
+                        <Badge text={agentStatus?.stage || "collecting_context"} />
+                        {selectedStrategy && <><span style={{ fontSize: 11, color: "#94a3b8" }}>Style:</span><Badge text={selectedStrategy} /></>}
+                      </div>
+                      <div style={{ width: "100%", height: 8, borderRadius: 99, background: "#111827", overflow: "hidden" }}>
+                        <div style={{ width: `${Math.max(8, progressPct)}%`, height: "100%", background: "linear-gradient(90deg,#22d3ee,#6366f1)", transition: "width .25s" }} />
+                      </div>
+                      <div style={{ marginTop: 5, fontSize: 10, color: "#64748b", display: "flex", justifyContent: "space-between" }}>
+                        <span>{progressPct}% complete</span>
+                        <span>{agentStatus?.last_cycle_duration_ms ? `${agentStatus.last_cycle_duration_ms} ms` : "Calculating..."}</span>
+                      </div>
+                    </div>
+                    <div style={{ border: "1px solid #1f2937", borderRadius: 8, padding: "10px 12px", background: "#0b1220" }}>
+                      <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>Now processing</div>
+                      <div style={{ fontSize: 11, color: "#e2e8f0" }}>
+                        {isPreviewMode ? "AI is collecting market context..." : "Evaluating signal confidence and risk gates."}
+                      </div>
+                      <div style={{ fontSize: 10, color: "#475569", marginTop: 6 }}>
+                        Last update: {new Date().toLocaleTimeString("en-IN")}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+                    {reasoningSignals.map((s, idx) => {
+                      const confidence = Math.round((Number(s.confidence || 0) || 0) * 100);
+                      const riskStatus = s.risk_status || (s.action === "NO_ACTION" ? "rejected" : "approved");
+                      return (
+                        <div key={`${s.symbol}-${idx}`} style={{ border: "1px solid #1e293b", borderRadius: 9, padding: "10px 12px", background: "#0b1220" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                            <span style={{ fontWeight: 700, fontSize: 12 }}>{s.symbol}</span>
+                            <Badge text={s.action || "NO_ACTION"} />
+                            <span style={{ marginLeft: "auto" }}><Badge text={s.strategy || "unknown"} /></span>
+                          </div>
+                          <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>Confidence {confidence}%</div>
+                          <div style={{ width: "100%", height: 6, borderRadius: 99, background: "#1f2937", overflow: "hidden", marginBottom: 6 }}>
+                            <div style={{ width: `${Math.max(4, confidence)}%`, height: "100%", background: confidence >= 65 ? "#10b981" : "#f59e0b" }} />
+                          </div>
+                          <div style={{ fontFamily: "monospace", fontSize: 10, color: "#94a3b8", lineHeight: 1.5 }}>
+                            Entry: {s.entry_price ? `₹${Number(s.entry_price).toLocaleString("en-IN")}` : "—"} · SL: {s.stop_loss ? `₹${Number(s.stop_loss).toLocaleString("en-IN")}` : "—"} · Tgt: {s.target ? `₹${Number(s.target).toLocaleString("en-IN")}` : "—"}
+                          </div>
+                          <div style={{ fontSize: 10, color: "#cbd5e1", marginTop: 6 }}>{s.rationale || "No rationale available."}</div>
+                          <div style={{ marginTop: 8 }}>
+                            <Badge text={riskStatus === "approved" ? "risk_passed" : "risk_rejected"} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                
                 <div style={{
                   background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 10,
                   padding: "12px 14px", marginBottom: 10,
