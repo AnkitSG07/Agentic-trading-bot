@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
@@ -7,7 +7,7 @@ import {
   TrendingUp, TrendingDown, Activity, Shield, Zap,
   AlertTriangle, Power, RefreshCw, ArrowUpRight,
   ArrowDownRight, Target, DollarSign, ChevronUp, ChevronDown,
-  Cpu, Radio, Database, BarChart2,
+  Cpu, Radio, Database, BarChart2, Bell, Settings,
 } from "lucide-react";
 
 const isProduction = window.location.hostname !== "localhost";
@@ -224,7 +224,39 @@ export default function TradingDashboard() {
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [engineRunning, setEngineRunning] = useState(false);
   const [startingEngine, setStartingEngine] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [strategyFilter, setStrategyFilter] = useState("all");
+  const [brokerFilter, setBrokerFilter] = useState("all");
+  const [timeRange, setTimeRange] = useState("today");
+  const [showAlerts, setShowAlerts] = useState(false);
+  const [acknowledgedAlerts, setAcknowledgedAlerts] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("acknowledged_alerts") || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [uiSettings, setUiSettings] = useState(() => {
+    try {
+      return {
+        compactMode: false,
+        soundAlerts: false,
+        colorBlindMode: false,
+        ...JSON.parse(localStorage.getItem("dashboard_ui_settings") || "{}"),
+      };
+    } catch {
+      return { compactMode: false, soundAlerts: false, colorBlindMode: false };
+    }
+  });
 
+  const refreshInterval = useMemo(() => {
+    if (timeRange === "15m") return 4000;
+    if (timeRange === "1h") return 7000;
+    return 10000;
+  }, [timeRange]);
+
+  const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", refreshInterval);
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
   const { data: agentData, refetch: refetchAgent } = useAPI("/api/agent/in-memory-decisions", 5000);
@@ -276,6 +308,14 @@ export default function TradingDashboard() {
     });
     setEventTape(dedup.slice(-20));
   }, [liveData?.agent_events, agentData?.agent_events]);
+
+  useEffect(() => {
+    localStorage.setItem("dashboard_ui_settings", JSON.stringify(uiSettings));
+  }, [uiSettings]);
+
+  useEffect(() => {
+    localStorage.setItem("acknowledged_alerts", JSON.stringify(acknowledgedAlerts));
+  }, [acknowledgedAlerts]);
 
   const handleStartEngine = async () => {
     setStartingEngine(true);
@@ -343,6 +383,202 @@ export default function TradingDashboard() {
   const isPreviewMode = latestSignals.length === 0;
 
   const pnlColor = (pnl.total || 0) >= 0 ? "#10b981" : "#ef4444";
+  const rowPadding = uiSettings.compactMode ? "8px 8px" : "13px 8px";
+
+  const timeRangeMs = useMemo(() => {
+    if (timeRange === "15m") return 15 * 60 * 1000;
+    if (timeRange === "1h") return 60 * 60 * 1000;
+    return 24 * 60 * 60 * 1000;
+  }, [timeRange]);
+
+  const strategyOptions = useMemo(() => {
+    const set = new Set(DEFAULT_MOCK_SIGNALS.map((s) => s.strategy));
+    reasoningSignals.forEach((s) => s?.strategy && set.add(s.strategy));
+    agentDecisions.forEach((d) => d?.selected_strategy && set.add(d.selected_strategy));
+    return ["all", ...Array.from(set)];
+  }, [reasoningSignals, agentDecisions]);
+
+  const brokerOptions = useMemo(() => {
+    const set = new Set(["all"]);
+    positions.forEach((p) => p?.broker && set.add(p.broker));
+    orders.forEach((o) => o?.broker && set.add(o.broker));
+    return Array.from(set);
+  }, [positions, orders]);
+
+  const matchesSearch = useCallback((parts) => {
+    if (!searchTerm) return true;
+    const haystack = parts.filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(searchTerm.toLowerCase());
+  }, [searchTerm]);
+
+  const nowTs = Date.now();
+
+  const filteredPositions = useMemo(() => positions.filter((p) => {
+    const strategyMatch = strategyFilter === "all" || (p.strategy || "").toLowerCase() === strategyFilter.toLowerCase();
+    const brokerMatch = brokerFilter === "all" || (p.broker || "").toLowerCase() === brokerFilter.toLowerCase();
+    return strategyMatch && brokerMatch && matchesSearch([p.symbol, p.side, p.broker, p.tag]);
+  }), [positions, strategyFilter, brokerFilter, matchesSearch]);
+
+  const filteredOrders = useMemo(() => orders.filter((o) => {
+    const strategyMatch = strategyFilter === "all" || (o.strategy || "").toLowerCase() === strategyFilter.toLowerCase();
+    const brokerMatch = brokerFilter === "all" || (o.broker || "").toLowerCase() === brokerFilter.toLowerCase();
+    const ts = o.placed_at ? new Date(o.placed_at).getTime() : nowTs;
+    const inTime = nowTs - ts <= timeRangeMs;
+    return inTime && strategyMatch && brokerMatch && matchesSearch([o.symbol, o.side, o.status, o.tag, o.broker]);
+  }), [orders, strategyFilter, brokerFilter, timeRangeMs, nowTs, matchesSearch]);
+
+  const filteredDecisions = useMemo(() => agentDecisions.filter((d) => {
+    const strategyMatch = strategyFilter === "all" || (d.selected_strategy || "").toLowerCase() === strategyFilter.toLowerCase();
+    const ts = d.timestamp ? new Date(d.timestamp).getTime() : nowTs;
+    const inTime = nowTs - ts <= timeRangeMs;
+    return inTime && strategyMatch && matchesSearch([d.market_commentary, d.commentary, d.market_regime]);
+  }), [agentDecisions, strategyFilter, timeRangeMs, nowTs, matchesSearch]);
+
+  const filteredSignals = useMemo(() => reasoningSignals.filter((s) => {
+    const strategyMatch = strategyFilter === "all" || (s.strategy || "").toLowerCase() === strategyFilter.toLowerCase();
+    return strategyMatch && matchesSearch([s.symbol, s.action, s.strategy, s.rationale]);
+  }), [reasoningSignals, strategyFilter, matchesSearch]);
+
+  const filteredEventTape = useMemo(() => eventTape.filter((e) => {
+    const ts = e.timestamp ? new Date(e.timestamp).getTime() : nowTs;
+    const inTime = nowTs - ts <= timeRangeMs;
+    return inTime && matchesSearch([e.message, e.level, e.source]);
+  }), [eventTape, nowTs, timeRangeMs, matchesSearch]);
+
+  const filteredTicksEntries = useMemo(() => Object.entries(ticks).filter(([symbol]) => matchesSearch([symbol])), [ticks, matchesSearch]);
+
+  const exposureData = useMemo(() => {
+    const rows = filteredPositions.map((p) => {
+      const qty = Number(p.qty || 0);
+      const ltp = Number(p.ltp || p.avg || 0);
+      const notional = Math.abs(qty * ltp);
+      const side = (p.side || "").toUpperCase();
+      const sector = p.sector || p.symbol?.split("-")[0] || "Other";
+      return { symbol: p.symbol, side, notional, sector };
+    }).filter((r) => r.notional > 0);
+    const total = rows.reduce((sum, r) => sum + r.notional, 0) || 1;
+    const byPosition = rows
+      .map((r) => ({ ...r, weightPct: (r.notional / total) * 100 }))
+      .sort((a, b) => b.notional - a.notional)
+      .slice(0, 5);
+    const sectorMap = {};
+    rows.forEach((r) => {
+      sectorMap[r.sector] = (sectorMap[r.sector] || 0) + r.notional;
+    });
+    const bySector = Object.entries(sectorMap).map(([sector, value]) => ({ sector, value, weightPct: (value / total) * 100 }))
+      .sort((a, b) => b.value - a.value);
+    const longExposure = rows.filter((r) => r.side === "BUY").reduce((sum, r) => sum + r.notional, 0);
+    const shortExposure = rows.filter((r) => r.side === "SELL" || r.side === "SHORT").reduce((sum, r) => sum + r.notional, 0);
+    return {
+      total,
+      byPosition,
+      bySector,
+      longPct: (longExposure / total) * 100,
+      shortPct: (shortExposure / total) * 100,
+      concentrationFlag: (byPosition[0]?.weightPct || 0) > 35,
+    };
+  }, [filteredPositions]);
+
+  const executionMetrics = useMemo(() => {
+    const total = filteredOrders.length;
+    const filled = filteredOrders.filter((o) => ["COMPLETE", "FILLED"].includes((o.status || "").toUpperCase()));
+    const rejected = filteredOrders.filter((o) => (o.status || "").toUpperCase() === "REJECTED");
+    const slippages = filled
+      .map((o) => {
+        const intended = Number(o.price || 0);
+        const avg = Number(o.average_price || 0);
+        return intended > 0 && avg > 0 ? ((avg - intended) / intended) * 100 : null;
+      })
+      .filter((v) => v !== null);
+    const latencies = filled
+      .map((o) => {
+        const a = o.placed_at ? new Date(o.placed_at).getTime() : null;
+        const b = o.filled_at ? new Date(o.filled_at).getTime() : null;
+        return a && b ? (b - a) / 1000 : null;
+      })
+      .filter((v) => v !== null);
+    const rejectionReasons = {};
+    rejected.forEach((o) => {
+      const reason = o.reject_reason || o.status_message || "unknown";
+      rejectionReasons[reason] = (rejectionReasons[reason] || 0) + 1;
+    });
+    return {
+      fillRate: total ? (filled.length / total) * 100 : 0,
+      avgSlippage: slippages.length ? slippages.reduce((a, b) => a + b, 0) / slippages.length : null,
+      avgLatency: latencies.length ? latencies.reduce((a, b) => a + b, 0) / latencies.length : null,
+      rejectedCount: rejected.length,
+      topRejections: Object.entries(rejectionReasons).sort((a, b) => b[1] - a[1]).slice(0, 3),
+    };
+  }, [filteredOrders]);
+
+  const strategyLeaderboard = useMemo(() => {
+    const map = {};
+    filteredDecisions.forEach((d) => {
+      const key = d.selected_strategy || "unknown";
+      map[key] = map[key] || { strategy: key, signals: 0, executed: 0, rejected: 0, confidenceSum: 0, confidenceCount: 0, netPnl: 0 };
+      map[key].signals += Number(d.signals_generated || 0);
+      map[key].executed += Number(d.signals_executed || 0);
+      map[key].rejected += Number(d.signals_rejected || 0);
+      if (typeof d.avg_confidence === "number") {
+        map[key].confidenceSum += d.avg_confidence;
+        map[key].confidenceCount += 1;
+      }
+      map[key].netPnl += Number(d.net_pnl || 0);
+    });
+    return Object.values(map)
+      .map((r) => ({
+        ...r,
+        executionRate: r.signals ? (r.executed / r.signals) * 100 : 0,
+        avgConfidence: r.confidenceCount ? (r.confidenceSum / r.confidenceCount) * 100 : 0,
+      }))
+      .sort((a, b) => b.netPnl - a.netPnl);
+  }, [filteredDecisions]);
+
+  const alerts = useMemo(() => {
+    const derived = [];
+    if (killSwitch) {
+      derived.push({ id: `kill-${risk.kill_switch_reason || "active"}`, severity: "critical", source: "risk", message: risk.kill_switch_reason || "Kill switch active", timestamp: new Date().toISOString() });
+    }
+    if (!risk.trading_allowed) {
+      derived.push({ id: "trading-halted", severity: "critical", source: "risk", message: "Trading currently halted", timestamp: new Date().toISOString() });
+    }
+    if ((risk.drawdown_pct || 0) > 5) {
+      derived.push({ id: `drawdown-${risk.drawdown_pct}`, severity: "warn", source: "risk", message: `Drawdown elevated at ${(risk.drawdown_pct || 0).toFixed(2)}%`, timestamp: new Date().toISOString() });
+    }
+    (riskEvents?.events || []).forEach((e, idx) => {
+      derived.push({
+        id: `${e.timestamp || idx}-${e.message || e.event}`,
+        severity: e.level === "error" ? "critical" : e.level === "warning" ? "warn" : "info",
+        source: "risk",
+        message: e.message || e.event || "Risk event",
+        timestamp: e.timestamp || new Date().toISOString(),
+      });
+    });
+    filteredEventTape.forEach((e, idx) => {
+      derived.push({
+        id: `agent-${e.timestamp || idx}-${e.message}`,
+        severity: e.level === "error" ? "critical" : e.level === "success" ? "info" : "warn",
+        source: "agent",
+        message: e.message,
+        timestamp: e.timestamp || new Date().toISOString(),
+      });
+    });
+    const seen = new Set();
+    return derived
+      .filter((a) => !seen.has(a.id) && seen.add(a.id))
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, 25);
+  }, [killSwitch, risk.kill_switch_reason, risk.trading_allowed, risk.drawdown_pct, riskEvents?.events, filteredEventTape]);
+
+  const unreadAlerts = alerts.filter((a) => !acknowledgedAlerts.includes(a.id));
+
+  useEffect(() => {
+    if (!uiSettings.soundAlerts) return;
+    const hasCritical = unreadAlerts.some((a) => a.severity === "critical");
+    if (hasCritical) {
+      window?.navigator?.vibrate?.(120);
+    }
+  }, [unreadAlerts, uiSettings.soundAlerts]);
 
   return (
     <div style={{ minHeight: "100vh", background: "#060b14", color: "#e2e8f0", fontFamily: "'Inter', system-ui, sans-serif" }}>
@@ -404,6 +640,31 @@ export default function TradingDashboard() {
             <div style={{ fontSize: 10, color: "#1e293b" }}>{lastUpdate.toLocaleTimeString("en-IN")}</div>
 
             <button
+              onClick={() => setShowAlerts((p) => !p)}
+              style={{
+                background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, padding: "6px 10px",
+                cursor: "pointer", color: unreadAlerts.length ? "#f59e0b" : "#64748b", position: "relative",
+              }}
+            >
+              <Bell size={14} />
+              {unreadAlerts.length > 0 && (
+                <span style={{ position: "absolute", top: -4, right: -4, background: "#ef4444", color: "white", borderRadius: 999, fontSize: 9, minWidth: 16, lineHeight: "16px" }}>
+                  {unreadAlerts.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setSettingsOpen((p) => !p)}
+              style={{
+                background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, padding: "6px 10px",
+                cursor: "pointer", color: "#64748b",
+              }}
+            >
+              <Settings size={14} />
+            </button>
+            
+            <button
               onClick={engineRunning ? handleStopEngine : handleStartEngine}
               disabled={startingEngine}
               style={{
@@ -420,6 +681,53 @@ export default function TradingDashboard() {
             </button>
           </div>
         </div>
+
+        {showAlerts && (
+          <div style={{ position: "absolute", right: 18, top: 62, width: 380, maxHeight: 420, overflowY: "auto", zIndex: 120, background: "#0b1220", border: "1px solid #1e293b", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 11, color: "#94a3b8" }}>
+              <span>Alerts Center</span>
+              <span>{unreadAlerts.length} unread</span>
+            </div>
+            {alerts.length === 0 ? <div style={{ color: "#475569", fontSize: 11 }}>No active alerts.</div> : alerts.map((a) => {
+              const isUnread = !acknowledgedAlerts.includes(a.id);
+              const color = a.severity === "critical" ? "#ef4444" : a.severity === "warn" ? "#f59e0b" : "#22d3ee";
+              return (
+                <div key={a.id} style={{ border: "1px solid #1e293b", borderLeft: `3px solid ${color}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8, opacity: isUnread ? 1 : 0.6 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                    <span style={{ fontSize: 10, color }}>{a.severity.toUpperCase()} · {a.source}</span>
+                    <span style={{ fontSize: 10, color: "#475569" }}>{new Date(a.timestamp).toLocaleTimeString("en-IN")}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#cbd5e1", marginBottom: 6 }}>{a.message}</div>
+                  {isUnread && (
+                    <button onClick={() => setAcknowledgedAlerts((prev) => [...prev, a.id])} style={{ fontSize: 10, color: "#22d3ee", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                      Acknowledge
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {settingsOpen && (
+          <div style={{ position: "absolute", right: 410, top: 62, width: 280, zIndex: 120, background: "#0b1220", border: "1px solid #1e293b", borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8 }}>Dashboard settings</div>
+            {[
+              { key: "compactMode", label: "Compact table density" },
+              { key: "soundAlerts", label: "Sound on critical alerts" },
+              { key: "colorBlindMode", label: "Color blind palette" },
+            ].map((item) => (
+              <label key={item.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, fontSize: 11, color: "#cbd5e1" }}>
+                {item.label}
+                <input
+                  type="checkbox"
+                  checked={uiSettings[item.key]}
+                  onChange={(e) => setUiSettings((prev) => ({ ...prev, [item.key]: e.target.checked }))}
+                />
+              </label>
+            ))}
+          </div>
+        )}
       </header>
 
       <main style={{ maxWidth: 1700, margin: "0 auto", padding: "20px 24px", position: "relative", zIndex: 1 }}>
@@ -565,10 +873,11 @@ export default function TradingDashboard() {
         <div style={{ background: "rgba(15,23,42,0.85)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, overflow: "hidden" }}>
           <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "0 20px" }}>
             {[
-              { id: "positions", label: "Positions", count: positions.length },
-              { id: "orders", label: "Orders", count: orders.length },
-              { id: "signals", label: "AI Signals", count: agentDecisions.length },
-              { id: "ticks", label: "Live Ticks" },
+              { id: "positions", label: "Positions", count: filteredPositions.length },
+              { id: "orders", label: "Orders", count: filteredOrders.length },
+              { id: "signals", label: "AI Signals", count: filteredDecisions.length },
+              { id: "ticks", label: "Live Ticks", count: filteredTicksEntries.length },
+              { id: "exposure", label: "Exposure", count: exposureData.byPosition.length },
               { id: "history", label: "History" },
             ].map(tab => (
               <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
@@ -594,10 +903,33 @@ export default function TradingDashboard() {
             </button>
           </div>
 
+          <div style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "10px 20px", display: "grid", gridTemplateColumns: "1.5fr repeat(4, 1fr)", gap: 10 }}>
+            <input
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search symbol, tag, commentary..."
+              style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#cbd5e1", borderRadius: 6, padding: "8px 10px", fontSize: 11 }}
+            />
+            <select value={strategyFilter} onChange={(e) => setStrategyFilter(e.target.value)} style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#cbd5e1", borderRadius: 6, padding: "8px 10px", fontSize: 11 }}>
+              {strategyOptions.map((s) => <option key={s} value={s}>{s === "all" ? "All strategies" : s.replace(/_/g, " ")}</option>)}
+            </select>
+            <select value={brokerFilter} onChange={(e) => setBrokerFilter(e.target.value)} style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#cbd5e1", borderRadius: 6, padding: "8px 10px", fontSize: 11 }}>
+              {brokerOptions.map((b) => <option key={b} value={b}>{b === "all" ? "All brokers" : b}</option>)}
+            </select>
+            <select value={timeRange} onChange={(e) => setTimeRange(e.target.value)} style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#cbd5e1", borderRadius: 6, padding: "8px 10px", fontSize: 11 }}>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+              <option value="today">Today</option>
+            </select>
+            <button onClick={() => { setSearchTerm(""); setStrategyFilter("all"); setBrokerFilter("all"); setTimeRange("today"); }} style={{ background: "#0ea5e915", border: "1px solid #0ea5e940", color: "#0ea5e9", borderRadius: 6, cursor: "pointer", fontSize: 11 }}>
+              Clear filters
+            </button>
+          </div>
+
           <div style={{ padding: "0 20px 20px", minHeight: 300 }}>
 
             {activeTab === "positions" && (
-              positions.length === 0 ? (
+              filteredPositions.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
                   {engineRunning ? "No open positions" : "Start the engine to see positions"}
                 </div>
@@ -605,23 +937,23 @@ export default function TradingDashboard() {
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>{["Symbol", "Side", "Qty", "Avg Price", "LTP", "P&L", "P&L %", "Broker"].map(h => (
-                      <th key={h} style={{ padding: "12px 8px", textAlign: "left", fontSize: 9, color: "#334155", letterSpacing: 2, textTransform: "uppercase", borderBottom: "1px solid #0f172a" }}>{h}</th>
+                      <th key={h} style={{ padding: rowPadding, textAlign: "left", fontSize: 9, color: "#334155", letterSpacing: 2, textTransform: "uppercase", borderBottom: "1px solid #0f172a" }}>{h}</th>
                     ))}</tr>
                   </thead>
                   <tbody>
-                    {positions.map((p, i) => (
+                    {filteredPositions.map((p, i) => (
                       <tr key={i} style={{ borderBottom: "1px solid #0a0f1a" }}>
-                        <td style={{ padding: "13px 8px", fontWeight: 700, fontSize: 13 }}>{p.symbol}</td>
-                        <td style={{ padding: "13px 8px" }}><Badge text={p.side} /></td>
-                        <td style={{ padding: "13px 8px", fontFamily: "monospace", fontSize: 12 }}>{p.qty}</td>
-                        <td style={{ padding: "13px 8px", fontFamily: "monospace", fontSize: 12 }}>₹{(p.avg || 0).toLocaleString("en-IN")}</td>
-                        <td style={{ padding: "13px 8px", fontFamily: "monospace", fontSize: 12, color: "#94a3b8" }}>₹{(p.ltp || 0).toLocaleString("en-IN")}</td>
-                        <td style={{ padding: "13px 8px" }}><PnLValue value={p.pnl || 0} size={13} /></td>
-                        <td style={{ padding: "13px 8px", fontSize: 12, color: (p.pnl || 0) >= 0 ? "#10b981" : "#ef4444" }}>
+                        <td style={{ padding: rowPadding, fontWeight: 700, fontSize: 13 }}>{p.symbol}</td>
+                        <td style={{ padding: rowPadding }}><Badge text={p.side} /></td>
+                        <td style={{ padding: rowPadding, fontFamily: "monospace", fontSize: 12 }}>{p.qty}</td>
+                        <td style={{ padding: rowPadding, fontFamily: "monospace", fontSize: 12 }}>₹{(p.avg || 0).toLocaleString("en-IN")}</td>
+                        <td style={{ padding: rowPadding, fontFamily: "monospace", fontSize: 12, color: "#94a3b8" }}>₹{(p.ltp || 0).toLocaleString("en-IN")}</td>
+                        <td style={{ padding: rowPadding }}><PnLValue value={p.pnl || 0} size={13} /></td>
+                        <td style={{ padding: rowPadding, fontSize: 12, color: (p.pnl || 0) >= 0 ? "#10b981" : "#ef4444" }}>
                           {(p.pnl || 0) >= 0 ? <ArrowUpRight size={12} style={{ display: "inline" }} /> : <ArrowDownRight size={12} style={{ display: "inline" }} />}
                           {Math.abs(((p.ltp - p.avg) / p.avg * 100) || 0).toFixed(2)}%
                         </td>
-                        <td style={{ padding: "13px 8px" }}><Badge text={p.broker} /></td>
+                        <td style={{ padding: rowPadding }}><Badge text={p.broker} /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -630,30 +962,38 @@ export default function TradingDashboard() {
             )}
 
             {activeTab === "orders" && (
-              orders.length === 0 ? (
+              filteredOrders.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
                   {engineRunning ? "No orders today" : "Start the engine to see orders"}
                 </div>
               ) : (
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
-                    <tr>{["Time", "Symbol", "Side", "Qty", "Price", "Avg", "Status", "Tag"].map(h => (
-                      <th key={h} style={{ padding: "12px 8px", textAlign: "left", fontSize: 9, color: "#334155", letterSpacing: 2, textTransform: "uppercase", borderBottom: "1px solid #0f172a" }}>{h}</th>
+                    <tr>{["Time", "Symbol", "Side", "Qty", "Price", "Avg", "Status", "Tag", "Exec"].map(h => (
+                      <th key={h} style={{ padding: rowPadding, textAlign: "left", fontSize: 9, color: "#334155", letterSpacing: 2, textTransform: "uppercase", borderBottom: "1px solid #0f172a" }}>{h}</th>
                     ))}</tr>
                   </thead>
                   <tbody>
-                    {orders.map((o, i) => (
+                    {filteredOrders.map((o, i) => {
+                      const intended = Number(o.price || 0);
+                      const avg = Number(o.average_price || 0);
+                      const slippage = intended > 0 && avg > 0 ? ((avg - intended) / intended) * 100 : null;
+                      const latency = o.placed_at && o.filled_at ? (new Date(o.filled_at).getTime() - new Date(o.placed_at).getTime()) / 1000 : null;
+                      return (
                       <tr key={i} style={{ borderBottom: "1px solid #0a0f1a" }}>
-                        <td style={{ padding: "12px 8px", fontFamily: "monospace", fontSize: 11, color: "#475569" }}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</td>
-                        <td style={{ padding: "12px 8px", fontWeight: 700, fontSize: 12 }}>{o.symbol}</td>
-                        <td style={{ padding: "12px 8px" }}><Badge text={o.side} /></td>
-                        <td style={{ padding: "12px 8px", fontFamily: "monospace", fontSize: 12 }}>{o.quantity}</td>
-                        <td style={{ padding: "12px 8px", fontFamily: "monospace", fontSize: 12 }}>{o.price ? `₹${o.price.toLocaleString("en-IN")}` : "MKT"}</td>
-                        <td style={{ padding: "12px 8px", fontFamily: "monospace", fontSize: 12, color: "#64748b" }}>{o.average_price ? `₹${o.average_price.toLocaleString("en-IN")}` : "—"}</td>
-                        <td style={{ padding: "12px 8px" }}><Badge text={o.status} /></td>
-                        <td style={{ padding: "12px 8px", fontSize: 10, color: "#475569" }}>{o.tag || "—"}</td>
+                        <td style={{ padding: rowPadding, fontFamily: "monospace", fontSize: 11, color: "#475569" }}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</td>
+                        <td style={{ padding: rowPadding, fontWeight: 700, fontSize: 12 }}>{o.symbol}</td>
+                        <td style={{ padding: rowPadding }}><Badge text={o.side} /></td>
+                        <td style={{ padding: rowPadding, fontFamily: "monospace", fontSize: 12 }}>{o.quantity}</td>
+                        <td style={{ padding: rowPadding, fontFamily: "monospace", fontSize: 12 }}>{o.price ? `₹${o.price.toLocaleString("en-IN")}` : "MKT"}</td>
+                        <td style={{ padding: rowPadding, fontFamily: "monospace", fontSize: 12, color: "#64748b" }}>{o.average_price ? `₹${o.average_price.toLocaleString("en-IN")}` : "—"}</td>
+                        <td style={{ padding: rowPadding }}><Badge text={o.status} /></td>
+                        <td style={{ padding: rowPadding, fontSize: 10, color: "#475569" }}>{o.tag || "—"}</td>
+                        <td style={{ padding: rowPadding, fontSize: 10, color: "#64748b" }} title={`Slippage: ${slippage === null ? "n/a" : `${slippage.toFixed(2)}%`} · Fill latency: ${latency === null ? "n/a" : `${latency.toFixed(1)}s`}`}>
+                          {slippage === null ? "—" : `${slippage.toFixed(2)}%`} · {latency === null ? "—" : `${latency.toFixed(1)}s`}
+                        </td>
                       </tr>
-                    ))}
+                    )})}
                   </tbody>
                 </table>
               )
@@ -702,7 +1042,7 @@ export default function TradingDashboard() {
                   </div>
 
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
-                    {reasoningSignals.map((s, idx) => {
+                    {filteredSignals.map((s, idx) => {
                       const confidence = Math.round((Number(s.confidence || 0) || 0) * 100);
                       const riskStatus = s.risk_status || (s.action === "NO_ACTION" ? "rejected" : "approved");
                       return (
@@ -768,9 +1108,9 @@ export default function TradingDashboard() {
                   </div>
 
                   <div style={{ marginTop: 10, display: "flex", gap: 12, overflowX: "auto", whiteSpace: "nowrap", paddingBottom: 2 }}>
-                    {eventTape.length === 0 ? (
+                    {filteredEventTape.length === 0 ? (
                       <span style={{ fontSize: 11, color: "#334155" }}>Waiting for AI events…</span>
-                    ) : eventTape.slice().reverse().map((e, idx) => (
+                    ) : filteredEventTape.slice().reverse().map((e, idx) => (
                       <span key={idx} style={{
                         fontSize: 11,
                         color: e.level === "error" ? "#ef4444" : e.level === "success" ? "#10b981" : "#64748b",
@@ -781,11 +1121,11 @@ export default function TradingDashboard() {
                   </div>
                 </div>
       
-                {agentDecisions.length === 0 ? (
+                {filteredDecisions.length === 0 ? (
                   <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
                     {engineRunning ? "Waiting for first AI decision..." : "Start the engine to see AI decisions"}
                   </div>
-                ) : agentDecisions.slice().reverse().map((d, i) => (
+                ) : filteredDecisions.slice().reverse().map((d, i) => (
                   <div key={i} style={{
                     background: "#0a0f1a", border: "1px solid #1e293b",
                     borderRadius: 10, padding: "14px 16px", marginTop: 12,
@@ -825,11 +1165,11 @@ export default function TradingDashboard() {
 
             {activeTab === "ticks" && (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, paddingTop: 14 }}>
-                {Object.entries(ticks).length === 0 ? (
+                {filteredTicksEntries.length === 0 ? (
                   <div style={{ gridColumn: "1/-1", textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
                     {engineRunning ? "Waiting for tick data..." : "Start the engine to see live ticks"}
                   </div>
-                ) : Object.entries(ticks).map(([symbol, ltp]) => {
+                ) : filteredTicksEntries.map(([symbol, ltp]) => {
                   const current = Number(ltp || 0);
                   const prev = Number(prevTicks[symbol] || current || 0);
                   const delta = current - prev;
@@ -870,7 +1210,46 @@ export default function TradingDashboard() {
                 )})}
               </div>
             )}
-            
+
+            {activeTab === "exposure" && (
+              <div style={{ paddingTop: 14 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 14 }}>
+                  <StatCard label="Gross Exposure" value={`₹${Math.round(exposureData.total).toLocaleString("en-IN")}`} sub="Across filtered positions" color="#22d3ee" />
+                  <StatCard label="Long Exposure" value={`${exposureData.longPct.toFixed(1)}%`} sub="BUY side" color="#10b981" />
+                  <StatCard label="Short Exposure" value={`${exposureData.shortPct.toFixed(1)}%`} sub="SELL/SHORT side" color="#ef4444" />
+                  <StatCard label="Top Position" value={`${(exposureData.byPosition[0]?.weightPct || 0).toFixed(1)}%`} sub={exposureData.concentrationFlag ? "⚠️ High concentration" : "Within limit"} color={exposureData.concentrationFlag ? "#ef4444" : "#6366f1"} />
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <div style={{ background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 14px" }}>
+                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>Top Position Weights</div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={exposureData.byPosition}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#0f172a" />
+                        <XAxis dataKey="symbol" tick={{ fill: "#334155", fontSize: 9 }} tickLine={false} />
+                        <YAxis tick={{ fill: "#334155", fontSize: 9 }} tickLine={false} tickFormatter={(v) => `${v.toFixed(0)}%`} />
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1e293b" }} formatter={(v) => [`${v.toFixed(2)}%`, "Weight"]} />
+                        <Bar dataKey="weightPct" fill="#6366f1" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div style={{ background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 14px" }}>
+                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>Sector Allocation</div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={exposureData.bySector.slice(0, 7)}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#0f172a" />
+                        <XAxis dataKey="sector" tick={{ fill: "#334155", fontSize: 9 }} tickLine={false} />
+                        <YAxis tick={{ fill: "#334155", fontSize: 9 }} tickLine={false} tickFormatter={(v) => `${v.toFixed(0)}%`} />
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1e293b" }} formatter={(v) => [`${v.toFixed(2)}%`, "Weight"]} />
+                        <Bar dataKey="weightPct" fill="#22d3ee" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
+            )}
+  
             {activeTab === "history" && (
               <div style={{ paddingTop: 14 }}>
                 <div style={{ fontWeight: 600, fontSize: 12, color: "#64748b", marginBottom: 12 }}>
@@ -894,6 +1273,67 @@ export default function TradingDashboard() {
                   </div>
                 )}
 
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 16 }}>
+                  {[
+                    { label: "Fill Rate", value: `${executionMetrics.fillRate.toFixed(1)}%` },
+                    { label: "Avg Slippage", value: executionMetrics.avgSlippage === null ? "—" : `${executionMetrics.avgSlippage.toFixed(2)}%` },
+                    { label: "Avg Fill Latency", value: executionMetrics.avgLatency === null ? "—" : `${executionMetrics.avgLatency.toFixed(1)}s` },
+                    { label: "Rejections", value: executionMetrics.rejectedCount },
+                  ].map((m) => (
+                    <div key={m.label} style={{ background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 8, padding: "12px 14px", textAlign: "center" }}>
+                      <div style={{ fontSize: 9, color: "#334155", letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 6 }}>{m.label}</div>
+                      <div style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 15 }}>{m.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {executionMetrics.topRejections.length > 0 && (
+                  <div style={{ marginTop: 10, fontSize: 11, color: "#64748b" }}>
+                    Top rejection reasons: {executionMetrics.topRejections.map(([reason, count]) => `${reason} (${count})`).join(" · ")}
+                  </div>
+                )}
+
+                <div style={{ marginTop: 18, background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 14px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, color: "#94a3b8" }}>Strategy Leaderboard</div>
+                    <div style={{ fontSize: 10, color: "#475569" }}>Click strategy badge above to filter</div>
+                  </div>
+                  {strategyLeaderboard.length === 0 ? (
+                    <div style={{ fontSize: 11, color: "#475569" }}>No strategy stats for selected filters.</div>
+                  ) : (
+                    <>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <BarChart data={strategyLeaderboard.slice(0, 6)}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#0f172a" />
+                          <XAxis dataKey="strategy" tick={{ fill: "#334155", fontSize: 9 }} tickLine={false} />
+                          <YAxis tick={{ fill: "#334155", fontSize: 9 }} tickLine={false} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`} />
+                          <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1e293b" }} formatter={(v) => [`₹${Number(v).toLocaleString("en-IN")}`, "Net P&L"]} />
+                          <ReferenceLine y={0} stroke="#1e293b" />
+                          <Bar dataKey="netPnl" fill="#a78bfa" radius={[3, 3, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}>
+                        <thead>
+                          <tr>{["Strategy", "Signals", "Execution %", "Avg Confidence", "Net P&L"].map((h) => (
+                            <th key={h} style={{ padding: "8px 6px", textAlign: "left", fontSize: 9, color: "#334155", letterSpacing: 1.2, textTransform: "uppercase", borderBottom: "1px solid #0f172a" }}>{h}</th>
+                          ))}</tr>
+                        </thead>
+                        <tbody>
+                          {strategyLeaderboard.slice(0, 8).map((row) => (
+                            <tr key={row.strategy} style={{ borderBottom: "1px solid #0a0f1a" }}>
+                              <td style={{ padding: "8px 6px" }}><button onClick={() => setStrategyFilter(row.strategy)} style={{ background: "none", border: "none", color: "#22d3ee", cursor: "pointer", padding: 0 }}>{row.strategy.replace(/_/g, " ")}</button></td>
+                              <td style={{ padding: "8px 6px", fontFamily: "monospace", fontSize: 11 }}>{row.signals}</td>
+                              <td style={{ padding: "8px 6px", fontFamily: "monospace", fontSize: 11 }}>{row.executionRate.toFixed(1)}%</td>
+                              <td style={{ padding: "8px 6px", fontFamily: "monospace", fontSize: 11 }}>{row.avgConfidence.toFixed(1)}%</td>
+                              <td style={{ padding: "8px 6px", fontFamily: "monospace", fontSize: 11, color: row.netPnl >= 0 ? "#10b981" : "#ef4444" }}>₹{Math.round(row.netPnl).toLocaleString("en-IN")}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
+                  )}
+                </div>
+    
                 {analyticsData && (
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12, marginTop: 20 }}>
                     {[
