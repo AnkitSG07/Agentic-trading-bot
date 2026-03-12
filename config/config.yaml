@@ -39,7 +39,13 @@ brokers:
 
 ## ─── AI AGENT SETTINGS ─────────────────────────────────────
 agent:
-  model: "claude-sonnet-4-20250514"
+  api_key_env: "GEMINI_API_KEY"
+  model: "gemini-2.5-flash"
+  fallback_models:
+    - "gemma-3-1b-it"
+    - "gemma-3-4b-it"
+    - "gemma-3-12b-it"
+    - "gemma-3-27b-it"
   max_tokens: 4096
   temperature: 0.1
   decision_interval_seconds: 60       # How often agent evaluates market
