@@ -1,18 +1,20 @@
 """
 AI Agent Brain - The intelligence core of the trading bot.
-Uses Claude API to make multi-strategy trading decisions based on
+Uses Gemini API to make multi-strategy trading decisions based on
 real-time market data, technical indicators, and portfolio state.
 """
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
-import anthropic
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger("agent.brain")
 
@@ -181,42 +183,101 @@ Generate 0-5 signals based on conviction. Quality over quantity.
 class TradingAgent:
     """
     The AI brain that drives all trading decisions.
-    Wraps the Anthropic Claude API with domain-specific trading logic.
+    Wraps Gemini with trading-specific prompting and response parsing.
     """
 
     def __init__(self, config: dict):
         self.config = config
-        self.client = anthropic.Anthropic()
-        self.model = config.get("model", "claude-sonnet-4-20250514")
+        self.api_key = os.getenv(config.get("api_key_env", "GEMINI_API_KEY"), "")
+        self.client = genai.Client(api_key=self.api_key) if self.api_key else None
+        self.model = config.get("model", "gemini-2.5-flash")
+        self.fallback_models = config.get("fallback_models", [
+            "gemma-3-1b-it",
+            "gemma-3-4b-it",
+            "gemma-3-12b-it",
+            "gemma-3-27b-it",
+        ])
         self.max_tokens = config.get("max_tokens", 4096)
         self.temperature = config.get("temperature", 0.1)
         self.confidence_threshold = config.get("confidence_threshold", 0.65)
         self.decision_history: list[dict] = []
 
+    def _is_rate_limited_error(self, err: Exception) -> bool:
+        msg = str(err).lower()
+        return any(token in msg for token in ("429", "rate limit", "quota", "resource_exhausted"))
+
+    def _extract_response_text(self, response: Any) -> str:
+        text = getattr(response, "text", None)
+        if text:
+            return text.strip()
+
+        candidates = getattr(response, "candidates", []) or []
+        for cand in candidates:
+            content = getattr(cand, "content", None)
+            if not content:
+                continue
+            for part in getattr(content, "parts", []) or []:
+                part_text = getattr(part, "text", None)
+                if part_text:
+                    return part_text.strip()
+        return ""
+
+    def _generate_text(self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool) -> str:
+        if not self.client:
+            raise RuntimeError("Gemini API key missing. Set GEMINI_API_KEY in environment.")
+
+        models = [self.model] + [m for m in self.fallback_models if m != self.model]
+        last_error: Exception | None = None
+
+        for idx, model in enumerate(models):
+            try:
+                config = types.GenerateContentConfig(
+                    system_instruction=AGENT_SYSTEM_PROMPT,
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                    response_mime_type="application/json" if expect_json else "text/plain",
+                )
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config,
+                )
+                if model != self.model:
+                    logger.warning(f"Using fallback LLM model due to primary model limits: {model}")
+                return self._extract_response_text(response)
+            except Exception as e:
+                last_error = e
+                if self._is_rate_limited_error(e) and idx < len(models) - 1:
+                    logger.warning(f"Model {model} rate-limited; trying fallback model.")
+                    continue
+                raise
+
+        raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+
+    @staticmethod
+    def _strip_code_fences(raw_text: str) -> str:
+        raw = raw_text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```", 2)[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return raw.strip()
+
     async def analyze_and_decide(self, context: MarketContext) -> list[TradingSignal]:
         """
-        Core decision function. Takes market context, calls Claude,
+        Core decision function. Takes market context, calls Gemini,
         returns actionable trading signals.
         """
         prompt = self._build_prompt(context)
 
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
+            raw_text = self._generate_text(
+                prompt,
                 temperature=self.temperature,
-                system=AGENT_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self.max_tokens,
+                expect_json=True,
             )
-
-            raw_text = response.content[0].text.strip()
-            # Strip markdown code fences if present
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-
-            decision = json.loads(raw_text)
+            decision = json.loads(self._strip_code_fences(raw_text))
             signals = self._parse_signals(decision, context)
 
             # Log the decision
@@ -243,7 +304,13 @@ class TradingAgent:
             logger.error(f"Failed to parse AI response as JSON: {e}")
             return []
         except Exception as e:
-            logger.error(f"AI agent error: {e}")
+            err = str(e).lower()
+            if "api key" in err and "missing" in err:
+                logger.error("AI agent disabled: missing GEMINI_API_KEY.")
+            elif self._is_rate_limited_error(e):
+                logger.error("AI agent failed: all configured Gemini models are rate-limited.")
+            else:
+                logger.error(f"AI agent error: {e}")
             return []
 
     async def review_strategy(self, performance_data: dict) -> dict:
@@ -275,17 +342,13 @@ Respond with JSON:
 }}
 """
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=2048,
+            raw = self._generate_text(
+                prompt,
                 temperature=0.2,
-                system=AGENT_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2048,
+                expect_json=True,
             )
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1][4:] if "json" in raw else raw.split("```")[1]
-            return json.loads(raw)
+            return json.loads(self._strip_code_fences(raw))
         except Exception as e:
             logger.error(f"Strategy review error: {e}")
             return {}
@@ -300,14 +363,12 @@ Position: {json.dumps(position, indent=2)}
 Respond in 2-3 sentences max.
 """
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=256,
+            return self._generate_text(
+                prompt,
                 temperature=0.1,
-                system=AGENT_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=256,
+                expect_json=False,
             )
-            return response.content[0].text.strip()
         except Exception as e:
             logger.error(f"explain_position error: {e}")
             return "Unable to analyze position."
