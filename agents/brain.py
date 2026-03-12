@@ -2,14 +2,34 @@
 AI Agent Brain - The intelligence core of the trading bot.
 Uses Gemini API to make multi-strategy trading decisions based on
 real-time market data, technical indicators, and portfolio state.
+
+Fixes applied:
+1.  _generate_text wrapped in asyncio.to_thread (non-blocking)
+2.  Exponential backoff between model fallbacks on rate limits
+3.  PERMISSION_DENIED (403) caught as unavailable model error
+4.  Safe .text access via candidates traversal (handles blocked responses)
+5.  confidence_threshold validated at __init__ time (clamped to [0.30, 0.95])
+6.  Decision history capped at 200 entries (memory leak fix)
+7.  Signal quantity validated > 0 before accepting
+8.  _extract_json: robust JSON extraction handles prose preamble, single-line
+    fences, trailing markdown, and nested fences (replaces _strip_code_fences)
+9.  review_strategy validates each parameter_adjustments field individually —
+    one bad field (e.g. non-numeric confidence_threshold) no longer discards
+    the entire review result
+10. _generate_text returns (text, model_used) — decision record now stores the
+    actual Gemini model used, not always self.model
 """
 
+import asyncio
 import json
 import logging
+import math
 import os
+import random
+import time
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Optional
 
@@ -17,6 +37,17 @@ from google import genai
 from google.genai import types
 
 logger = logging.getLogger("agent.brain")
+
+# ─── CONSTANTS ───────────────────────────────────────────────────────────────
+
+MAX_DECISION_HISTORY = 200          # Cap memory usage
+MIN_CONFIDENCE_THRESHOLD = 0.30     # Never go below this
+MAX_CONFIDENCE_THRESHOLD = 0.95     # Never go above this
+RATE_LIMIT_BACKOFF_SECONDS = 5.0    # Base wait before trying next model
+# FIX 4: Cap + jitter prevent a long fallback list from blocking the decision loop
+# for many seconds and avoid thundering-herd if multiple instances back off together.
+RATE_LIMIT_BACKOFF_MAX_SECONDS = 30.0   # Hard ceiling on any single wait
+RATE_LIMIT_BACKOFF_JITTER = 0.20        # ±20% uniform jitter applied after capping
 
 
 # ─── SIGNAL TYPES ────────────────────────────────────────────────────────────
@@ -89,9 +120,22 @@ You operate as an autonomous trading brain with deep expertise in:
 When analyzing market data, follow this process:
 1. **Market Regime Detection**: Identify if market is trending, ranging, or volatile
 2. **Strategy Selection**: Choose the BEST strategy for current conditions
-3. **Signal Generation**: Provide specific, actionable signals with exact levels
+3. **Signal Generation**: Provide specific, actionable signals with exact price levels
 4. **Risk Calculation**: Always include SL, target, and position size
-5. **Confidence Scoring**: Rate each signal 0.0-1.0 based on confluence
+5. **Confidence Scoring**: Rate each signal 0.0-1.0 based on confluence of indicators
+
+## Indicator Interpretation Rules
+- RSI > 70 = overbought (look for shorts/exits on BUY positions)
+- RSI < 30 = oversold (look for longs/exits on SELL positions)
+- MACD histogram turning positive from negative = bullish momentum building
+- MACD histogram turning negative from positive = bearish momentum building
+- BB width contracting (squeeze) = breakout imminent, wait for direction
+- BB width expanding = trend in motion, trade with trend
+- Supertrend bullish + price above VWAP = strong long bias
+- Supertrend bearish + price below VWAP = strong short bias
+- PCR > 1.2 = bearish (more puts = market hedging downside)
+- PCR < 0.8 = bullish (less put protection = confidence)
+- VIX > 20 = high fear, favour mean-reversion; VIX < 15 = low fear, favour momentum
 
 ## Available Strategies
 - **Momentum**: RSI + MACD + Volume confirmation for trend trades
@@ -101,19 +145,21 @@ When analyzing market data, follow this process:
 - **Index Scalping**: NIFTY/BANKNIFTY intraday with Supertrend
 
 ## Output Rules
-- ALWAYS respond with valid JSON only, no additional text
+- ALWAYS respond with valid JSON only, no markdown, no extra text
 - Include specific price levels (not vague descriptions)
 - If market conditions are unfavorable, return NO_ACTION signals
 - Risk-first mindset: Never risk more than 2% of capital per trade
 - Respect market hours (9:15 AM - 3:30 PM IST)
 - Factor in STT and brokerage in profit calculations
+- Minimum risk:reward must be 1.5:1 to generate a BUY/SELL signal
 
-## Risk Limits (HARD RULES)
+## Hard Risk Rules (NEVER violate)
 - Max 5% capital per trade
-- Max 10 open positions simultaneously  
+- Max 10 open positions simultaneously
 - Stop if daily loss exceeds 2% of capital
 - Stop if account drawdown exceeds 8%
 - Never average losing positions
+- No signals in first 15 minutes (9:15-9:30) or last 15 minutes (3:15-3:30)
 """
 
 DECISION_PROMPT_TEMPLATE = """
@@ -125,9 +171,9 @@ DECISION_PROMPT_TEMPLATE = """
 ## Index Data
 - NIFTY 50: {nifty50_ltp}
 - BANK NIFTY: {banknifty_ltp}
-- INDIA VIX: {india_vix}
+- INDIA VIX: {india_vix} ({vix_interpretation})
 - Market Trend: {market_trend}
-- Put-Call Ratio: {pcr}
+- Put-Call Ratio: {pcr} ({pcr_interpretation})
 
 ## Portfolio State
 - Available Capital: ₹{available_capital:,.0f}
@@ -138,18 +184,19 @@ DECISION_PROMPT_TEMPLATE = """
 ## Watchlist Analysis
 {watchlist_summary}
 
-## Options Flow (if available)
+## Options Flow
 {options_summary}
 
 ## News Sentiment
 {news_sentiment}
 
 ---
-Analyze this data and generate trading signals. Return ONLY a JSON object:
+Analyze the above data carefully. Apply your indicator interpretation rules.
+Return ONLY a valid JSON object with this exact schema:
 
 {{
   "market_regime": "trending_up | trending_down | ranging | high_volatility",
-  "market_commentary": "brief 2-sentence market view",
+  "market_commentary": "2-sentence max market view",
   "signals": [
     {{
       "action": "BUY | SELL | SHORT | COVER | SQUARE_OFF | NO_ACTION",
@@ -161,7 +208,7 @@ Analyze this data and generate trading signals. Return ONLY a JSON object:
       "stop_loss": 2420.00,
       "target": 2510.00,
       "confidence": 0.78,
-      "rationale": "RSI(14) at 62 crossing 60 with MACD bullish crossover. Volume 1.8x avg. Breaking above 20-day resistance at 2445.",
+      "rationale": "Specific indicator reasons: RSI(14)=62 crossed above 60, MACD bullish crossover, volume 1.8x avg, breaking above 20-day resistance at 2445.",
       "risk_reward": 2.1,
       "timeframe": "intraday",
       "product": "MIS",
@@ -169,12 +216,12 @@ Analyze this data and generate trading signals. Return ONLY a JSON object:
       "tags": ["breakout", "high_volume", "trend_following"]
     }}
   ],
-  "positions_to_exit": ["SYMBOL1", "SYMBOL2"],
+  "positions_to_exit": ["SYMBOL1"],
   "risk_assessment": "low | medium | high",
   "session_recommendation": "active_trading | selective | avoid_trading"
 }}
 
-Generate 0-5 signals based on conviction. Quality over quantity.
+Generate 0-5 signals based on conviction. Quality over quantity. No signal is better than a bad signal.
 """
 
 
@@ -186,67 +233,255 @@ class TradingAgent:
     Wraps Gemini with trading-specific prompting and response parsing.
     """
 
+    # ── Parameter adjustment schema ───────────────────────────────────────────
+    # Keys MUST match what the review_strategy prompt shows the AI in its example
+    # JSON (currently: rsi_overbought, confidence_threshold). Additional indicator
+    # keys are included so the AI can tune them if it chooses to suggest them.
+    #
+    # Format: field_name -> (type, min, max)
+    # Fields absent from this schema are silently dropped — the AI cannot inject
+    # arbitrary keys into bot configuration.
+    PARAM_SCHEMA: dict[str, tuple[type, float, float]] = {
+        # ── Reviewed directly by brain (must match review_strategy prompt) ──
+        "confidence_threshold":  (float, 0.30,  0.95),
+        "rsi_overbought":        (float, 60.0,  85.0),
+        # ── Indicator parameters (suggested by AI, applied by strategy layer) ──
+        "rsi_oversold":          (float, 15.0,  40.0),
+        "rsi_period":            (int,   7,     21),
+        "macd_fast":             (int,   5,     20),
+        "macd_slow":             (int,   15,    40),
+        "macd_signal_period":    (int,   5,     15),
+        "bb_period":             (int,   10,    30),
+        "bb_std":                (float, 1.5,    3.0),
+        "atr_period":            (int,   7,     21),
+        "supertrend_multiplier": (float, 1.0,    5.0),
+        # ── Risk / position sizing ─────────────────────────────────────────
+        "stop_loss_atr_mult":    (float, 0.5,    4.0),
+        "target_atr_mult":       (float, 1.0,    8.0),
+    }
+
+    # ── Consumer key contract ─────────────────────────────────────────────────
+    # The set of PARAM_SCHEMA keys that the engine / risk layer actually reads
+    # from the `parameter_adjustments` dict returned by review_strategy().
+    #
+    # HOW TO USE THIS:
+    #   1. When you wire up review_strategy() in engine.py / risk.py, populate
+    #      this frozenset with every key your code actually consumes:
+    #
+    #          TradingAgent.PARAM_CONSUMER_KEYS = frozenset({
+    #              "confidence_threshold", "rsi_overbought", ...
+    #          })
+    #
+    #   2. Any key in PARAM_SCHEMA that is NOT in PARAM_CONSUMER_KEYS will
+    #      produce a WARNING log on the first review cycle, making the mismatch
+    #      immediately visible without requiring a manual audit.
+    #
+    #   3. Add a unit test that asserts PARAM_CONSUMER_KEYS is non-empty and
+    #      is a subset of PARAM_SCHEMA.keys() — that catches typos on both sides.
+    #
+    # Until populated, the check is skipped (no false positives during development).
+    PARAM_CONSUMER_KEYS: frozenset[str] = frozenset()
+
     def __init__(self, config: dict):
         self.config = config
         self.api_key = os.getenv(config.get("api_key_env", "GEMINI_API_KEY"), "")
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         self.model = config.get("model", "gemini-2.5-flash")
-        self.fallback_models = config.get("fallback_models", [
+        self.fallback_models: list[str] = config.get("fallback_models", [
             "gemini-2.0-flash",
             "gemini-2.5-flash-lite",
             "gemini-2.0-flash-lite",
         ])
         self.max_tokens = config.get("max_tokens", 4096)
         self.temperature = config.get("temperature", 0.1)
-        self.confidence_threshold = config.get("confidence_threshold", 0.65)
+        # FIX 1: Clamp and validate confidence_threshold at boot, not just in review_strategy.
+        # Bad config values (0.01, 2, "high", None) are caught here before any trade runs.
+        self.confidence_threshold: float = self._validated_confidence_threshold(
+            config.get("confidence_threshold", 0.65),
+            fallback=0.65,
+            source="config",
+        )
         self.decision_history: list[dict] = []
+
+    @staticmethod
+    def _validated_confidence_threshold(
+        raw: Any,
+        *,
+        fallback: float,
+        source: str,
+    ) -> float:
+        """
+        Parse, validate and clamp a confidence threshold value.
+        Returns `fallback` if the value cannot be parsed or is out of range.
+        Logs a warning so the issue is visible in the boot log.
+        """
+        try:
+            ct = float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "confidence_threshold from %s is not numeric (%r); using fallback %.2f.",
+                source, raw, fallback,
+            )
+            return fallback
+
+        if ct < MIN_CONFIDENCE_THRESHOLD or ct > MAX_CONFIDENCE_THRESHOLD:
+            clamped = max(MIN_CONFIDENCE_THRESHOLD, min(MAX_CONFIDENCE_THRESHOLD, ct))
+            logger.warning(
+                "confidence_threshold from %s (%.4f) is outside [%.2f, %.2f]; "
+                "clamping to %.2f.",
+                source, ct, MIN_CONFIDENCE_THRESHOLD, MAX_CONFIDENCE_THRESHOLD, clamped,
+            )
+            return clamped
+
+        return ct
+
+    # Keys the AI commonly emits that map to a canonical PARAM_SCHEMA key.
+    # Applied before schema validation so the AI's natural vocabulary is accepted.
+    # When adding aliases: the *value* must be a key that exists in PARAM_SCHEMA.
+    PARAM_ALIASES: dict[str, str] = {
+        # AGENT_SYSTEM_PROMPT and most strategy configs call this "macd_signal";
+        # PARAM_SCHEMA uses "macd_signal_period" to avoid ambiguity with the
+        # indicator value of the same name that appears in watchlist_data.
+        "macd_signal": "macd_signal_period",
+    }
+
+    def _validate_param_adjustments(self, raw: Any) -> dict:
+        """
+        Field-by-field validation of every key in parameter_adjustments.
+
+        Rules applied in order:
+        1. Alias normalisation — common AI-emitted names (e.g. "macd_signal") are
+           transparently mapped to their canonical schema key before lookup.
+        2. Unknown keys are dropped (AI cannot create new config keys).
+        3. Non-numeric values are dropped with a warning.
+        4. Values outside the declared [min, max] range are clamped with a warning.
+        5. Integer-typed fields use round-half-up (not banker's rounding).
+
+        Returns a clean dict containing only validated, safe values.
+        """
+        if not isinstance(raw, dict):
+            logger.warning("parameter_adjustments is not a dict (%r); ignoring entirely.", type(raw).__name__)
+            return {}
+
+        clean: dict = {}
+        for raw_field, value in raw.items():
+            # FIX 3: resolve alias before schema lookup so the AI's natural
+            # vocabulary ("macd_signal") is accepted and stored under the
+            # canonical name ("macd_signal_period"). Without this, valid
+            # AI suggestions were silently dropped as "unknown" keys.
+            field = self.PARAM_ALIASES.get(raw_field, raw_field)
+            if raw_field != field:
+                logger.debug("Normalising alias %r → %r", raw_field, field)
+
+            if field not in self.PARAM_SCHEMA:
+                logger.warning("Dropping unknown parameter_adjustment field: %r = %r", raw_field, value)
+                continue
+
+            expected_type, lo, hi = self.PARAM_SCHEMA[field]
+
+            # Parse to float first regardless of expected_type (handles numeric strings)
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Dropping %r: non-numeric value %r (expected %s in [%s, %s]).",
+                    field, value, expected_type.__name__, lo, hi,
+                )
+                continue
+
+            # Clamp to declared range
+            if numeric < lo or numeric > hi:
+                clamped = max(lo, min(hi, numeric))
+                logger.warning(
+                    "Clamping %r: %.4g is outside [%s, %s], using %.4g.",
+                    field, numeric, lo, hi, clamped,
+                )
+                numeric = clamped
+
+            # Cast to declared type using round-half-up (not banker's rounding).
+            if expected_type is int:
+                clean[field] = int(math.floor(numeric + 0.5))
+            else:
+                clean[field] = float(numeric)
+
+        return clean
+
+    # ── Error Classification ──────────────────────────────────────────────────
 
     def _is_rate_limited_error(self, err: Exception) -> bool:
         msg = str(err).lower()
-        return any(token in msg for token in ("429", "rate limit", "quota", "resource_exhausted"))
+        return any(t in msg for t in ("429", "rate limit", "quota", "resource_exhausted"))
 
     def _is_unsupported_system_instruction_error(self, err: Exception) -> bool:
-        msg = str(err).lower()
-        return "developer instruction is not enabled" in msg
+        return "developer instruction is not enabled" in str(err).lower()
 
     def _is_unavailable_model_error(self, err: Exception) -> bool:
         msg = str(err).lower()
-        unavailable_tokens = (
-            "404",
-            "not_found",
-            "model is not found",
+        return any(t in msg for t in (
+            "404", "not_found", "model is not found",
             "is not found for api version",
             "not supported for generatecontent",
             "unknown model",
-        )
-        return any(token in msg for token in unavailable_tokens)
+            "403",                    # FIX: PERMISSION_DENIED for models not enabled
+            "permission_denied",
+            "not have permission",
+        ))
+
+    # ── Safe Response Text Extraction ────────────────────────────────────────
 
     def _extract_response_text(self, response: Any) -> str:
-        text = getattr(response, "text", None)
-        if text:
-            return text.strip()
-
-        candidates = getattr(response, "candidates", []) or []
+        """
+        Safely extract text from Gemini response.
+        FIX: accessing .text on a blocked response raises ValueError, not returns None.
+        Traverse candidates/parts directly to avoid this.
+        """
+        # Try candidates first (safer for blocked/partial responses)
+        candidates = getattr(response, "candidates", None) or []
         for cand in candidates:
             content = getattr(cand, "content", None)
             if not content:
                 continue
-            for part in getattr(content, "parts", []) or []:
-                part_text = getattr(part, "text", None)
-                if part_text:
-                    return part_text.strip()
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                text = getattr(part, "text", None)
+                if text and text.strip():
+                    return text.strip()
+
+        # Fallback to .text only if candidates empty (some SDK versions)
+        try:
+            text = getattr(response, "text", None)
+            if text and text.strip():
+                return text.strip()
+        except (ValueError, AttributeError):
+            # .text raises ValueError when response was blocked by safety filters
+            pass
+
         return ""
 
-    def _generate_text(self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool) -> str:
-        if not self.client:
-            raise RuntimeError("Gemini API key missing. Set GEMINI_API_KEY in environment.")
+    # ── Core Generation (Sync, runs in thread) ───────────────────────────────
 
-        models = [self.model] + [m for m in self.fallback_models if m != self.model]
+    def _generate_text_sync(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_tokens: int,
+        expect_json: bool,
+    ) -> tuple[str, str]:
+        """
+        Synchronous Gemini call. Always run via asyncio.to_thread — never call directly.
+        Returns (response_text, model_actually_used) so callers can log the real model.
+        FIX 2: Previously always returned self.model even when a fallback was used.
+        """
+        if not self.client:
+            raise RuntimeError("Gemini API key missing. Set GEMINI_API_KEY in .env")
+
+        all_models = [self.model] + [m for m in self.fallback_models if m != self.model]
         last_error: Exception | None = None
 
-        for idx, model in enumerate(models):
+        for idx, model in enumerate(all_models):
             try:
-                config = types.GenerateContentConfig(
+                cfg = types.GenerateContentConfig(
                     system_instruction=AGENT_SYSTEM_PROMPT,
                     temperature=temperature,
                     max_output_tokens=max_tokens,
@@ -255,53 +490,165 @@ class TradingAgent:
                 response = self.client.models.generate_content(
                     model=model,
                     contents=prompt,
-                    config=config,
+                    config=cfg,
                 )
                 if model != self.model:
-                    logger.warning(f"Using fallback LLM model due to primary model limits: {model}")
-                return self._extract_response_text(response)
+                    logger.warning("Using fallback model: %s", model)
+                # FIX 2: return the actual model name alongside the text
+                return self._extract_response_text(response), model
+
             except Exception as e:
                 last_error = e
-                if self._is_rate_limited_error(e) and idx < len(models) - 1:
-                    logger.warning(f"Model {model} rate-limited; trying fallback model.")
-                    continue
-                if self._is_unsupported_system_instruction_error(e) and idx < len(models) - 1:
+                is_last = idx == len(all_models) - 1
+
+                if is_last:
+                    break
+
+                if self._is_rate_limited_error(e):
+                    # FIX 4: Cap the exponential growth and add ±jitter so a long
+                    # fallback list never stalls the decision loop for 30+ seconds,
+                    # and multiple instances don't all retry at the identical moment.
+                    raw_wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** idx)
+                    capped   = min(raw_wait, RATE_LIMIT_BACKOFF_MAX_SECONDS)
+                    jitter   = capped * RATE_LIMIT_BACKOFF_JITTER * (2 * random.random() - 1)
+                    wait     = max(0.0, capped + jitter)
                     logger.warning(
-                        f"Model {model} does not support system/developer instructions; trying fallback model."
+                        "Model %s rate-limited; waiting %.1fs before fallback (idx=%d).",
+                        model, wait, idx,
                     )
+                    time.sleep(wait)
                     continue
-                if self._is_unavailable_model_error(e) and idx < len(models) - 1:
-                    logger.warning(f"Model {model} is unavailable/unsupported; trying fallback model.")
-                    continue    
+
+                if self._is_unsupported_system_instruction_error(e):
+                    logger.warning("Model %s does not support system instructions; trying fallback.", model)
+                    continue
+
+                if self._is_unavailable_model_error(e):
+                    logger.warning("Model %s unavailable/no permission; trying fallback.", model)
+                    continue
+
                 raise
 
         raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
 
+    # ── Async wrapper ─────────────────────────────────────────────────────────
+
+    async def _generate_text(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_tokens: int,
+        expect_json: bool,
+    ) -> tuple[str, str]:
+        """
+        Runs the synchronous Gemini call in a thread pool.
+        Returns (response_text, model_actually_used).
+        """
+        return await asyncio.to_thread(
+            self._generate_text_sync,
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            expect_json=expect_json,
+        )
+
+    # ── JSON Extraction ───────────────────────────────────────────────────────
+
     @staticmethod
-    def _strip_code_fences(raw_text: str) -> str:
+    def _extract_json(raw_text: str) -> str:
+        """
+        FIX 3: Robust JSON extraction that handles all real-world Gemini output formats:
+          - Plain JSON
+          - ```json ... ``` (single or nested fences)
+          - Leading prose before the fence/JSON
+          - Trailing markdown/text after the closing brace
+          - Single-line fenced payloads: ```json {"k": "v"} ```
+
+        Strategy: find the first '{' or '[' and the matching closing brace/bracket,
+        then validate it parses. Falls back to fence-stripping if no balanced block found.
+        """
         raw = raw_text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```", 2)[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return raw.strip()
+        if not raw:
+            return raw
+
+        # ── Pass 1: find the outermost JSON object or array ──────────────────
+        for start_char, end_char in (('{', '}'), ('[', ']')):
+            start_idx = raw.find(start_char)
+            if start_idx == -1:
+                continue
+
+            # Walk forward tracking nesting depth, respecting strings
+            depth = 0
+            in_string = False
+            escape_next = False
+            end_idx = -1
+
+            for i, ch in enumerate(raw[start_idx:], start=start_idx):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == '\\' and in_string:
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == start_char:
+                    depth += 1
+                elif ch == end_char:
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i
+                        break
+
+            if end_idx != -1:
+                candidate = raw[start_idx:end_idx + 1]
+                try:
+                    json.loads(candidate)   # validate it's real JSON
+                    return candidate
+                except json.JSONDecodeError:
+                    pass                    # fall through to fence-strip
+
+        # ── Pass 2: fence-strip fallback (handles nested fences) ────────────
+        for _ in range(3):
+            if not raw.startswith("```"):
+                break
+            lines = raw.split("\n")
+            # Drop the opening fence line (```json or ```)
+            body_lines = lines[1:]
+            # Drop trailing closing fence if present
+            if body_lines and body_lines[-1].strip() == "```":
+                body_lines = body_lines[:-1]
+            raw = "\n".join(body_lines).strip()
+
+        return raw
+
+    # ── Main Decision Function ────────────────────────────────────────────────
 
     async def analyze_and_decide(self, context: MarketContext) -> list[TradingSignal]:
         """
         Core decision function. Takes market context, calls Gemini,
-        returns actionable trading signals.
+        returns actionable trading signals above the confidence threshold.
         """
         prompt = self._build_prompt(context)
         started_at = datetime.utcnow()
-        
+
         try:
-            raw_text = self._generate_text(
+            raw_text, model_used = await self._generate_text(
                 prompt,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 expect_json=True,
             )
-            decision = json.loads(self._strip_code_fences(raw_text))
+
+            if not raw_text:
+                logger.warning("Empty response from AI model.")
+                return []
+
+            decision = json.loads(self._extract_json(raw_text))
             signals = self._parse_signals(decision, context)
 
             latency_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
@@ -328,8 +675,7 @@ class TradingAgent:
                 for s in signals
             ]
 
-            # Log the decision
-            self.decision_history.append({
+            record = {
                 "timestamp": context.timestamp.isoformat(),
                 "market_regime": decision.get("market_regime"),
                 "commentary": decision.get("market_commentary"),
@@ -341,38 +687,50 @@ class TradingAgent:
                 "positions_to_exit": decision.get("positions_to_exit", []),
                 "session_recommendation": decision.get("session_recommendation"),
                 "raw_response": decision,
-                "model_used": self.model,
+                "model_used": model_used,          # FIX 2: actual model, not self.model
+                "model_requested": self.model,     # handy for spotting fallback frequency
                 "latency_ms": latency_ms,
-            })
+            }
+            self.decision_history.append(record)
+
+            # FIX: Cap history to avoid unbounded memory growth
+            if len(self.decision_history) > MAX_DECISION_HISTORY:
+                self.decision_history = self.decision_history[-MAX_DECISION_HISTORY:]
 
             logger.info(
-                f"🤖 AI Decision | Regime: {decision.get('market_regime')} | "
-                f"Signals: {len(signals)} | Risk: {decision.get('risk_assessment')}"
+                "🤖 AI Decision | Regime: %s | Signals: %d | Risk: %s | Latency: %dms",
+                decision.get("market_regime"),
+                len(signals),
+                decision.get("risk_assessment"),
+                latency_ms,
             )
 
-            # Filter by confidence threshold
             actionable = [s for s in signals if s.confidence >= self.confidence_threshold]
-            logger.info(f"📊 {len(actionable)}/{len(signals)} signals above confidence threshold")
-
+            logger.info(
+                "📊 %d/%d signals above confidence threshold (%.2f)",
+                len(actionable), len(signals), self.confidence_threshold,
+            )
             return actionable
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse AI response as JSON: {e}")
+            logger.error("Failed to parse AI response as JSON: %s", e)
             return []
         except Exception as e:
             err = str(e).lower()
             if "api key" in err and "missing" in err:
                 logger.error("AI agent disabled: missing GEMINI_API_KEY.")
             elif self._is_rate_limited_error(e):
-                logger.error("AI agent failed: all configured Gemini models are rate-limited.")
+                logger.error("AI agent failed: all Gemini models are rate-limited.")
             else:
-                logger.error(f"AI agent error: {e}")
+                logger.error("AI agent error: %s", e, exc_info=True)
             return []
+
+    # ── Strategy Review ───────────────────────────────────────────────────────
 
     async def review_strategy(self, performance_data: dict) -> dict:
         """
         Periodic strategy review. AI evaluates what's working and
-        adjusts strategy weights/parameters accordingly.
+        suggests parameter adjustments.
         """
         prompt = f"""
 Review this trading bot's recent performance and provide strategic recommendations.
@@ -380,7 +738,7 @@ Review this trading bot's recent performance and provide strategic recommendatio
 Performance Data:
 {json.dumps(performance_data, indent=2)}
 
-Respond with JSON:
+Respond ONLY with a valid JSON object:
 {{
   "strategy_weights": {{
     "momentum": 0.3,
@@ -394,45 +752,73 @@ Respond with JSON:
   }},
   "avoid_patterns": ["description of losing patterns to avoid"],
   "focus_patterns": ["description of winning patterns to amplify"],
-  "overall_assessment": "text assessment"
+  "overall_assessment": "brief text assessment"
 }}
 """
         try:
-            raw = self._generate_text(
+            raw, _model = await self._generate_text(
                 prompt,
                 temperature=0.2,
                 max_tokens=2048,
                 expect_json=True,
             )
-            return json.loads(self._strip_code_fences(raw))
+            result = json.loads(self._extract_json(raw))
+
+            # FIX 4: Validate parameter_adjustments field-by-field in its own try/except.
+            # A single malformed value (e.g. confidence_threshold="high") no longer
+            # discards the entire review result — only that one field is removed.
+            # FIX 3: validate every field in parameter_adjustments against PARAM_SCHEMA.
+            # Unknown keys are dropped, out-of-range values are clamped, non-numeric
+            # values are dropped — all field-by-field so one bad value never discards
+            # the rest of the review result.
+            raw_params = result.get("parameter_adjustments", {})
+            validated_params = self._validate_param_adjustments(raw_params)
+            result["parameter_adjustments"] = validated_params
+
+            # Fix 2: warn at runtime when validated keys are not in the consumer
+            # contract, so "validated but never applied" mismatches surface in logs
+            # on the first real review cycle rather than silently being ignored.
+            # The check is a no-op until PARAM_CONSUMER_KEYS is populated by the
+            # engine/risk layer (see class-level docstring for instructions).
+            if self.PARAM_CONSUMER_KEYS:
+                unclaimed = set(validated_params) - self.PARAM_CONSUMER_KEYS
+                if unclaimed:
+                    logger.warning(
+                        "review_strategy returned parameter keys not in "
+                        "PARAM_CONSUMER_KEYS — they will be ignored by the engine: %s. "
+                        "Add them to PARAM_CONSUMER_KEYS or remove from PARAM_SCHEMA.",
+                        sorted(unclaimed),
+                    )
+
+            return result
         except Exception as e:
-            logger.error(f"Strategy review error: {e}")
+            logger.error("Strategy review error: %s", e)
             return {}
 
     async def explain_position(self, position: dict) -> str:
         """Get AI explanation of why a position should be held or exited."""
         prompt = f"""
-Analyze this open position and recommend: HOLD, TRAIL_STOP, or EXIT with brief rationale.
+Analyze this open position and recommend: HOLD, TRAIL_STOP, or EXIT.
+Give a specific 2-3 sentence rationale citing price levels and indicators.
 
 Position: {json.dumps(position, indent=2)}
-
-Respond in 2-3 sentences max.
 """
         try:
-            return self._generate_text(
+            text, _model = await self._generate_text(
                 prompt,
                 temperature=0.1,
                 max_tokens=256,
                 expect_json=False,
             )
+            return text
         except Exception as e:
-            logger.error(f"explain_position error: {e}")
+            logger.error("explain_position error: %s", e)
             return "Unable to analyze position."
 
     # ── Prompt Builder ────────────────────────────────────────────────────────
 
     def _build_prompt(self, ctx: MarketContext) -> str:
-        # Build open positions summary
+        # Open positions summary
         positions_summary = ""
         if ctx.open_positions:
             for p in ctx.open_positions:
@@ -442,18 +828,52 @@ Respond in 2-3 sentences max.
                     f"Avg: ₹{p.get('avg_price', 0):,.2f} | LTP: ₹{p.get('ltp', 0):,.2f} | P&L: {pnl_str}\n"
                 )
 
-        # Build watchlist summary
+        # Watchlist summary — FIX: include richer signal data for better AI decisions
         watchlist_summary = ""
-        for w in ctx.watchlist_data[:15]:  # Limit to 15 symbols
-            indicators = w.get("indicators", {})
+        for w in ctx.watchlist_data[:15]:
+            ind = w.get("indicators", {})
+            levels = w.get("levels", {})
+            rsi_val = ind.get("rsi", "N/A")
+            macd_sig = ind.get("macd_signal", "N/A")
+            bb_sig = ind.get("bb_signal", "N/A")
+            supertrend = ind.get("supertrend", "N/A")
+            vol_ratio = ind.get("volume_ratio", 1.0)
+            overall = ind.get("overall_signal", "neutral")
+            pivot = levels.get("pivot", "N/A")
+            r1 = levels.get("r1", "N/A")
+            s1 = levels.get("s1", "N/A")
+
             watchlist_summary += (
                 f"  **{w['symbol']}** | LTP: ₹{w.get('ltp', 0):,.2f} | "
-                f"Change: {w.get('change_pct', 0):+.2f}% | "
-                f"Vol: {w.get('volume_ratio', 1.0):.1f}x | "
-                f"RSI: {indicators.get('rsi', 'N/A')} | "
-                f"MACD: {indicators.get('macd_signal', 'N/A')} | "
-                f"Trend: {indicators.get('trend', 'N/A')}\n"
+                f"Chg: {w.get('change_pct', 0):+.2f}% | "
+                f"RSI: {rsi_val} | MACD: {macd_sig} | BB: {bb_sig} | "
+                f"Supertrend: {supertrend} | Vol: {vol_ratio}x | "
+                f"Signal: {overall} | Pivot: {pivot} R1: {r1} S1: {s1}\n"
             )
+
+        # VIX interpretation
+        vix = ctx.india_vix
+        if vix > 25:
+            vix_interp = "EXTREME FEAR - avoid directional trades"
+        elif vix > 18:
+            vix_interp = "HIGH FEAR - prefer mean-reversion"
+        elif vix > 14:
+            vix_interp = "MODERATE - normal trading"
+        else:
+            vix_interp = "LOW - favour momentum/trend"
+
+        # PCR interpretation
+        pcr = ctx.pcr or 1.0
+        if pcr > 1.5:
+            pcr_interp = "extremely bullish contrarian signal"
+        elif pcr > 1.2:
+            pcr_interp = "bullish"
+        elif pcr > 0.8:
+            pcr_interp = "neutral"
+        elif pcr > 0.5:
+            pcr_interp = "bearish"
+        else:
+            pcr_interp = "extremely bearish - high complacency"
 
         options_summary = (
             json.dumps(ctx.options_chain_summary, indent=2)
@@ -468,8 +888,10 @@ Respond in 2-3 sentences max.
             nifty50_ltp=f"{ctx.nifty50_ltp:,.2f}",
             banknifty_ltp=f"{ctx.banknifty_ltp:,.2f}",
             india_vix=f"{ctx.india_vix:.2f}",
+            vix_interpretation=vix_interp,
             market_trend=ctx.market_trend,
-            pcr=f"{ctx.pcr:.2f}" if ctx.pcr else "N/A",
+            pcr=f"{pcr:.2f}" if ctx.pcr else "N/A",
+            pcr_interpretation=pcr_interp,
             available_capital=ctx.available_capital,
             used_margin=ctx.used_margin,
             open_positions_count=len(ctx.open_positions),
@@ -479,30 +901,92 @@ Respond in 2-3 sentences max.
             news_sentiment=ctx.recent_news_sentiment or "Not available",
         )
 
+    # ── Signal Parser ─────────────────────────────────────────────────────────
+
+    # ── Decimal helper ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_decimal(value: Any, field: str, symbol: str) -> Optional[Decimal]:
+        """
+        Convert a raw AI value to Decimal safely.
+        Handles the two failure modes that Decimal conversion can produce:
+          - InvalidOperation: Decimal("N/A"), Decimal("~2450"), Decimal("null"), etc.
+          - ValueError: raised explicitly below for non-finite results (Inf, NaN).
+        TypeError covers non-string/non-numeric inputs that str() cannot sensibly convert.
+        We do NOT use bare `except Exception` — that would swallow AttributeErrors or
+        MemoryErrors that signal real bugs and should propagate.
+        """
+        if value is None or value == "" or value is False:
+            return None
+        try:
+            result = Decimal(str(value))
+        except InvalidOperation as exc:
+            # e.g. "N/A", "~2450", "null", "pending" — model returned garbage
+            raise ValueError(
+                f"invalid price for {field} on {symbol}: {value!r} (not a valid decimal)"
+            ) from exc
+        except (TypeError, ArithmeticError) as exc:
+            # Unexpected type or arithmetic failure during conversion
+            raise ValueError(
+                f"invalid price for {field} on {symbol}: {value!r} ({type(exc).__name__})"
+            ) from exc
+        # Reject special values Decimal accepts but trading math cannot use
+        if not result.is_finite():
+            raise ValueError(
+                f"invalid price for {field} on {symbol}: {value!r} (non-finite: {result})"
+            )
+        return result
+
     def _parse_signals(self, decision: dict, ctx: MarketContext) -> list[TradingSignal]:
         signals = []
-        for s in decision.get("signals", []):
+        for raw_idx, s in enumerate(decision.get("signals", [])):
+            # FIX 1: guard non-dict entries before any attribute access.
+            # The AI can return a string, list, or null in the signals array;
+            # calling .get() on those raises AttributeError before the try block.
+            if not isinstance(s, dict):
+                logger.warning(
+                    "Skipping signals[%d]: expected dict, got %s (%r)",
+                    raw_idx, type(s).__name__, s,
+                )
+                continue
+
+            symbol = s.get("symbol", "UNKNOWN")
             try:
+                qty = int(s.get("quantity", 0))
+                if qty <= 0:
+                    logger.warning("Skipping signal with quantity=%d for %s", qty, symbol)
+                    continue
+
+                confidence = max(0.0, min(1.0, float(s.get("confidence", 0.5))))
+
+                entry_price = self._to_decimal(s.get("entry_price"), "entry_price", symbol)
+                stop_loss   = self._to_decimal(s.get("stop_loss"),   "stop_loss",   symbol)
+                target      = self._to_decimal(s.get("target"),      "target",      symbol)
+
                 signals.append(TradingSignal(
                     action=SignalAction(s["action"]),
-                    symbol=s["symbol"],
+                    symbol=symbol,
                     exchange=s.get("exchange", "NSE"),
                     strategy=s.get("strategy", "unknown"),
-                    quantity=int(s.get("quantity", 1)),
-                    entry_price=Decimal(str(s["entry_price"])) if s.get("entry_price") else None,
-                    stop_loss=Decimal(str(s["stop_loss"])) if s.get("stop_loss") else None,
-                    target=Decimal(str(s["target"])) if s.get("target") else None,
-                    confidence=float(s.get("confidence", 0.5)),
+                    quantity=qty,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    target=target,
+                    confidence=confidence,
                     rationale=s.get("rationale", ""),
-                    risk_reward=float(s.get("risk_reward", 1.0)) if s.get("risk_reward") else None,
+                    risk_reward=float(s["risk_reward"]) if s.get("risk_reward") else None,
                     timeframe=s.get("timeframe", "intraday"),
                     product=s.get("product", "MIS"),
                     priority=int(s.get("priority", 5)),
                     tags=s.get("tags", []),
                 ))
-            except (KeyError, ValueError) as e:
-                logger.warning(f"Skipping malformed signal: {e} | {s}")
+            # FIX 2: widen the catch to include TypeError and AttributeError.
+            # int()/float()/SignalAction() can raise TypeError when passed an
+            # unexpected type; dict.get() on a nested non-dict raises AttributeError.
+            # Neither should abort the entire parse — skip only this one signal.
+            except (KeyError, ValueError, TypeError, AttributeError) as e:
+                logger.warning("Skipping malformed signal for %s: %s", symbol, e)
 
-        # Sort by priority (lower number = higher priority)
+        # Sort by priority ASC, then confidence DESC
         signals.sort(key=lambda x: (x.priority, -x.confidence))
         return signals
