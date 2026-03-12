@@ -16,7 +16,7 @@ dhanhq==2.0.2             # Dhan API
 pyotp==2.9.0               # TOTP for Zerodha auto-login
 
 # ── AI / LLM ─────────────────────────────────────────────────
-anthropic==0.34.0          # Claude API
+google-genai==0.8.0         # Gemini API
 
 # ── Data & Analysis ──────────────────────────────────────────
 pandas==2.2.2
