@@ -118,6 +118,9 @@ class TradingEngine:
 
         self._running = False
         self._tick_data: dict[str, dict] = {}
+        self._tick_token_to_symbol: dict[str, str] = {}
+        self._latest_options_chain: dict[str, dict] = {}
+        self._latest_watchlist: list[dict] = []
         self._instrument_cache: dict[str, Instrument] = {}
         self._ohlcv_frames: dict[str, pd.DataFrame] = {}
         self._nifty_history: list[float] = []
@@ -661,6 +664,8 @@ class TradingEngine:
         ]
 
         watchlist = await self._get_watchlist_indicators()
+        self._latest_options_chain = options_summary
+        self._latest_watchlist = watchlist
         self._nifty_history.append(nifty)
         self._nifty_history = self._nifty_history[-50:]
         trend = self._detect_trend(nifty, vix)
@@ -854,11 +859,22 @@ class TradingEngine:
 
     async def _subscribe_market_data(self) -> None:
         insts = [await self._get_instrument(s) for s in WATCHLIST[:20]]
+        self._tick_token_to_symbol = {
+            str(inst.instrument_token): inst.symbol
+            for inst in insts
+            if inst.instrument_token
+        }
         await self.primary_broker.subscribe_ticks(insts, self._on_tick)
         logger.info(f"📡 Subscribed {len(insts)} instruments")
 
     async def _on_tick(self, tick: dict) -> None:
-        sym = tick.get("tradingsymbol") or tick.get("trading_symbol", "")
+        sym = (
+            tick.get("tradingsymbol")
+            or tick.get("trading_symbol")
+            or tick.get("symbol")
+            or self._tick_token_to_symbol.get(str(tick.get("instrument_token") or tick.get("security_id") or ""))
+            or ""
+        )
         if sym:
             self._tick_data[sym] = tick
 
