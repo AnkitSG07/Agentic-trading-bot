@@ -192,10 +192,8 @@ class TradingAgent:
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         self.model = config.get("model", "gemini-2.5-flash")
         self.fallback_models = config.get("fallback_models", [
-            "gemma-3-1b-it",
-            "gemma-3-4b-it",
-            "gemma-3-12b-it",
-            "gemma-3-27b-it",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
         ])
         self.max_tokens = config.get("max_tokens", 4096)
         self.temperature = config.get("temperature", 0.1)
@@ -205,6 +203,10 @@ class TradingAgent:
     def _is_rate_limited_error(self, err: Exception) -> bool:
         msg = str(err).lower()
         return any(token in msg for token in ("429", "rate limit", "quota", "resource_exhausted"))
+
+    def _is_unsupported_system_instruction_error(self, err: Exception) -> bool:
+        msg = str(err).lower()
+        return "developer instruction is not enabled" in msg
 
     def _extract_response_text(self, response: Any) -> str:
         text = getattr(response, "text", None)
@@ -249,6 +251,11 @@ class TradingAgent:
                 last_error = e
                 if self._is_rate_limited_error(e) and idx < len(models) - 1:
                     logger.warning(f"Model {model} rate-limited; trying fallback model.")
+                    continue
+                if self._is_unsupported_system_instruction_error(e) and idx < len(models) - 1:
+                    logger.warning(
+                        f"Model {model} does not support system/developer instructions; trying fallback model."
+                    )
                     continue
                 raise
 
