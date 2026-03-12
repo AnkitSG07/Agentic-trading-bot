@@ -129,12 +129,16 @@ class DhanBroker(BaseBroker):
     async def get_quote(self, instruments: list[Instrument]) -> dict[str, Quote]:
         quotes = {}
         try:
+            today = datetime.now().strftime("%Y-%m-%d")
             for inst in instruments:
                 resp = await asyncio.to_thread(
                     self.dhan.intraday_minute_data,
                     security_id=inst.instrument_token,
                     exchange_segment=DHAN_EXCHANGE_MAP.get(inst.exchange, "NSE_EQ"),
                     instrument_type="EQUITY",
+                    interval="1",
+                    from_date=today,
+                    to_date=today,
                 )
                 if resp.get("status") == "success" and resp.get("data"):
                     candles = resp["data"]
