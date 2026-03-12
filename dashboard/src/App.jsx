@@ -181,6 +181,9 @@ export default function TradingDashboard() {
   const { liveData, connected } = useWebSocket();
   const [activeTab, setActiveTab] = useState("positions");
   const [pnlHistory, setPnlHistory] = useState([]);
+  const [tickHistory, setTickHistory] = useState({});
+  const [prevTicks, setPrevTicks] = useState({});
+  const [eventTape, setEventTape] = useState([]);
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [engineRunning, setEngineRunning] = useState(false);
   const [startingEngine, setStartingEngine] = useState(false);
@@ -201,6 +204,41 @@ export default function TradingDashboard() {
       return next.slice(-80);
     });
   }, [liveData]);
+
+  useEffect(() => {
+    const nextTicks = liveData?.ticks;
+    if (!nextTicks || Object.keys(nextTicks).length === 0) return;
+
+    setPrevTicks((prev) => ({ ...prev, ...nextTicks }));
+    setTickHistory((prev) => {
+      const next = { ...prev };
+      Object.entries(nextTicks).forEach(([symbol, value]) => {
+        const price = Number(value || 0);
+        if (!price) return;
+        const series = [...(next[symbol] || []), price];
+        next[symbol] = series.slice(-30);
+      });
+      return next;
+    });
+  }, [liveData?.ticks]);
+
+  useEffect(() => {
+    const wsEvents = liveData?.agent_events || [];
+    const apiEvents = agentData?.agent_events || [];
+    const merged = [...apiEvents, ...wsEvents]
+      .filter((e) => e?.timestamp && e?.message)
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const dedup = [];
+    const seen = new Set();
+    merged.forEach((e) => {
+      const key = `${e.timestamp}-${e.message}`;
+      if (!seen.has(key)) {
+        dedup.push(e);
+        seen.add(key);
+      }
+    });
+    setEventTape(dedup.slice(-20));
+  }, [liveData?.agent_events, agentData?.agent_events]);
 
   const handleStartEngine = async () => {
     setStartingEngine(true);
@@ -256,6 +294,7 @@ export default function TradingDashboard() {
   const positions = liveData?.positions || [];
   const ticks = liveData?.ticks || {};
   const agentDecisions = agentData?.decisions || [];
+  const agentStatus = liveData?.agent_status || agentData?.agent_status || {};
   const orders = ordersData?.orders || [];
   const killSwitch = risk.kill_switch;
 
@@ -578,6 +617,58 @@ export default function TradingDashboard() {
 
             {activeTab === "signals" && (
               <div>
+                <div style={{
+                  background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 10,
+                  padding: "12px 14px", marginBottom: 10,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, color: "#334155", letterSpacing: 1.2, textTransform: "uppercase" }}>
+                      AI Pipeline
+                    </span>
+                    {[
+                      "collecting_context",
+                      "calling_model",
+                      "risk_checks",
+                      "placing_orders",
+                      "decision_complete",
+                    ].map((stage) => {
+                      const isCurrent = agentStatus?.stage === stage;
+                      const isDone = stage === "decision_complete" && agentStatus?.stage === "decision_complete";
+                      return (
+                        <span
+                          key={stage}
+                          style={{
+                            borderRadius: 999,
+                            padding: "3px 8px",
+                            fontSize: 10,
+                            border: `1px solid ${isCurrent ? "#22d3ee55" : isDone ? "#10b98155" : "#334155"}`,
+                            color: isCurrent ? "#22d3ee" : isDone ? "#10b981" : "#64748b",
+                            background: isCurrent ? "#083344" : isDone ? "#052e27" : "transparent",
+                          }}
+                        >
+                          {stage.replace(/_/g, " ")}
+                        </span>
+                      );
+                    })}
+                    <span style={{ marginLeft: "auto", fontSize: 10, color: "#475569" }}>
+                      Last cycle: {agentStatus?.last_cycle_duration_ms ? `${agentStatus.last_cycle_duration_ms} ms` : "—"}
+                    </span>
+                  </div>
+
+                  <div style={{ marginTop: 10, display: "flex", gap: 12, overflowX: "auto", whiteSpace: "nowrap", paddingBottom: 2 }}>
+                    {eventTape.length === 0 ? (
+                      <span style={{ fontSize: 11, color: "#334155" }}>Waiting for AI events…</span>
+                    ) : eventTape.slice().reverse().map((e, idx) => (
+                      <span key={idx} style={{
+                        fontSize: 11,
+                        color: e.level === "error" ? "#ef4444" : e.level === "success" ? "#10b981" : "#64748b",
+                      }}>
+                        {new Date(e.timestamp).toLocaleTimeString("en-IN")} · {e.message}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+      
                 {agentDecisions.length === 0 ? (
                   <div style={{ textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
                     {engineRunning ? "Waiting for first AI decision..." : "Start the engine to see AI decisions"}
@@ -601,6 +692,20 @@ export default function TradingDashboard() {
                         <span style={{ color: "#64748b" }}>📊 {d.signals_generated} total</span>
                       </div>
                     </div>
+                    {(d.market_commentary || d.commentary) && (
+                      <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8 }}>
+                        {d.market_commentary || d.commentary}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      {d.risk_assessment && <Badge text={d.risk_assessment} />}
+                      {d.session_recommendation && <Badge text={d.session_recommendation} />}
+                      {d.rejection_breakdown && Object.keys(d.rejection_breakdown).length > 0 && (
+                        <span style={{ fontSize: 10, color: "#475569" }}>
+                          Rejections: {Object.entries(d.rejection_breakdown).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · ")}
+                        </span>
+                      )}
+                    </div>  
                   </div>
                 ))}
               </div>
@@ -612,21 +717,48 @@ export default function TradingDashboard() {
                   <div style={{ gridColumn: "1/-1", textAlign: "center", padding: "60px 0", color: "#334155", fontSize: 13 }}>
                     {engineRunning ? "Waiting for tick data..." : "Start the engine to see live ticks"}
                   </div>
-                ) : Object.entries(ticks).map(([symbol, ltp]) => (
-                  <div key={symbol} style={{ background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 8, padding: "12px 14px" }}>
+                ) : Object.entries(ticks).map(([symbol, ltp]) => {
+                  const current = Number(ltp || 0);
+                  const prev = Number(prevTicks[symbol] || current || 0);
+                  const delta = current - prev;
+                  const deltaPct = prev ? (delta / prev) * 100 : 0;
+                  const isUp = delta > 0;
+                  const series = tickHistory[symbol] || [];
+                  const min = Math.min(...series, current || 0);
+                  const max = Math.max(...series, current || 0);
+                  const range = max - min || 1;
+                  const points = series.map((v, i) => `${(i / Math.max(series.length - 1, 1)) * 100},${22 - ((v - min) / range) * 18}`).join(" ");
+                  return (
+                  <div key={symbol} style={{
+                    background: "#0a0f1a", border: "1px solid #1e293b", borderRadius: 8, padding: "12px 14px",
+                    boxShadow: delta > 0 ? "0 0 12px #10b98122" : delta < 0 ? "0 0 12px #ef444422" : "none",
+                  }}>
                     <div style={{ fontSize: 11, fontWeight: 700 }}>{symbol}</div>
-                    <div style={{ fontFamily: "monospace", fontSize: 16, fontWeight: 700, color: "#e2e8f0", marginTop: 4 }}>
-                      ₹{ltp ? Number(ltp).toLocaleString("en-IN") : "—"}
+                    <div style={{ fontFamily: "monospace", fontSize: 16, fontWeight: 700, color: isUp ? "#10b981" : delta < 0 ? "#ef4444" : "#e2e8f0", marginTop: 4 }}>
+                      ₹{current ? current.toLocaleString("en-IN") : "—"}
+                    </div>
+                    <div style={{ fontFamily: "monospace", fontSize: 10, color: isUp ? "#10b981" : delta < 0 ? "#ef4444" : "#64748b", marginTop: 2 }}>
+                      {delta > 0 ? "▲" : delta < 0 ? "▼" : "•"} {Math.abs(delta).toFixed(2)} ({Math.abs(deltaPct).toFixed(2)}%)
+                    </div>
+                    <div style={{ marginTop: 6, height: 24, borderRadius: 5, background: "#0f172a", overflow: "hidden" }}>
+                      <svg viewBox="0 0 100 24" preserveAspectRatio="none" width="100%" height="24">
+                        <polyline
+                          fill="none"
+                          stroke={isUp ? "#10b981" : delta < 0 ? "#ef4444" : "#22d3ee"}
+                          strokeWidth="2"
+                          points={points || "0,12 100,12"}
+                        />
+                      </svg>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
                       <Pulse active={true} color="#0ea5e9" />
                       <span style={{ fontSize: 9, color: "#334155" }}>LIVE</span>
                     </div>
                   </div>
-                ))}
+                )})}
               </div>
             )}
-
+            
             {activeTab === "history" && (
               <div style={{ paddingTop: 14 }}>
                 <div style={{ fontWeight: 600, fontSize: 12, color: "#64748b", marginBottom: 12 }}>
