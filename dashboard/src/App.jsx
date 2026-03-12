@@ -151,44 +151,21 @@ const Sparkline = ({ data, color, height = 32 }) => {
   );
 };
 
-// ─── MOCK / DEFAULT DATA ──────────────────────────────────────────────────────
-
-const MOCK_SIGNALS = [
-  { symbol: "RELIANCE", action: "BUY", strategy: "breakout", confidence: 0.82, entry_price: 2450, stop_loss: 2420, target: 2510, rationale: "MACD bullish crossover, 1.8x volume, breaking above 20-day resistance at ₹2445.", risk_status: "approved", risk_reward: 2.1 },
-  { symbol: "NIFTY", action: "NO_ACTION", strategy: "scalping", confidence: 0.41, rationale: "Weak confluence and choppy range, waiting for clean setup.", risk_status: "rejected", risk_reward: null },
-  { symbol: "HDFCBANK", action: "SELL", strategy: "mean_reversion", confidence: 0.74, entry_price: 1612, stop_loss: 1628, target: 1578, rationale: "RSI reverted from overbought zone, lower high near resistance at ₹1620.", risk_status: "approved", risk_reward: 1.9 },
-];
-
-const MOCK_WATCHLIST = [
-  { symbol: "RELIANCE", ltp: 2450.30, change_pct: 1.24, indicators: { rsi: 62, macd_signal: "bullish", bb_signal: "upper", supertrend: "bullish", volume_ratio: 1.8, overall_signal: "strong_buy" }, levels: { pivot: 2430, r1: 2470, s1: 2410 } },
-  { symbol: "HDFCBANK", ltp: 1612.15, change_pct: -0.58, indicators: { rsi: 71, macd_signal: "bearish", bb_signal: "overbought", supertrend: "bearish", volume_ratio: 1.2, overall_signal: "sell" }, levels: { pivot: 1615, r1: 1635, s1: 1590 } },
-  { symbol: "TCS", ltp: 3820.45, change_pct: 0.31, indicators: { rsi: 55, macd_signal: "neutral", bb_signal: "middle", supertrend: "bullish", volume_ratio: 0.9, overall_signal: "neutral" }, levels: { pivot: 3810, r1: 3850, s1: 3775 } },
-  { symbol: "INFY", ltp: 1445.20, change_pct: -1.12, indicators: { rsi: 42, macd_signal: "bearish", bb_signal: "lower", supertrend: "bearish", volume_ratio: 1.4, overall_signal: "sell" }, levels: { pivot: 1455, r1: 1475, s1: 1430 } },
-  { symbol: "ICICIBANK", ltp: 1088.60, change_pct: 0.87, indicators: { rsi: 58, macd_signal: "bullish", bb_signal: "middle", supertrend: "bullish", volume_ratio: 1.1, overall_signal: "buy" }, levels: { pivot: 1080, r1: 1100, s1: 1065 } },
-  { symbol: "WIPRO", ltp: 482.35, change_pct: -0.22, indicators: { rsi: 49, macd_signal: "neutral", bb_signal: "middle", supertrend: "neutral", volume_ratio: 0.8, overall_signal: "neutral" }, levels: { pivot: 483, r1: 492, s1: 475 } },
-  { symbol: "SBIN", ltp: 815.70, change_pct: 1.55, indicators: { rsi: 65, macd_signal: "bullish", bb_signal: "upper", supertrend: "bullish", volume_ratio: 2.1, overall_signal: "strong_buy" }, levels: { pivot: 800, r1: 825, s1: 790 } },
-  { symbol: "BAJFINANCE", ltp: 7220.00, change_pct: -0.94, indicators: { rsi: 35, macd_signal: "bearish", bb_signal: "lower", supertrend: "bearish", volume_ratio: 1.6, overall_signal: "sell" }, levels: { pivot: 7260, r1: 7310, s1: 7190 } },
-];
-
-const MOCK_OPTIONS = {
-  NIFTY: { pcr: 1.18, atm_strike: 22000, atm_straddle: 185, expected_move_pct: 0.84, max_pain: 21900, key_resistance: 22200, key_support: 21800, top_call_oi: [22100, 22200, 22500], top_put_oi: [21900, 21800, 21500] },
-  BANKNIFTY: { pcr: 0.92, atm_strike: 47000, max_pain: 46800, key_resistance: 47500, key_support: 46500 },
-};
-
 // ─── PANELS ───────────────────────────────────────────────────────────────────
 
 // 1. OPTIONS CHAIN PANEL
 const OptionsChainPanel = ({ data }) => {
-  const opts = data || MOCK_OPTIONS;
+  const opts = data || {};
   const nifty = opts.NIFTY || {};
   const bnk = opts.BANKNIFTY || {};
 
-  const pcr = nifty.pcr || 1.0;
+  const pcr = Number(nifty.pcr);
+  const hasPcr = Number.isFinite(pcr);
   const pcrColor = pcr > 1.2 ? C.green : pcr < 0.8 ? C.red : C.amber;
   const pcrLabel = pcr > 1.5 ? "EXTREME BULL" : pcr > 1.2 ? "BULLISH" : pcr > 0.8 ? "NEUTRAL" : pcr > 0.5 ? "BEARISH" : "EXTREME BEAR";
 
-  const callOI = (nifty.top_call_oi || [22100, 22200, 22500]).map((s, i) => ({ strike: s, oi: [4.2, 3.1, 2.8][i] || 1.5, type: "CE" }));
-  const putOI = (nifty.top_put_oi || [21900, 21800, 21500]).map((s, i) => ({ strike: s, oi: [3.8, 2.9, 2.1][i] || 1.2, type: "PE" }));
+  const callOI = (nifty.top_call_oi || []).map((s, i) => ({ strike: s, oi: [4.2, 3.1, 2.8][i] || 1.5, type: "CE" }));
+  const putOI = (nifty.top_put_oi || []).map((s, i) => ({ strike: s, oi: [3.8, 2.9, 2.1][i] || 1.2, type: "PE" }));
   const combined = [...putOI.reverse(), ...callOI].map(x => ({ ...x, label: `${x.strike}${x.type}` }));
 
   return (
@@ -196,34 +173,40 @@ const OptionsChainPanel = ({ data }) => {
       <SectionHeader title="Options Chain Intelligence" sub="Live PCR · Max Pain · OI Heatmap" right={
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace" }}>PCR</span>
-          <span style={{ fontSize: 14, fontWeight: 800, color: pcrColor, fontFamily: "monospace" }}>{pcr.toFixed(2)}</span>
-          {tag(pcrLabel, pcrColor)}
+          <span style={{ fontSize: 14, fontWeight: 800, color: hasPcr ? pcrColor : C.textMuted, fontFamily: "monospace" }}>{hasPcr ? pcr.toFixed(2) : "—"}</span>
+          {hasPcr ? tag(pcrLabel, pcrColor) : tag("NO DATA", C.textMuted)}
         </div>
       } />
       <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
         <div>
           <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 8, letterSpacing: 1 }}>TOP OI CONCENTRATION — NIFTY</div>
-          <ResponsiveContainer width="100%" height={160}>
-            <BarChart data={combined} layout="vertical" margin={{ left: 60, right: 10 }}>
-              <XAxis type="number" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
-              <YAxis type="category" dataKey="label" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} width={55} />
-              <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
-                formatter={(v, n, p) => [`${v.toFixed(1)}L OI`, p.payload.type === "CE" ? "Call" : "Put"]} />
-              <Bar dataKey="oi" radius={[0, 3, 3, 0]}>
-                {combined.map((entry, i) => <Cell key={i} fill={entry.type === "CE" ? C.red : C.green} opacity={0.75} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          {combined.length === 0 ? (
+            <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.textMuted, background: C.bg, borderRadius: 6 }}>
+              No live options OI data
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={160}>
+              <BarChart data={combined} layout="vertical" margin={{ left: 60, right: 10 }}>
+                <XAxis type="number" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
+                <YAxis type="category" dataKey="label" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} width={55} />
+                <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
+                  formatter={(v, n, p) => [`${v.toFixed(1)}L OI`, p.payload.type === "CE" ? "Call" : "Put"]} />
+                <Bar dataKey="oi" radius={[0, 3, 3, 0]}>
+                  {combined.map((entry, i) => <Cell key={i} fill={entry.type === "CE" ? C.red : C.green} opacity={0.75} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {[
-            { label: "ATM Strike", value: nifty.atm_strike?.toLocaleString("en-IN") || "22,000", color: C.cyan },
-            { label: "Straddle Price", value: `₹${nifty.atm_straddle || 185}`, color: C.purple },
-            { label: "Expected Move", value: `±${(nifty.expected_move_pct || 0.84).toFixed(2)}%`, color: C.amber },
-            { label: "Max Pain", value: nifty.max_pain?.toLocaleString("en-IN") || "21,900", color: C.amber },
-            { label: "Key Resistance", value: nifty.key_resistance?.toLocaleString("en-IN") || "22,200", color: C.red },
-            { label: "Key Support", value: nifty.key_support?.toLocaleString("en-IN") || "21,800", color: C.green },
+            { label: "ATM Strike", value: nifty.atm_strike?.toLocaleString("en-IN") || "—", color: C.cyan },
+            { label: "Straddle Price", value: Number.isFinite(Number(nifty.atm_straddle)) ? `₹${nifty.atm_straddle}` : "—", color: C.purple },
+            { label: "Expected Move", value: Number.isFinite(Number(nifty.expected_move_pct)) ? `±${Number(nifty.expected_move_pct).toFixed(2)}%` : "—", color: C.amber },
+            { label: "Max Pain", value: nifty.max_pain?.toLocaleString("en-IN") || "—", color: C.amber },
+            { label: "Key Resistance", value: nifty.key_resistance?.toLocaleString("en-IN") || "—", color: C.red },
+            { label: "Key Support", value: nifty.key_support?.toLocaleString("en-IN") || "—", color: C.green },
           ].map(row => (
             <div key={row.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", background: C.bg, borderRadius: 6 }}>
               <span style={{ fontSize: 10, color: C.textMuted }}>{row.label}</span>
@@ -232,7 +215,7 @@ const OptionsChainPanel = ({ data }) => {
           ))}
           <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 10px", background: C.bg, borderRadius: 6 }}>
             <span style={{ fontSize: 10, color: C.textMuted }}>BANKNIFTY PCR</span>
-            <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: (bnk.pcr || 0.92) > 1 ? C.green : C.red }}>{(bnk.pcr || 0.92).toFixed(2)}</span>
+            <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: Number.isFinite(Number(bnk.pcr)) ? (Number(bnk.pcr) > 1 ? C.green : C.red) : C.textMuted }}>{Number.isFinite(Number(bnk.pcr)) ? Number(bnk.pcr).toFixed(2) : "—"}</span>
           </div>
         </div>
       </div>
@@ -245,7 +228,7 @@ const SIGNAL_COLORS = { strong_buy: C.green, buy: "#4ade80", neutral: C.amber, s
 const SIGNAL_LABELS = { strong_buy: "STRONG BUY", buy: "BUY", neutral: "NEUTRAL", sell: "SELL", strong_sell: "STRONG SELL" };
 
 const WatchlistIndicatorsPanel = ({ watchlistData }) => {
-  const data = watchlistData?.length ? watchlistData : MOCK_WATCHLIST;
+  const data = watchlistData?.length ? watchlistData : [];
   const [selected, setSelected] = useState(null);
 
   return (
@@ -311,6 +294,7 @@ const WatchlistIndicatorsPanel = ({ watchlistData }) => {
               </div>
             );
           })}
+          {data.length === 0 && <div style={{ fontSize: 11, color: C.textMuted, paddingTop: 8 }}>No live watchlist data</div>}
         </div>
       </div>
     </Card>
@@ -638,13 +622,7 @@ const KillSwitchHistoryPanel = ({ risk, riskEvents }) => {
 const ExecutionQueuePanel = ({ orders }) => {
   const pending = (orders || []).filter(o => ["PENDING", "OPEN", "TRIGGER PENDING"].includes((o.status || "").toUpperCase()));
   const recent = (orders || []).filter(o => ["COMPLETE", "FILLED"].includes((o.status || "").toUpperCase())).slice(0, 8);
-
-  const mockPending = [
-    { symbol: "RELIANCE", side: "BUY", quantity: 10, price: 2450, order_type: "LIMIT", tag: "BREAKOUT", placed_at: new Date(Date.now() - 12000).toISOString(), status: "PENDING" },
-    { symbol: "SBIN", side: "SELL", quantity: 25, trigger_price: 810, order_type: "SL_M", tag: "SL_TRAIL", placed_at: new Date(Date.now() - 45000).toISOString(), status: "TRIGGER PENDING" },
-  ];
-
-  const displayPending = pending.length ? pending : mockPending;
+  const displayPending = pending;
 
   return (
     <Card>
@@ -723,13 +701,8 @@ const SLOrderStatusPanel = ({ positions, ticks }) => {
       return { ...p, ltp, sl, entry, target, slDist, targetDist, progressToTarget, side };
     });
   }, [positions, ticks]);
-
-  const mockItems = [
-    { symbol: "RELIANCE", side: "BUY", ltp: 2462, entry: 2450, sl: 2420, target: 2510, slDist: 1.7, targetDist: 2.0, progressToTarget: 35 },
-    { symbol: "SBIN", side: "BUY", ltp: 823, entry: 815, sl: 800, target: 845, slDist: 2.8, targetDist: 2.7, progressToTarget: 30 },
-  ];
-
-  const display = items.length ? items : mockItems;
+  
+  const display = items;
 
   return (
     <Card>
@@ -784,18 +757,7 @@ const IntradayChartPanel = ({ ticks, tickHistory }) => {
 
   const chartData = useMemo(() => {
     const series = tickHistory?.[symbol] || [];
-    if (series.length < 2) {
-      // Simulate OHLCV
-      const base = { NIFTY: 22000, BANKNIFTY: 47000, RELIANCE: 2450, HDFCBANK: 1610, TCS: 3820, SBIN: 815 }[symbol] || 1000;
-      return Array.from({ length: 48 }, (_, i) => {
-        const t = new Date(); t.setMinutes(t.getMinutes() - (48 - i) * 15);
-        const open = base + (Math.random() - 0.5) * base * 0.02;
-        const close = open + (Math.random() - 0.5) * base * 0.01;
-        const high = Math.max(open, close) + Math.random() * base * 0.005;
-        const low = Math.min(open, close) - Math.random() * base * 0.005;
-        return { time: t.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }), open: +open.toFixed(2), close: +close.toFixed(2), high: +high.toFixed(2), low: +low.toFixed(2), volume: Math.round(Math.random() * 100000) };
-      });
-    }
+    if (series.length < 2) return [];
     return series.map((v, i) => ({
       time: `T-${series.length - i}`, open: v * 0.999, close: v, high: v * 1.001, low: v * 0.998, volume: Math.round(Math.random() * 50000),
     }));
@@ -841,20 +803,26 @@ const IntradayChartPanel = ({ ticks, tickHistory }) => {
           ))}
         </div>
 
-        <ResponsiveContainer width="100%" height={200}>
-          <ComposedChart data={chartData} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-            <XAxis dataKey="time" tick={{ fill: C.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} interval={8} />
-            <YAxis yAxisId="price" domain={["auto", "auto"]} tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v.toFixed(0)} />
-            <YAxis yAxisId="vol" orientation="right" tick={{ fill: C.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} tickFormatter={v => `${(v / 1000).toFixed(0)}K`} />
-            <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
-              formatter={(v, name) => [name === "volume" ? `${(v / 1000).toFixed(1)}K` : v.toFixed(2), name]} />
-            <Bar yAxisId="vol" dataKey="volume" fill={C.purple} opacity={0.25} radius={[1, 1, 0, 0]} />
-            <Line yAxisId="price" type="monotone" dataKey="close" stroke={dayChange >= 0 ? C.green : C.red} strokeWidth={2} dot={false} />
-            <Line yAxisId="price" type="monotone" dataKey="high" stroke={C.green} strokeWidth={0.5} dot={false} strokeDasharray="2 2" />
-            <Line yAxisId="price" type="monotone" dataKey="low" stroke={C.red} strokeWidth={0.5} dot={false} strokeDasharray="2 2" />
-          </ComposedChart>
-        </ResponsiveContainer>
+        {chartData.length === 0 ? (
+          <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.textMuted, background: C.bg, borderRadius: 6 }}>
+            No live intraday ticks for {symbol}
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={200}>
+            <ComposedChart data={chartData} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+              <XAxis dataKey="time" tick={{ fill: C.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} interval={8} />
+              <YAxis yAxisId="price" domain={["auto", "auto"]} tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v.toFixed(0)} />
+              <YAxis yAxisId="vol" orientation="right" tick={{ fill: C.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} tickFormatter={v => `${(v / 1000).toFixed(0)}K`} />
+              <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
+                formatter={(v, name) => [name === "volume" ? `${(v / 1000).toFixed(1)}K` : v.toFixed(2), name]} />
+              <Bar yAxisId="vol" dataKey="volume" fill={C.purple} opacity={0.25} radius={[1, 1, 0, 0]} />
+              <Line yAxisId="price" type="monotone" dataKey="close" stroke={dayChange >= 0 ? C.green : C.red} strokeWidth={2} dot={false} />
+              <Line yAxisId="price" type="monotone" dataKey="high" stroke={C.green} strokeWidth={0.5} dot={false} strokeDasharray="2 2" />
+              <Line yAxisId="price" type="monotone" dataKey="low" stroke={C.red} strokeWidth={0.5} dot={false} strokeDasharray="2 2" />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
       </div>
     </Card>
   );
@@ -926,7 +894,7 @@ export default function TradingDashboard() {
   const killSwitch = risk.kill_switch;
   const latestDecision = agentDecisions[agentDecisions.length - 1];
   const latestSignals = (latestDecision?.signals || latestDecision?.signals_raw || []).slice(0, 5);
-  const reasoningSignals = latestSignals.length > 0 ? latestSignals : MOCK_SIGNALS;
+  const reasoningSignals = latestSignals;
   const progressPct = Number(agentStatus?.progress_pct || 0);
   const pnlColor = (pnl.total || 0) >= 0 ? C.green : C.red;
 
@@ -1069,7 +1037,7 @@ export default function TradingDashboard() {
           <div style={{ background: `${C.blue}08`, border: `1px solid ${C.blue}25`, borderRadius: 8, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
             <Power size={13} color={C.blue} />
             <span style={{ fontSize: 11, color: C.blue, fontWeight: 700 }}>Engine not running</span>
-            <span style={{ fontSize: 11, color: C.textMuted }}>· Preview mode — live data will appear after starting</span>
+            <span style={{ fontSize: 11, color: C.textMuted }}>· Live data will appear after starting</span>
             <button onClick={handleStartEngine} style={{ marginLeft: "auto", background: `${C.blue}15`, border: `1px solid ${C.blue}40`, borderRadius: 5, padding: "5px 14px", cursor: "pointer", fontSize: 10, fontWeight: 700, color: C.blue }}>
               START ENGINE →
             </button>
@@ -1235,7 +1203,7 @@ export default function TradingDashboard() {
 
             {/* Signal cards */}
             <Card>
-              <SectionHeader title="Latest AI Signals" sub={`${reasoningSignals.length} signals · ${latestDecision?.timestamp ? new Date(latestDecision.timestamp).toLocaleTimeString("en-IN") : "Preview"}`} />
+              <SectionHeader title="Latest AI Signals" sub={`${reasoningSignals.length} signals · ${latestDecision?.timestamp ? new Date(latestDecision.timestamp).toLocaleTimeString("en-IN") : "No live decisions yet"}`} />
               <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 12 }}>
                 {reasoningSignals.map((s, i) => {
                   const conf = Math.round((Number(s.confidence || 0) || 0) * 100);
@@ -1263,6 +1231,9 @@ export default function TradingDashboard() {
                     </div>
                   );
                 })}
+                {reasoningSignals.length === 0 && (
+                  <div style={{ fontSize: 11, color: C.textMuted }}>No live AI signals yet</div>
+                )}
               </div>
             </Card>
           </div>
