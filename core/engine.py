@@ -129,8 +129,13 @@ class TradingEngine:
             "cycle_started_at": None,
             "last_cycle_duration_ms": None,
             "last_error": None,
+            "progress_pct": 0,
+            "selected_strategy": None,
+            "signals_considered": 0,
+            "signals_approved": 0,
+            "signals_rejected": 0,
         }
-        self._agent_events: list[dict[str, str]] = []
+        self._agent_events: list[dict[str, object]] = []
 
     def _set_agent_stage(self, stage: str, now: Optional[datetime] = None, error: Optional[str] = None) -> None:
         ts = now or datetime.now(IST)
@@ -139,13 +144,36 @@ class TradingEngine:
         if error:
             self._agent_status["last_error"] = error
 
-    def _push_agent_event(self, message: str, level: str = "info", now: Optional[datetime] = None) -> None:
+    def _cycle_elapsed_ms(self, now: Optional[datetime] = None) -> int:
+        if not self._agent_status.get("cycle_started_at"):
+            return 0
+        try:
+            started = datetime.fromisoformat(str(self._agent_status["cycle_started_at"]))
+            current = now or datetime.now(IST)
+            return int((current - started).total_seconds() * 1000)
+        except Exception:
+            return 0
+
+    def _push_agent_event(
+        self,
+        message: str,
+        level: str = "info",
+        now: Optional[datetime] = None,
+        metadata: Optional[dict[str, object]] = None,
+    ) -> None:
         ts = now or datetime.now(IST)
-        self._agent_events.append({
+        event: dict[str, object] = {
             "timestamp": ts.isoformat(),
             "level": level,
             "message": message,
-        })
+            "cycle_id": self._agent_status.get("cycle_id"),
+            "stage": self._agent_status.get("stage"),
+            "progress_pct": self._agent_status.get("progress_pct", 0),
+            "elapsed_ms": self._cycle_elapsed_ms(ts),
+        }
+        if metadata:
+            event.update(metadata)
+        self._agent_events.append(event)
         self._agent_events = self._agent_events[-100:]
 
     # ── Startup / Shutdown ────────────────────────────────────────────────────
@@ -217,26 +245,63 @@ class TradingEngine:
         self._agent_status["cycle_id"] = uuid.uuid4().hex[:8]
         self._agent_status["cycle_started_at"] = now.isoformat()
         self._agent_status["last_error"] = None
+        self._agent_status["progress_pct"] = 0
+        self._agent_status["selected_strategy"] = None
+        self._agent_status["signals_considered"] = 0
+        self._agent_status["signals_approved"] = 0
+        self._agent_status["signals_rejected"] = 0
 
         if not self.risk.is_trading_allowed:
             self._set_agent_stage("paused", now)
-            self._push_agent_event("Trading paused: kill switch active", level="warn", now=now)
+            self._agent_status["progress_pct"] = 100
+            self._push_agent_event(
+                "Trading paused: kill switch active",
+                level="warn",
+                now=now,
+                metadata={"progress_pct": 100},
+            )
             logger.warning("⛔ Kill switch active - no trading")
             return
 
         self._set_agent_stage("collecting_context", now)
+        self._agent_status["progress_pct"] = 10
+        self._push_agent_event(
+            "Collecting market context",
+            now=now,
+            metadata={"progress_pct": 10},
+        )
         context = await self._build_market_context(now)
 
         self._set_agent_stage("calling_model")
+        self._agent_status["progress_pct"] = 35
+        self._push_agent_event(
+            "Sending context to AI model",
+            now=now,
+            metadata={"progress_pct": 35},
+        )
         signals = await self.agent.analyze_and_decide(context)
+        self._agent_status["signals_considered"] = len(signals)
+        if signals:
+            self._agent_status["selected_strategy"] = signals[0].strategy
         self._push_agent_event(
             f"AI generated {len(signals)} signal(s) | regime {getattr(context, '_regime', 'unknown')}",
             now=now,
+            metadata={
+                "progress_pct": 50,
+                "selected_strategy": self._agent_status.get("selected_strategy"),
+                "signals_considered": len(signals),
+            },
         )
 
         executed, rejected = 0, 0
         rejection_breakdown: dict[str, int] = {}
         self._set_agent_stage("risk_checks")
+        self._agent_status["progress_pct"] = 60
+        self._push_agent_event(
+            "Running risk checks on AI signals",
+            now=now,
+            metadata={"progress_pct": 60},
+        )
         if signals:
             funds = await self.primary_broker.get_funds()
             positions = await self.primary_broker.get_positions()
@@ -260,23 +325,45 @@ class TradingEngine:
                     self._push_agent_event(
                         f"{signal.symbol} {signal.action.value} rejected: {check.reason}",
                         level="error",
+                        metadata={
+                            "signals_rejected": rejected + 1,
+                            "signals_approved": executed,
+                            "selected_strategy": signal.strategy,
+                        },
                     )
                     rejected += 1
+                    self._agent_status["signals_rejected"] = rejected
                     continue
 
                 qty = check.adjusted_quantity or signal.quantity
                 sl = check.adjusted_sl or signal.stop_loss
                 self._set_agent_stage("placing_orders")
+                self._agent_status["progress_pct"] = 85
                 ok = await self._execute_signal(signal, qty, sl)
                 if ok:
                     executed += 1
-                    self._push_agent_event(f"{signal.symbol} {signal.action.value} executed qty {qty}", level="success")
+                    self._agent_status["signals_approved"] = executed
+                    self._push_agent_event(
+                        f"{signal.symbol} {signal.action.value} executed qty {qty}",
+                        level="success",
+                        metadata={
+                            "signals_approved": executed,
+                            "signals_rejected": rejected,
+                            "selected_strategy": signal.strategy,
+                        },
+                    )
                 else:
                     rejected += 1
+                    self._agent_status["signals_rejected"] = rejected
                     rejection_breakdown["execution_error"] = rejection_breakdown.get("execution_error", 0) + 1
                     self._push_agent_event(
                         f"{signal.symbol} {signal.action.value} execution failed",
                         level="error",
+                        metadata={
+                            "signals_approved": executed,
+                            "signals_rejected": rejected,
+                            "selected_strategy": signal.strategy,
+                        },
                     )
 
         latest_decision = self.agent.decision_history[-1] if self.agent.decision_history else None
@@ -315,9 +402,24 @@ class TradingEngine:
 
         done = datetime.now(IST)
         self._set_agent_stage("decision_complete", done)
+        self._agent_status["progress_pct"] = 100
+        self._agent_status["signals_approved"] = executed
+        self._agent_status["signals_rejected"] = rejected
         if self._agent_status.get("cycle_started_at"):
             cycle_started = datetime.fromisoformat(str(self._agent_status["cycle_started_at"]))
             self._agent_status["last_cycle_duration_ms"] = int((done - cycle_started).total_seconds() * 1000)
+        self._push_agent_event(
+            "Decision cycle completed",
+            level="success",
+            now=done,
+            metadata={
+                "progress_pct": 100,
+                "signals_approved": executed,
+                "signals_rejected": rejected,
+                "signals_considered": len(signals),
+                "selected_strategy": self._agent_status.get("selected_strategy"),
+            },
+        )
 
     # ── Execution ─────────────────────────────────────────────────────────────
 
