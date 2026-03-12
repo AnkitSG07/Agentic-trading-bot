@@ -27,6 +27,7 @@ brokers:
     api_key: "${ZERODHA_API_KEY}"
     api_secret: "${ZERODHA_API_SECRET}"
     user_id: "${ZERODHA_USER_ID}"
+    password: "${ZERODHA_PASSWORD}"
     totp_secret: "${ZERODHA_TOTP_SECRET}"
     redirect_url: "http://localhost:5000/auth/zerodha/callback"
     sandbox: false
