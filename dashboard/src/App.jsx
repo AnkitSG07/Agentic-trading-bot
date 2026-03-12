@@ -257,7 +257,6 @@ export default function TradingDashboard() {
   }, [timeRange]);
 
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", refreshInterval);
-  const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
   const { data: agentData, refetch: refetchAgent } = useAPI("/api/agent/in-memory-decisions", 5000);
   const { data: riskEvents } = useAPI("/api/risk/events?limit=20", 30000);
