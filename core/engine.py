@@ -122,6 +122,31 @@ class TradingEngine:
         self._ohlcv_frames: dict[str, pd.DataFrame] = {}
         self._nifty_history: list[float] = []
         self._primary_broker_name: str = ""
+        self._agent_status: dict[str, object] = {
+            "cycle_id": None,
+            "stage": "idle",
+            "stage_started_at": None,
+            "cycle_started_at": None,
+            "last_cycle_duration_ms": None,
+            "last_error": None,
+        }
+        self._agent_events: list[dict[str, str]] = []
+
+    def _set_agent_stage(self, stage: str, now: Optional[datetime] = None, error: Optional[str] = None) -> None:
+        ts = now or datetime.now(IST)
+        self._agent_status["stage"] = stage
+        self._agent_status["stage_started_at"] = ts.isoformat()
+        if error:
+            self._agent_status["last_error"] = error
+
+    def _push_agent_event(self, message: str, level: str = "info", now: Optional[datetime] = None) -> None:
+        ts = now or datetime.now(IST)
+        self._agent_events.append({
+            "timestamp": ts.isoformat(),
+            "level": level,
+            "message": message,
+        })
+        self._agent_events = self._agent_events[-100:]
 
     # ── Startup / Shutdown ────────────────────────────────────────────────────
 
@@ -189,14 +214,29 @@ class TradingEngine:
     # ── Decision Cycle ────────────────────────────────────────────────────────
 
     async def _decision_cycle(self, now: datetime) -> None:
+        self._agent_status["cycle_id"] = uuid.uuid4().hex[:8]
+        self._agent_status["cycle_started_at"] = now.isoformat()
+        self._agent_status["last_error"] = None
+
         if not self.risk.is_trading_allowed:
+            self._set_agent_stage("paused", now)
+            self._push_agent_event("Trading paused: kill switch active", level="warn", now=now)
             logger.warning("⛔ Kill switch active - no trading")
             return
 
+        self._set_agent_stage("collecting_context", now)
         context = await self._build_market_context(now)
+
+        self._set_agent_stage("calling_model")
         signals = await self.agent.analyze_and_decide(context)
+        self._push_agent_event(
+            f"AI generated {len(signals)} signal(s) | regime {getattr(context, '_regime', 'unknown')}",
+            now=now,
+        )
 
         executed, rejected = 0, 0
+        rejection_breakdown: dict[str, int] = {}
+        self._set_agent_stage("risk_checks")
         if signals:
             funds = await self.primary_broker.get_funds()
             positions = await self.primary_broker.get_positions()
@@ -215,23 +255,44 @@ class TradingEngine:
                 )
                 if not check.approved:
                     logger.warning(f"❌ {signal.symbol}: {check.reason}")
+                    reason = (check.reason or "risk_check_failed").strip().lower().replace(" ", "_")
+                    rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + 1
+                    self._push_agent_event(
+                        f"{signal.symbol} {signal.action.value} rejected: {check.reason}",
+                        level="error",
+                    )
                     rejected += 1
                     continue
 
                 qty = check.adjusted_quantity or signal.quantity
                 sl = check.adjusted_sl or signal.stop_loss
+                self._set_agent_stage("placing_orders")
                 ok = await self._execute_signal(signal, qty, sl)
                 if ok:
                     executed += 1
+                    self._push_agent_event(f"{signal.symbol} {signal.action.value} executed qty {qty}", level="success")
                 else:
                     rejected += 1
+                    rejection_breakdown["execution_error"] = rejection_breakdown.get("execution_error", 0) + 1
+                    self._push_agent_event(
+                        f"{signal.symbol} {signal.action.value} execution failed",
+                        level="error",
+                    )
+
+        latest_decision = self.agent.decision_history[-1] if self.agent.decision_history else None
+        if latest_decision and latest_decision.get("timestamp") == context.timestamp.isoformat():
+            latest_decision["signals_generated"] = len(signals)
+            latest_decision["signals_executed"] = executed
+            latest_decision["signals_rejected"] = rejected
+            latest_decision["rejection_breakdown"] = rejection_breakdown
+            latest_decision["market_commentary"] = latest_decision.get("market_commentary") or latest_decision.get("commentary")
 
         # Persist to DB
         try:
             await AgentDecisionRepository.save(
                 timestamp=now,
                 market_regime=getattr(context, "_regime", "unknown"),
-                market_commentary="",
+                market_commentary=(latest_decision or {}).get("market_commentary") or "",
                 session_name=context.session,
                 nifty_ltp=context.nifty50_ltp,
                 banknifty_ltp=context.banknifty_ltp,
@@ -240,9 +301,9 @@ class TradingEngine:
                 signals_generated=len(signals),
                 signals_executed=executed,
                 signals_rejected=rejected,
-                risk_assessment="",
-                session_recommendation="",
-                raw_response={},
+                risk_assessment=(latest_decision or {}).get("risk_assessment") or "",
+                session_recommendation=(latest_decision or {}).get("session_recommendation") or "",
+                raw_response={"rejection_breakdown": rejection_breakdown},
                 context_snapshot={
                     "capital": context.available_capital,
                     "positions": len(context.open_positions),
@@ -251,6 +312,12 @@ class TradingEngine:
             )
         except Exception as e:
             logger.debug(f"Decision persist error: {e}")
+
+        done = datetime.now(IST)
+        self._set_agent_stage("decision_complete", done)
+        if self._agent_status.get("cycle_started_at"):
+            cycle_started = datetime.fromisoformat(str(self._agent_status["cycle_started_at"]))
+            self._agent_status["last_cycle_duration_ms"] = int((done - cycle_started).total_seconds() * 1000)
 
     # ── Execution ─────────────────────────────────────────────────────────────
 
