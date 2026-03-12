@@ -5,6 +5,7 @@ Also handles news sentiment via a simple keyword-based scorer.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -19,7 +20,10 @@ NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Keep encodings limited to codecs available in Python stdlib/httpx runtime.
+    # Sending `br` can return Brotli payloads that fail JSON decode when the
+    # brotli extra isn't installed.
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.nseindia.com/",
     "Connection": "keep-alive",
 }
@@ -71,7 +75,7 @@ class NSEDataFeed:
 
             resp = await client.get(url)
             resp.raise_for_status()
-            data = resp.json()
+            data = self._safe_json(resp)
 
             chain = self._parse_option_chain(data, symbol)
             self._oi_cache[symbol] = chain
@@ -205,7 +209,7 @@ class NSEDataFeed:
             client = await self._get_client()
             resp = await client.get(f"{NSE_BASE}/api/allIndices")
             resp.raise_for_status()
-            data = resp.json()
+            data = self._safe_json(resp)
             for index in data.get("data", []):
                 if index.get("index") == "INDIA VIX":
                     return float(index.get("last", 14.0))
@@ -221,7 +225,7 @@ class NSEDataFeed:
             client = await self._get_client()
             resp = await client.get(f"{NSE_BASE}/api/allIndices")
             resp.raise_for_status()
-            data = resp.json()
+            data = self._safe_json(resp)
 
             result = {"nifty": 0.0, "banknifty": 0.0, "vix": 14.0, "finnifty": 0.0}
             name_map = {
@@ -238,6 +242,14 @@ class NSEDataFeed:
         except Exception as e:
             logger.warning(f"Index data fetch error: {e}")
             return {"nifty": 22000.0, "banknifty": 47000.0, "vix": 14.0, "finnifty": 0.0}
+
+    def _safe_json(self, response: httpx.Response) -> dict:
+        """Decode JSON with a defensive fallback for mislabelled/garbled payloads."""
+        try:
+            return response.json()
+        except UnicodeDecodeError:
+            text = response.content.decode("utf-8", errors="ignore")
+            return json.loads(text)
 
     # ── IV Rank ───────────────────────────────────────────────────────────────
 
