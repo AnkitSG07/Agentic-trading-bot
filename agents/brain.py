@@ -285,6 +285,8 @@ class TradingAgent:
                 "timestamp": context.timestamp.isoformat(),
                 "market_regime": decision.get("market_regime"),
                 "commentary": decision.get("market_commentary"),
+                "market_commentary": decision.get("market_commentary"),
+                "risk_assessment": decision.get("risk_assessment"),
                 "signals_count": len(signals),
                 "session_recommendation": decision.get("session_recommendation"),
             })
