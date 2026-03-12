@@ -494,8 +494,23 @@ async def agent_in_memory(limit: int = 20):
     """Quick access to agent decisions stored in memory (no DB needed)."""
     engine = get_engine_or_none()
     if not engine:
-        return {"decisions": []}
-    return {"decisions": engine.agent.decision_history[-limit:]}
+        return {"decisions": [], "agent_status": None, "agent_events": []}
+    return {
+        "decisions": engine.agent.decision_history[-limit:],
+        "agent_status": engine._agent_status,
+        "agent_events": engine._agent_events[-50:],
+    }
+
+
+@app.get("/api/agent/status")
+async def agent_status():
+    engine = get_engine_or_none()
+    if not engine:
+        return {"agent_status": None, "agent_events": []}
+    return {
+        "agent_status": engine._agent_status,
+        "agent_events": engine._agent_events[-50:],
+    }
 
 
 # ─── ANALYTICS ───────────────────────────────────────────────────────────────
@@ -624,6 +639,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             for sym, data in list(engine._tick_data.items())[:15]
                         },
                         "agent_decisions": engine.agent.decision_history[-3:],
+                        "agent_status": engine._agent_status,
+                        "agent_events": engine._agent_events[-30:],    
                         "engine_running": engine._running,
                     }
                     await websocket.send_text(json.dumps(payload))
