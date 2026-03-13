@@ -92,19 +92,28 @@ class RiskManager:
             peak_capital=Decimal("0"),
         )
         self._initialized = False
-        self._kill_switch = False
+        self._capital_blocked = False
 
     async def initialize(self, funds: Funds) -> None:
         """Call at market open with current account balance."""
+        available_cash = max(funds.available_cash, Decimal("0"))
+        total_balance = max(funds.total_balance, Decimal("0"))
+        effective_capital = available_cash if available_cash > 0 else total_balance
+
         self.today = DailyStats(
             date=date.today(),
-            starting_capital=funds.total_balance,
-            peak_capital=funds.total_balance,
+            starting_capital=effective_capital,
+            peak_capital=effective_capital,
         )
+        self._capital_blocked = effective_capital <= 0
+        if self._capital_blocked:
+            self._trigger_kill_switch("No positive tradable capital available at startup")
+
         self._initialized = True
         logger.info(
-            f"💰 Risk Manager initialized | Capital: ₹{funds.total_balance:,.0f} | "
-            f"Max daily loss: ₹{funds.total_balance * Decimal(str(self.config.max_daily_loss_pct / 100)):,.0f}"
+            f"💰 Risk Manager initialized | Raw total: ₹{funds.total_balance:,.0f} | "
+            f"Raw available: ₹{funds.available_cash:,.0f} | Effective capital: ₹{effective_capital:,.0f} | "
+            f"Max daily loss: ₹{effective_capital * Decimal(str(self.config.max_daily_loss_pct / 100)):,.0f}"
         )
 
     # ── Pre-Trade Checks ─────────────────────────────────────────────────────
@@ -123,6 +132,10 @@ class RiskManager:
         Run all pre-trade risk checks. Returns RiskCheck with approval status.
         This MUST be called before placing any order.
         """
+
+        # 0. Block fresh trades when no positive baseline capital exists
+        if self._capital_blocked:
+            return RiskCheck(False, "Trading blocked: no positive capital baseline")
 
         # 1. Kill switch
         if self._kill_switch:
