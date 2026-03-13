@@ -12,7 +12,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
@@ -64,6 +64,73 @@ def _load_engine_state() -> dict:
         return {"autostart": False, "mode": "paper"}
 
 
+def _broker_pref_file() -> Path:
+    configured = os.getenv("UI_SETTINGS_FILE", "runtime/ui_settings.json").strip()
+    return Path(configured)
+
+
+def _load_ui_primary_broker_preference() -> str:
+    path = _broker_pref_file()
+    if not path.exists():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        value = str(data.get("ui_primary_broker", "") or "").strip().lower()
+        return value if value in {"dhan", "zerodha"} else ""
+    except Exception as e:
+        logger.warning(f"Unable to load broker preference from {path}: {e}")
+        return ""
+
+
+def _persist_ui_primary_broker_preference(ui_primary_broker: str) -> bool:
+    path = _broker_pref_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ui_primary_broker": ui_primary_broker,
+            "updated_at": datetime.now().isoformat(),
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return True
+    except Exception as e:
+        logger.warning(f"Unable to persist broker preference to {path}: {e}")
+        return False
+
+
+async def _resolve_ui_primary_status(engine: Optional[TradingEngine]) -> dict:
+    selected = _load_ui_primary_broker_preference()
+    connected = []
+    effective = ""
+    fallback_active = False
+    reason = ""
+
+    if engine:
+        if selected:
+            engine.set_ui_primary_broker(selected)
+        elif not engine.ui_primary_broker:
+            engine.set_ui_primary_broker(engine._primary_broker_name or "")
+
+        connected = await engine.connected_broker_names_live()
+        selected = engine.ui_primary_broker or selected
+        effective, fallback_active, reason = await engine.resolve_ui_primary_broker_live()
+    else:
+        reason = "engine not running"
+
+    if selected and selected not in connected and connected:
+        fallback_active = True
+        reason = reason or f"selected broker '{selected}' is disconnected"
+    elif selected and not connected:
+        fallback_active = True
+        reason = reason or "no healthy broker available"
+
+    return {
+        "ui_primary_broker": selected or None,
+        "connected_brokers": connected,
+        "effective_primary_broker": effective or None,
+        "fallback_active": fallback_active,
+        "reason": reason,
+    }
+
 async def _start_engine_task(mode: str) -> None:
     """Shared background launcher used by API start endpoint and startup recovery."""
     # Load config with full env-var expansion (same as main.py)
@@ -79,6 +146,9 @@ async def _start_engine_task(mode: str) -> None:
                 broker_cfg["sandbox"] = True
 
     new_engine = TradingEngine(config)
+    preferred_ui_broker = _load_ui_primary_broker_preference()
+    if preferred_ui_broker:
+        new_engine.set_ui_primary_broker(preferred_ui_broker)
     try:
         await new_engine.start()
     except Exception as e:
@@ -168,6 +238,9 @@ class KillSwitchResetRequest(BaseModel):
 
 class EngineStartRequest(BaseModel):
     mode: str = "paper"
+
+class BrokerPreferenceRequest(BaseModel):
+    ui_primary_broker: Literal["dhan", "zerodha"]
 
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -659,6 +732,61 @@ async def trade_history(symbol: Optional[str] = None, days: int = 30):
         logger.error(f"Trade history error: {e}")
         return {"trades": []}
 
+@app.get("/api/settings/broker-preference")
+async def get_broker_preference():
+    return await _resolve_ui_primary_status(get_engine_or_none())
+
+
+@app.post("/api/settings/broker-preference")
+async def set_broker_preference(req: BrokerPreferenceRequest):
+    selected = req.ui_primary_broker.lower()
+    persisted = _persist_ui_primary_broker_preference(selected)
+    if not persisted:
+        raise HTTPException(500, "failed to persist ui_primary_broker")
+
+    engine = get_engine_or_none()
+    if engine:
+        engine.set_ui_primary_broker(selected)
+
+    status = await _resolve_ui_primary_status(engine)
+    status["pending_connection"] = selected not in status.get("connected_brokers", [])
+    return status
+
+
+def _degraded_live_payload(engine: TradingEngine, ui_status: dict, reason: str) -> dict:
+    return {
+        "type": "live_update",
+        "timestamp": datetime.now().isoformat(),
+        "indices": {},
+        "funds": {"available": 0.0, "used_margin": 0.0, "total": 0.0},
+        "pnl": {"realized": 0, "unrealized": 0, "total": 0, "pct": 0},
+        "positions": [],
+        "risk": {"kill_switch": False, "drawdown_pct": 0, "daily_pnl_pct": 0, "trading_allowed": False, "trades_today": 0, "win_rate": 0},
+        "ticks": {},
+        "options_chain": {},
+        "watchlist": [],
+        "agent_decisions": engine.agent.decision_history[-3:],
+        "agent_status": engine._agent_status,
+        "agent_events": engine._agent_events[-30:],
+        "agent_progress": {
+            "stage": engine._agent_status.get("stage"),
+            "progress_pct": engine._agent_status.get("progress_pct", 0),
+            "selected_strategy": engine._agent_status.get("selected_strategy"),
+            "cycle_id": engine._agent_status.get("cycle_id"),
+            "last_cycle_duration_ms": engine._agent_status.get("last_cycle_duration_ms"),
+        },
+        "engine_running": engine._running,
+        "primary_broker": engine._primary_broker_name or None,
+        "ui_primary_broker": ui_status.get("ui_primary_broker"),
+        "effective_primary_broker": None,
+        "primary_override_active": True,
+        "primary_override_reason": reason,
+        "replica_broker": engine._replica_broker_name or None,
+        "replication_enabled": engine._replication_enabled,
+        "replication_status": engine._replication_status,
+        "last_replication_error": engine._last_replication_error,
+    }
+
 
 # ─── WEBSOCKET ───────────────────────────────────────────────────────────────
 
@@ -673,8 +801,30 @@ async def websocket_endpoint(websocket: WebSocket):
             engine = get_engine()
             if engine and engine.primary_broker and engine._running:
                 try:
-                    positions = await engine.primary_broker.get_positions()
-                    funds = await engine.primary_broker.get_funds()
+                    ui_status = await _resolve_ui_primary_status(engine)
+                    effective_name = ui_status.get("effective_primary_broker")
+                    if not effective_name:
+                        payload = _degraded_live_payload(engine, ui_status, "no healthy broker available")
+                        await websocket.send_text(json.dumps(payload))
+                        await asyncio.sleep(1)
+                        continue
+
+                    effective_broker = engine.get_broker(str(effective_name))
+                    if not effective_broker:
+                        payload = _degraded_live_payload(engine, ui_status, f"effective broker '{effective_name}' unavailable")
+                        await websocket.send_text(json.dumps(payload))
+                        await asyncio.sleep(1)
+                        continue
+
+                    try:
+                        positions = await effective_broker.get_positions()
+                        funds = await effective_broker.get_funds()
+                    except Exception as broker_error:
+                        payload = _degraded_live_payload(engine, ui_status, f"effective broker error: {broker_error}")
+                        await websocket.send_text(json.dumps(payload))
+                        await asyncio.sleep(1)
+                        continue
+
                     risk = engine.risk.get_daily_summary()
                     index_data = await engine.nse_feed.get_index_data()
 
@@ -713,12 +863,24 @@ async def websocket_endpoint(websocket: WebSocket):
                             "win_rate": risk["win_rate"],
                         },
                         "ticks": {
-                            sym: data.get("last_price") or data.get("ltp")
+                            sym: {
+                                "price": data.get("last_price") or data.get("ltp"),
+                                "source_broker": ui_status.get("effective_primary_broker"),
+                            }
                             for sym, data in engine._tick_data.items()
                             if (data.get("last_price") or data.get("ltp")) is not None
                         },
-                        "options_chain": engine._latest_options_chain,
-                        "watchlist": engine._latest_watchlist,
+                        "options_chain": {
+                            key: {
+                                **value,
+                                "source_broker": ui_status.get("effective_primary_broker"),
+                            }
+                            for key, value in engine._latest_options_chain.items()
+                        },
+                        "watchlist": [
+                            {**item, "source_broker": ui_status.get("effective_primary_broker")}
+                            for item in engine._latest_watchlist
+                        ],
                         "agent_decisions": engine.agent.decision_history[-3:],
                         "agent_status": engine._agent_status,
                         "agent_events": engine._agent_events[-30:],
@@ -731,6 +893,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                         "engine_running": engine._running,
                         "primary_broker": engine._primary_broker_name or "dhan",
+                        "ui_primary_broker": ui_status.get("ui_primary_broker"),
+                        "effective_primary_broker": ui_status.get("effective_primary_broker"),
+                        "primary_override_active": ui_status.get("fallback_active"),
+                        "primary_override_reason": ui_status.get("reason", ""),
                         "replica_broker": engine._replica_broker_name or "zerodha",
                         "replication_enabled": engine._replication_enabled,
                         "replication_status": engine._replication_status,
