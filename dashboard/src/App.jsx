@@ -11,7 +11,7 @@ import {
   Cpu, Radio, Database, BarChart2, Bell, Settings,
   Eye, Layers, GitBranch, Clock, Flame, TrendingUp as Trend,
   CheckCircle, XCircle, AlertCircle, Wifi, WifiOff,
-  List, BarChart as BarChartIcon, ChevronRight, 
+  List, BarChart as BarChartIcon, ChevronRight,
 } from "lucide-react";
 
 const isProduction = window.location.hostname !== "localhost";
@@ -61,6 +61,23 @@ function useWebSocket() {
   return { liveData, connected };
 }
 
+// ─── RESPONSIVE HOOK ──────────────────────────────────────────────────────────
+
+function useBreakpoint() {
+  const [width, setWidth] = useState(window.innerWidth);
+  useEffect(() => {
+    const handler = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
+  return {
+    isMobile: width < 640,
+    isTablet: width >= 640 && width < 1024,
+    isDesktop: width >= 1024,
+    width,
+  };
+}
+
 // ─── UI PRIMITIVES ────────────────────────────────────────────────────────────
 
 const C = {
@@ -107,12 +124,12 @@ const Card = ({ children, style = {} }) => (
 );
 
 const SectionHeader = ({ title, sub, right }) => (
-  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
-    <div>
-      <div style={{ fontWeight: 700, fontSize: 12, letterSpacing: 0.3 }}>{title}</div>
-      {sub && <div style={{ fontSize: 10, color: C.textMuted, marginTop: 2 }}>{sub}</div>}
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: `1px solid ${C.border}`, flexWrap: "wrap", gap: 8 }}>
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontWeight: 700, fontSize: 12, letterSpacing: 0.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
+      {sub && <div style={{ fontSize: 10, color: C.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>}
     </div>
-    {right}
+    {right && <div style={{ flexShrink: 0 }}>{right}</div>}
   </div>
 );
 
@@ -124,16 +141,16 @@ const MiniBar = ({ value, max, color }) => (
 
 const StatCard = ({ label, value, sub, color = C.cyan, icon: Icon, loading }) => (
   <Card>
-    <div style={{ padding: "16px 18px" }}>
+    <div style={{ padding: "14px 16px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ color: C.textMuted, fontSize: 9, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" }}>{label}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: C.textMuted, fontSize: 9, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
           {loading
-            ? <div style={{ height: 24, background: C.border, borderRadius: 4, width: "55%", animation: "shimmer 1.5s infinite" }} />
-            : <div style={{ color: C.text, fontSize: 20, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", letterSpacing: -1 }}>{value}</div>}
-          {sub && <div style={{ fontSize: 10, color: C.textMuted, marginTop: 5 }}>{sub}</div>}
+            ? <div style={{ height: 22, background: C.border, borderRadius: 4, width: "55%", animation: "shimmer 1.5s infinite" }} />
+            : <div style={{ color: C.text, fontSize: 18, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", letterSpacing: -1 }}>{value}</div>}
+          {sub && <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>}
         </div>
-        {Icon && <div style={{ background: `${color}12`, border: `1px solid ${color}20`, borderRadius: 8, padding: 9 }}><Icon size={15} color={color} /></div>}
+        {Icon && <div style={{ background: `${color}12`, border: `1px solid ${color}20`, borderRadius: 8, padding: 8, flexShrink: 0 }}><Icon size={14} color={color} /></div>}
       </div>
     </div>
   </Card>
@@ -155,6 +172,7 @@ const Sparkline = ({ data, color, height = 32 }) => {
 
 // 1. OPTIONS CHAIN PANEL
 const OptionsChainPanel = ({ data }) => {
+  const { isMobile } = useBreakpoint();
   const opts = data || {};
   const nifty = opts.NIFTY || {};
   const bnk = opts.BANKNIFTY || {};
@@ -171,13 +189,13 @@ const OptionsChainPanel = ({ data }) => {
   return (
     <Card>
       <SectionHeader title="Options Chain Intelligence" sub="Live PCR · Max Pain · OI Heatmap" right={
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace" }}>PCR</span>
           <span style={{ fontSize: 14, fontWeight: 800, color: hasPcr ? pcrColor : C.textMuted, fontFamily: "monospace" }}>{hasPcr ? pcr.toFixed(2) : "—"}</span>
           {hasPcr ? tag(pcrLabel, pcrColor) : tag("NO DATA", C.textMuted)}
         </div>
       } />
-      <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
+      <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr", gap: 16 }}>
         <div>
           <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 8, letterSpacing: 1 }}>TOP OI CONCENTRATION — NIFTY</div>
           {combined.length === 0 ? (
@@ -228,6 +246,7 @@ const SIGNAL_COLORS = { strong_buy: C.green, buy: "#4ade80", neutral: C.amber, s
 const SIGNAL_LABELS = { strong_buy: "STRONG BUY", buy: "BUY", neutral: "NEUTRAL", sell: "SELL", strong_sell: "STRONG SELL" };
 
 const WatchlistIndicatorsPanel = ({ watchlistData }) => {
+  const { isMobile } = useBreakpoint();
   const data = watchlistData?.length ? watchlistData : [];
   const [selected, setSelected] = useState(null);
 
@@ -236,66 +255,130 @@ const WatchlistIndicatorsPanel = ({ watchlistData }) => {
       <SectionHeader title="Watchlist Intelligence" sub="Real-time indicator matrix — what the AI sees" right={
         <span style={{ fontSize: 10, color: C.textMuted }}>{data.length} symbols</span>
       } />
-      <div style={{ padding: "0 18px 14px" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 1, marginTop: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "100px 70px 55px 60px 65px 65px 65px 80px", gap: 4, padding: "4px 0 8px", marginBottom: 4, borderBottom: `1px solid ${C.border}` }}>
-            {["SYMBOL", "LTP", "CHG%", "RSI", "MACD", "BB", "VOL", "SIGNAL"].map(h =>
-              <span key={h} style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: "monospace" }}>{h}</span>
-            )}
-          </div>
-          {data.map((w, i) => {
-            const ind = w.indicators || {};
-            const sig = ind.overall_signal || "neutral";
-            const sigColor = SIGNAL_COLORS[sig] || C.textMuted;
-            const rsi = Number(ind.rsi || 50);
-            const rsiColor = rsi > 70 ? C.red : rsi < 30 ? C.green : C.text;
-            const isSelected = selected === w.symbol;
-            return (
-              <div key={w.symbol}>
-                <div
-                  onClick={() => setSelected(isSelected ? null : w.symbol)}
-                  style={{
-                    display: "grid", gridTemplateColumns: "100px 70px 55px 60px 65px 65px 65px 80px", gap: 4,
-                    padding: "9px 6px", borderRadius: 6, cursor: "pointer",
-                    background: isSelected ? `${C.cyan}08` : i % 2 === 0 ? C.bg : "transparent",
-                    transition: "background .15s",
-                  }}
-                >
-                  <span style={{ fontSize: 11, fontWeight: 700 }}>{w.symbol}</span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: C.text }}>₹{(w.ltp || 0).toFixed(0)}</span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: (w.change_pct || 0) >= 0 ? C.green : C.red }}>
-                    {(w.change_pct || 0) >= 0 ? "+" : ""}{(w.change_pct || 0).toFixed(2)}%
-                  </span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: rsiColor }}>{rsi}</span>
-                  <span style={{ fontSize: 10 }}>{tag(ind.macd_signal || "neutral", ind.macd_signal === "bullish" ? C.green : ind.macd_signal === "bearish" ? C.red : C.amber)}</span>
-                  <span style={{ fontSize: 10 }}>{tag(ind.bb_signal || "middle", ind.bb_signal === "upper" ? C.amber : ind.bb_signal === "lower" ? C.blue : C.textMuted)}</span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: (ind.volume_ratio || 1) > 1.5 ? C.amber : C.textMuted }}>{(ind.volume_ratio || 1).toFixed(1)}x</span>
-                  <span style={{ fontSize: 9, fontWeight: 800, color: sigColor }}>{SIGNAL_LABELS[sig] || sig.toUpperCase()}</span>
-                </div>
-                {isSelected && (
-                  <div style={{ padding: "10px 8px 12px", background: `${C.cyan}06`, borderRadius: 6, marginBottom: 4 }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-                      {[
-                        { label: "Pivot", v: w.levels?.pivot, color: C.textMuted },
-                        { label: "R1", v: w.levels?.r1, color: C.red },
-                        { label: "S1", v: w.levels?.s1, color: C.green },
-                        { label: "Supertrend", v: ind.supertrend || "—", color: ind.supertrend === "bullish" ? C.green : C.red, isText: true },
-                      ].map(item => (
-                        <div key={item.label} style={{ background: C.surface, borderRadius: 6, padding: "8px 10px" }}>
-                          <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>{item.label}</div>
-                          <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: item.color }}>
-                            {item.isText ? item.v : item.v ? `₹${item.v}` : "—"}
-                          </div>
-                        </div>
-                      ))}
+      <div style={{ padding: "0 18px 14px", overflowX: "auto" }}>
+        {isMobile ? (
+          // Mobile: card-style layout
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+            {data.map((w, i) => {
+              const ind = w.indicators || {};
+              const sig = ind.overall_signal || "neutral";
+              const sigColor = SIGNAL_COLORS[sig] || C.textMuted;
+              const rsi = Number(ind.rsi || 50);
+              const rsiColor = rsi > 70 ? C.red : rsi < 30 ? C.green : C.text;
+              const isSelected = selected === w.symbol;
+              return (
+                <div key={w.symbol}>
+                  <div
+                    onClick={() => setSelected(isSelected ? null : w.symbol)}
+                    style={{
+                      background: isSelected ? `${C.cyan}08` : C.bg,
+                      borderRadius: 8, padding: "12px 14px", cursor: "pointer",
+                      border: `1px solid ${isSelected ? C.cyan + "40" : C.border}`,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontWeight: 800, fontSize: 13 }}>{w.symbol}</span>
+                        <span style={{ fontFamily: "monospace", fontSize: 12 }}>₹{(w.ltp || 0).toFixed(0)}</span>
+                        <span style={{ fontSize: 11, fontFamily: "monospace", color: (w.change_pct || 0) >= 0 ? C.green : C.red }}>
+                          {(w.change_pct || 0) >= 0 ? "+" : ""}{(w.change_pct || 0).toFixed(2)}%
+                        </span>
+                      </div>
+                      <span style={{ fontSize: 9, fontWeight: 800, color: sigColor }}>{SIGNAL_LABELS[sig] || sig.toUpperCase()}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 9, color: C.textMuted }}>RSI <span style={{ color: rsiColor, fontFamily: "monospace" }}>{rsi}</span></span>
+                      {tag(ind.macd_signal || "neutral", ind.macd_signal === "bullish" ? C.green : ind.macd_signal === "bearish" ? C.red : C.amber)}
+                      {tag(ind.bb_signal || "middle", ind.bb_signal === "upper" ? C.amber : ind.bb_signal === "lower" ? C.blue : C.textMuted)}
+                      <span style={{ fontSize: 9, color: (ind.volume_ratio || 1) > 1.5 ? C.amber : C.textMuted, fontFamily: "monospace" }}>VOL {(ind.volume_ratio || 1).toFixed(1)}x</span>
                     </div>
                   </div>
-                )}
-              </div>
-            );
-          })}
-          {data.length === 0 && <div style={{ fontSize: 11, color: C.textMuted, paddingTop: 8 }}>No live watchlist data</div>}
-        </div>
+                  {isSelected && (
+                    <div style={{ padding: "10px 8px 12px", background: `${C.cyan}06`, borderRadius: 8, marginTop: 4 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8 }}>
+                        {[
+                          { label: "Pivot", v: w.levels?.pivot, color: C.textMuted },
+                          { label: "R1", v: w.levels?.r1, color: C.red },
+                          { label: "S1", v: w.levels?.s1, color: C.green },
+                          { label: "Supertrend", v: ind.supertrend || "—", color: ind.supertrend === "bullish" ? C.green : C.red, isText: true },
+                        ].map(item => (
+                          <div key={item.label} style={{ background: C.surface, borderRadius: 6, padding: "8px 10px" }}>
+                            <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>{item.label}</div>
+                            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: item.color }}>
+                              {item.isText ? item.v : item.v ? `₹${item.v}` : "—"}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {data.length === 0 && <div style={{ fontSize: 11, color: C.textMuted, paddingTop: 8 }}>No live watchlist data</div>}
+          </div>
+        ) : (
+          // Desktop: table layout
+          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 1, marginTop: 12, minWidth: 580 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "100px 70px 55px 60px 65px 65px 65px 80px", gap: 4, padding: "4px 0 8px", marginBottom: 4, borderBottom: `1px solid ${C.border}` }}>
+              {["SYMBOL", "LTP", "CHG%", "RSI", "MACD", "BB", "VOL", "SIGNAL"].map(h =>
+                <span key={h} style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: "monospace" }}>{h}</span>
+              )}
+            </div>
+            {data.map((w, i) => {
+              const ind = w.indicators || {};
+              const sig = ind.overall_signal || "neutral";
+              const sigColor = SIGNAL_COLORS[sig] || C.textMuted;
+              const rsi = Number(ind.rsi || 50);
+              const rsiColor = rsi > 70 ? C.red : rsi < 30 ? C.green : C.text;
+              const isSelected = selected === w.symbol;
+              return (
+                <div key={w.symbol}>
+                  <div
+                    onClick={() => setSelected(isSelected ? null : w.symbol)}
+                    style={{
+                      display: "grid", gridTemplateColumns: "100px 70px 55px 60px 65px 65px 65px 80px", gap: 4,
+                      padding: "9px 6px", borderRadius: 6, cursor: "pointer",
+                      background: isSelected ? `${C.cyan}08` : i % 2 === 0 ? C.bg : "transparent",
+                      transition: "background .15s",
+                    }}
+                  >
+                    <span style={{ fontSize: 11, fontWeight: 700 }}>{w.symbol}</span>
+                    <span style={{ fontSize: 11, fontFamily: "monospace", color: C.text }}>₹{(w.ltp || 0).toFixed(0)}</span>
+                    <span style={{ fontSize: 11, fontFamily: "monospace", color: (w.change_pct || 0) >= 0 ? C.green : C.red }}>
+                      {(w.change_pct || 0) >= 0 ? "+" : ""}{(w.change_pct || 0).toFixed(2)}%
+                    </span>
+                    <span style={{ fontSize: 11, fontFamily: "monospace", color: rsiColor }}>{rsi}</span>
+                    <span style={{ fontSize: 10 }}>{tag(ind.macd_signal || "neutral", ind.macd_signal === "bullish" ? C.green : ind.macd_signal === "bearish" ? C.red : C.amber)}</span>
+                    <span style={{ fontSize: 10 }}>{tag(ind.bb_signal || "middle", ind.bb_signal === "upper" ? C.amber : ind.bb_signal === "lower" ? C.blue : C.textMuted)}</span>
+                    <span style={{ fontSize: 11, fontFamily: "monospace", color: (ind.volume_ratio || 1) > 1.5 ? C.amber : C.textMuted }}>{(ind.volume_ratio || 1).toFixed(1)}x</span>
+                    <span style={{ fontSize: 9, fontWeight: 800, color: sigColor }}>{SIGNAL_LABELS[sig] || sig.toUpperCase()}</span>
+                  </div>
+                  {isSelected && (
+                    <div style={{ padding: "10px 8px 12px", background: `${C.cyan}06`, borderRadius: 6, marginBottom: 4 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                        {[
+                          { label: "Pivot", v: w.levels?.pivot, color: C.textMuted },
+                          { label: "R1", v: w.levels?.r1, color: C.red },
+                          { label: "S1", v: w.levels?.s1, color: C.green },
+                          { label: "Supertrend", v: ind.supertrend || "—", color: ind.supertrend === "bullish" ? C.green : C.red, isText: true },
+                        ].map(item => (
+                          <div key={item.label} style={{ background: C.surface, borderRadius: 6, padding: "8px 10px" }}>
+                            <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>{item.label}</div>
+                            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: item.color }}>
+                              {item.isText ? item.v : item.v ? `₹${item.v}` : "—"}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {data.length === 0 && <div style={{ fontSize: 11, color: C.textMuted, paddingTop: 8 }}>No live watchlist data</div>}
+          </div>
+        )}
       </div>
     </Card>
   );
@@ -303,6 +386,8 @@ const WatchlistIndicatorsPanel = ({ watchlistData }) => {
 
 // 3. POSITION SPARKLINES WITH SL DISTANCE
 const PositionSparklinePanel = ({ positions, tickHistory, prevTicks }) => {
+  const { isMobile } = useBreakpoint();
+
   if (!positions?.length) return (
     <Card>
       <SectionHeader title="Open Positions" sub="Live P&L with sparklines" />
@@ -325,6 +410,40 @@ const PositionSparklinePanel = ({ positions, tickHistory, prevTicks }) => {
           const series = tickHistory?.[p.symbol] || [];
           const isUp = pnl >= 0;
           const slDist = p.stop_loss ? Math.abs(((ltp - Number(p.stop_loss)) / ltp) * 100) : null;
+
+          if (isMobile) {
+            return (
+              <div key={i} style={{ borderBottom: `1px solid ${C.border}`, padding: "14px 18px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span style={{ fontWeight: 800, fontSize: 13 }}>{p.symbol}</span>
+                    {tag(p.side, p.side === "BUY" ? C.green : C.red)}
+                    <span style={{ fontFamily: "monospace", fontSize: 11, color: C.textMuted }}>×{qty}</span>
+                  </div>
+                  <Num v={pnl} size={13} />
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 2 }}>AVG / LTP</div>
+                    <div style={{ fontFamily: "monospace", fontSize: 10 }}>₹{avg.toFixed(0)} / <span style={{ color: isUp ? C.green : C.red }}>₹{ltp.toFixed(0)}</span></div>
+                    <div style={{ fontSize: 10, color: isUp ? C.green : C.red }}>{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%</div>
+                  </div>
+                  <div>
+                    {slDist !== null ? (
+                      <>
+                        <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 2 }}>SL Distance</div>
+                        <div style={{ fontFamily: "monospace", fontSize: 11, color: slDist < 0.5 ? C.red : slDist < 1.5 ? C.amber : C.green }}>{slDist.toFixed(2)}%</div>
+                        <MiniBar value={Math.min(slDist, 5)} max={5} color={slDist < 1 ? C.red : slDist < 2 ? C.amber : C.green} />
+                      </>
+                    ) : <span style={{ fontSize: 10, color: C.textMuted }}>No SL</span>}
+                  </div>
+                </div>
+                <div style={{ width: "100%", opacity: 0.85 }}>
+                  <Sparkline data={series.length ? series : [avg, ltp]} color={isUp ? C.green : C.red} height={38} />
+                </div>
+              </div>
+            );
+          }
 
           return (
             <div key={i} style={{ borderBottom: `1px solid ${C.border}`, padding: "12px 18px", display: "grid", gridTemplateColumns: "90px 50px 80px 90px 100px 80px 1fr", alignItems: "center", gap: 12 }}>
@@ -407,7 +526,7 @@ const ConfidenceTimelinePanel = ({ decisions }) => {
             <Line yAxisId="lat" type="monotone" dataKey="latency" stroke={C.purple} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
           </ComposedChart>
         </ResponsiveContainer>
-        <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 12, height: 2, background: C.cyan, display: "inline-block" }} /><span style={{ fontSize: 10, color: C.textMuted }}>Confidence</span></div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 12, height: 2, background: C.purple, display: "inline-block" }} /><span style={{ fontSize: 10, color: C.textMuted }}>Latency</span></div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 12, height: 2, background: C.amber, borderStyle: "dashed", borderWidth: 1, display: "inline-block" }} /><span style={{ fontSize: 10, color: C.textMuted }}>65% threshold</span></div>
@@ -419,6 +538,7 @@ const ConfidenceTimelinePanel = ({ decisions }) => {
 
 // 5. STRATEGY REVIEW PANEL
 const StrategyReviewPanel = ({ reviewData }) => {
+  const { isMobile } = useBreakpoint();
   const review = reviewData || {
     strategy_weights: { momentum: 0.30, mean_reversion: 0.25, options_selling: 0.30, breakout: 0.15 },
     avoid_patterns: ["Avoid chasing breakouts in first 30 minutes", "Skip signals when VIX > 22"],
@@ -435,7 +555,7 @@ const StrategyReviewPanel = ({ reviewData }) => {
       <SectionHeader title="AI Strategy Review" sub="Latest performance review & parameter adjustments" right={
         tag("auto-updated", C.green)
       } />
-      <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+      <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
         <div>
           <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: 1, marginBottom: 10 }}>STRATEGY WEIGHTS</div>
           {Object.entries(weights).map(([strategy, weight]) => (
@@ -514,50 +634,34 @@ const ModelFallbackPanel = ({ decisions }) => {
   const fallbacks = stats.slice(1);
   const fallbackRate = stats.length > 1 ? fallbacks.reduce((s, x) => s + x.pct, 0) : 0;
 
+  const displayStats = stats.length === 0 ? [
+    { model: "2.5-flash", pct: 82, isFallback: false, avgLatency: 1240 },
+    { model: "2.0-flash", pct: 12, isFallback: true, avgLatency: 890 },
+    { model: "2.5-flash-lite", pct: 4, isFallback: true, avgLatency: 640 },
+    { model: "2.0-flash-lite", pct: 2, isFallback: true, avgLatency: 410 },
+  ] : stats;
+
   return (
     <Card>
       <SectionHeader title="Model Performance" sub="Gemini model usage & fallback tracking" right={
         fallbackRate > 0 ? tag(`${fallbackRate}% fallback`, C.amber) : tag("100% primary", C.green)
       } />
       <div style={{ padding: "14px 18px" }}>
-        {stats.length === 0 ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 }}>
-            {[
-              { model: "2.5-flash", pct: 82, isFallback: false, avgLatency: 1240 },
-              { model: "2.0-flash", pct: 12, isFallback: true, avgLatency: 890 },
-              { model: "2.5-flash-lite", pct: 4, isFallback: true, avgLatency: 640 },
-              { model: "2.0-flash-lite", pct: 2, isFallback: true, avgLatency: 410 },
-            ].map(m => (
-              <div key={m.model} style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", border: `1px solid ${m.isFallback ? C.amber + "30" : C.green + "30"}` }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace" }}>gemini-{m.model}</span>
-                  {tag(m.isFallback ? "fallback" : "primary", m.isFallback ? C.amber : C.green)}
-                </div>
-                <MiniBar value={m.pct} max={100} color={m.isFallback ? C.amber : C.green} />
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                  <span style={{ fontSize: 10, color: C.textMuted }}>{m.pct}% of calls</span>
-                  <span style={{ fontSize: 10, color: C.textMuted }}>{m.avgLatency}ms avg</span>
-                </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 }}>
+          {displayStats.map(m => (
+            <div key={m.model} style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", border: `1px solid ${m.isFallback ? C.amber + "30" : C.green + "30"}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 4 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, fontFamily: "monospace" }}>gemini-{m.model}</span>
+                {tag(m.isFallback ? "fallback" : "primary", m.isFallback ? C.amber : C.green)}
               </div>
-            ))}
-          </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 }}>
-            {stats.map(m => (
-              <div key={m.model} style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", border: `1px solid ${m.isFallback ? C.amber + "30" : C.green + "30"}` }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace" }}>gemini-{m.model}</span>
-                  {tag(m.isFallback ? "fallback" : "primary", m.isFallback ? C.amber : C.green)}
-                </div>
-                <MiniBar value={m.pct} max={100} color={m.isFallback ? C.amber : C.green} />
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                  <span style={{ fontSize: 10, color: C.textMuted }}>{m.pct}% of calls</span>
-                  <span style={{ fontSize: 10, color: C.textMuted }}>{m.avgLatency}ms avg</span>
-                </div>
+              <MiniBar value={m.pct} max={100} color={m.isFallback ? C.amber : C.green} />
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+                <span style={{ fontSize: 10, color: C.textMuted }}>{m.pct}% of calls</span>
+                <span style={{ fontSize: 10, color: C.textMuted }}>{m.avgLatency}ms avg</span>
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          ))}
+        </div>
       </div>
     </Card>
   );
@@ -588,7 +692,7 @@ const KillSwitchHistoryPanel = ({ risk, riskEvents }) => {
             const pct = Math.min((g.value / g.max) * 100, 100);
             return (
               <div key={g.label} style={{ background: C.bg, borderRadius: 8, padding: "12px 14px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 4 }}>
                   <span style={{ fontSize: 10, color: C.textMuted }}>{g.label}</span>
                   <span style={{ fontSize: 11, fontFamily: "monospace", color: pct > 75 ? g.color : C.text }}>{g.value.toFixed(2)}% / {g.max}%</span>
                 </div>
@@ -606,10 +710,10 @@ const KillSwitchHistoryPanel = ({ risk, riskEvents }) => {
         {events.length === 0 ? (
           <div style={{ fontSize: 11, color: C.textMuted, padding: "12px 0" }}>No critical events today — system operating normally</div>
         ) : events.slice(0, 5).map((e, i) => (
-          <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 10px", background: C.bg, borderRadius: 6, marginBottom: 4, borderLeft: `2px solid ${C.red}` }}>
-            <AlertTriangle size={11} color={C.red} />
-            <span style={{ fontSize: 10, fontFamily: "monospace", color: C.textMuted }}>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString("en-IN") : "—"}</span>
-            <span style={{ fontSize: 11, color: C.text, flex: 1 }}>{e.description || e.message}</span>
+          <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "8px 10px", background: C.bg, borderRadius: 6, marginBottom: 4, borderLeft: `2px solid ${C.red}` }}>
+            <AlertTriangle size={11} color={C.red} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ fontSize: 10, fontFamily: "monospace", color: C.textMuted, whiteSpace: "nowrap" }}>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString("en-IN") : "—"}</span>
+            <span style={{ fontSize: 11, color: C.text, flex: 1, wordBreak: "break-word" }}>{e.description || e.message}</span>
             {tag(e.severity || "CRITICAL", C.red)}
           </div>
         ))}
@@ -620,32 +724,32 @@ const KillSwitchHistoryPanel = ({ risk, riskEvents }) => {
 
 // 8. ORDER EXECUTION QUEUE
 const ExecutionQueuePanel = ({ orders }) => {
+  const { isMobile } = useBreakpoint();
   const pending = (orders || []).filter(o => ["PENDING", "OPEN", "TRIGGER PENDING"].includes((o.status || "").toUpperCase()));
   const recent = (orders || []).filter(o => ["COMPLETE", "FILLED"].includes((o.status || "").toUpperCase())).slice(0, 8);
-  const displayPending = pending;
 
   return (
     <Card>
       <SectionHeader title="Execution Queue" sub="Pending orders & recent fills" right={
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {displayPending.length > 0 && <span style={{ fontSize: 11, color: C.amber, fontFamily: "monospace" }}>{displayPending.length} pending</span>}
+          {pending.length > 0 && <span style={{ fontSize: 11, color: C.amber, fontFamily: "monospace" }}>{pending.length} pending</span>}
           {tag("live", C.green)}
         </div>
       } />
       <div style={{ padding: "10px 18px 14px" }}>
-        {displayPending.length > 0 && (
+        {pending.length > 0 && (
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 10, color: C.amber, letterSpacing: 1, marginBottom: 6 }}>PENDING ORDERS</div>
-            {displayPending.map((o, i) => {
+            {pending.map((o, i) => {
               const age = o.placed_at ? Math.round((Date.now() - new Date(o.placed_at).getTime()) / 1000) : 0;
               return (
-                <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px", background: C.bg, borderRadius: 6, marginBottom: 4, border: `1px solid ${C.amber}20` }}>
-                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.amber, animation: "pulseDot 1.5s infinite" }} />
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "9px 12px", background: C.bg, borderRadius: 6, marginBottom: 4, border: `1px solid ${C.amber}20`, flexWrap: isMobile ? "wrap" : "nowrap" }}>
+                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.amber, animation: "pulseDot 1.5s infinite", flexShrink: 0, marginTop: 4 }} />
                   <span style={{ fontWeight: 700, fontSize: 11, minWidth: 70 }}>{o.symbol}</span>
                   {tag(o.side, o.side === "BUY" ? C.green : C.red)}
                   <span style={{ fontFamily: "monospace", fontSize: 10, color: C.textMuted }}>{o.quantity} @ {o.price ? `₹${o.price}` : `₹${o.trigger_price} TRIGGER`}</span>
                   {tag(o.order_type || "LIMIT", C.blue)}
-                  <span style={{ marginLeft: "auto", fontSize: 10, color: C.textMuted }}>{age}s ago</span>
+                  <span style={{ marginLeft: isMobile ? 0 : "auto", fontSize: 10, color: C.textMuted }}>{age}s ago</span>
                   {tag(o.tag || "—", C.textMuted)}
                 </div>
               );
@@ -657,8 +761,8 @@ const ExecutionQueuePanel = ({ orders }) => {
         {(recent.length ? recent : []).slice(0, 5).map((o, i) => {
           const slippage = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
           return (
-            <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: C.bg, borderRadius: 6, marginBottom: 3 }}>
-              <CheckCircle size={11} color={C.green} />
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 12px", background: C.bg, borderRadius: 6, marginBottom: 3, flexWrap: isMobile ? "wrap" : "nowrap" }}>
+              <CheckCircle size={11} color={C.green} style={{ flexShrink: 0, marginTop: 2 }} />
               <span style={{ fontWeight: 700, fontSize: 11, minWidth: 70 }}>{o.symbol}</span>
               {tag(o.side, o.side === "BUY" ? C.green : C.red)}
               <span style={{ fontFamily: "monospace", fontSize: 10, color: C.textMuted }}>{o.quantity}</span>
@@ -670,7 +774,7 @@ const ExecutionQueuePanel = ({ orders }) => {
                   {slippage >= 0 ? "+" : ""}{slippage.toFixed(3)}% slip
                 </span>
               )}
-              <span style={{ marginLeft: "auto", fontSize: 9, color: C.textMuted }}>
+              <span style={{ marginLeft: isMobile ? 0 : "auto", fontSize: 9, color: C.textMuted }}>
                 {o.placed_at ? new Date(o.placed_at).toLocaleTimeString("en-IN") : "—"}
               </span>
             </div>
@@ -701,14 +805,12 @@ const SLOrderStatusPanel = ({ positions, ticks }) => {
       return { ...p, ltp, sl, entry, target, slDist, targetDist, progressToTarget, side };
     });
   }, [positions, ticks]);
-  
-  const display = items;
 
   return (
     <Card>
       <SectionHeader title="SL / Target Tracker" sub="Stop-loss status, trailing stops, target proximity" />
       <div style={{ padding: "10px 18px 14px" }}>
-        {display.map((p, i) => (
+        {items.map((p, i) => (
           <div key={i} style={{ marginBottom: 14, padding: "12px 14px", background: C.bg, borderRadius: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -720,15 +822,12 @@ const SLOrderStatusPanel = ({ positions, ticks }) => {
 
             <div style={{ position: "relative", height: 14, background: C.border, borderRadius: 7, marginBottom: 8, overflow: "visible" }}>
               <div style={{ position: "absolute", left: 0, width: `${p.progressToTarget}%`, height: "100%", background: `linear-gradient(90deg, ${C.green}60, ${C.green})`, borderRadius: 7, transition: "width .5s" }} />
-              {/* SL marker */}
               <div style={{ position: "absolute", left: "5%", top: -3, height: 20, width: 2, background: C.red }} title={`SL: ₹${p.sl}`} />
-              {/* Target marker */}
               <div style={{ position: "absolute", right: "5%", top: -3, height: 20, width: 2, background: C.green }} title={`Target: ₹${p.target}`} />
-              {/* LTP marker */}
               <div style={{ position: "absolute", left: `${p.progressToTarget}%`, top: -5, transform: "translateX(-50%)", width: 10, height: 10, background: C.cyan, borderRadius: "50%", border: "2px solid #060b14", boxShadow: `0 0 6px ${C.cyan}` }} />
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8 }}>
               {[
                 { label: "Entry", value: `₹${p.entry.toFixed(0)}`, color: C.textMuted },
                 { label: "Stop Loss", value: p.sl ? `₹${p.sl.toFixed(0)}` : "—", color: C.red, sub: p.slDist ? `${p.slDist.toFixed(1)}% away` : null },
@@ -744,14 +843,15 @@ const SLOrderStatusPanel = ({ positions, ticks }) => {
             </div>
           </div>
         ))}
-        {display.length === 0 && <div style={{ fontSize: 12, color: C.textMuted, padding: "20px 0" }}>No tracked positions</div>}
+        {items.length === 0 && <div style={{ fontSize: 12, color: C.textMuted, padding: "20px 0" }}>No tracked positions</div>}
       </div>
     </Card>
   );
 };
 
-// 10. INTRADAY CANDLESTICK CHART (simple OHLCV bar simulation)
+// 10. INTRADAY CANDLESTICK CHART
 const IntradayChartPanel = ({ ticks, tickHistory }) => {
+  const { isMobile } = useBreakpoint();
   const [symbol, setSymbol] = useState("NIFTY");
   const symbols = ["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "TCS", "SBIN"];
 
@@ -773,12 +873,12 @@ const IntradayChartPanel = ({ ticks, tickHistory }) => {
         title="Intraday Chart"
         sub="15-min OHLCV with volume"
         right={
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
             {symbols.map(s => (
               <button key={s} onClick={() => setSymbol(s)} style={{
                 background: symbol === s ? `${C.cyan}20` : "transparent",
                 border: `1px solid ${symbol === s ? C.cyan : C.border}`,
-                borderRadius: 4, padding: "3px 8px", cursor: "pointer",
+                borderRadius: 4, padding: "3px 6px", cursor: "pointer",
                 fontSize: 9, color: symbol === s ? C.cyan : C.textMuted, fontFamily: "monospace",
               }}>{s}</button>
             ))}
@@ -786,7 +886,7 @@ const IntradayChartPanel = ({ ticks, tickHistory }) => {
         }
       />
       <div style={{ padding: "10px 18px 14px" }}>
-        <div style={{ display: "flex", gap: 20, marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: isMobile ? 12 : 20, marginBottom: 12, flexWrap: "wrap" }}>
           {lastBar && [
             { label: "Open", value: firstBar?.open.toFixed(2) },
             { label: "High", value: Math.max(...chartData.map(d => d.high)).toFixed(2), color: C.green },
@@ -828,10 +928,43 @@ const IntradayChartPanel = ({ ticks, tickHistory }) => {
   );
 };
 
+// ─── MOBILE TAB BAR ───────────────────────────────────────────────────────────
+
+const MobileTabBar = ({ tabs, activeTab, setActiveTab }) => (
+  <div style={{
+    position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
+    background: "rgba(10,16,32,0.97)", backdropFilter: "blur(20px)",
+    borderTop: `1px solid ${C.border}`,
+    display: "flex", overflowX: "auto",
+    WebkitOverflowScrolling: "touch",
+    scrollbarWidth: "none",
+  }}>
+    {tabs.map(tab => {
+      const Icon = tab.icon;
+      const isActive = activeTab === tab.id;
+      return (
+        <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
+          flex: "0 0 auto",
+          background: "none", border: "none", cursor: "pointer",
+          padding: "10px 16px",
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+          color: isActive ? C.cyan : C.textMuted,
+          borderTop: `2px solid ${isActive ? C.cyan : "transparent"}`,
+          minWidth: 60,
+        }}>
+          <Icon size={15} />
+          <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.5, whiteSpace: "nowrap" }}>{tab.label.toUpperCase()}</span>
+        </button>
+      );
+    })}
+  </div>
+);
+
 // ─── MAIN DASHBOARD ───────────────────────────────────────────────────────────
 
 export default function TradingDashboard() {
   const { liveData, connected } = useWebSocket();
+  const { isMobile, isTablet } = useBreakpoint();
   const [activeTab, setActiveTab] = useState("overview");
   const [pnlHistory, setPnlHistory] = useState([]);
   const [tickHistory, setTickHistory] = useState({});
@@ -924,8 +1057,8 @@ export default function TradingDashboard() {
 
   const TABS = [
     { id: "overview", label: "Overview", icon: Activity },
-    { id: "positions", label: "Positions & SL", icon: Target },
-    { id: "options", label: "Options Flow", icon: Layers },
+    { id: "positions", label: "Positions", icon: Target },
+    { id: "options", label: "Options", icon: Layers },
     { id: "watchlist", label: "Watchlist", icon: Eye },
     { id: "ai", label: "AI Brain", icon: Cpu },
     { id: "orders", label: "Orders", icon: List },
@@ -933,8 +1066,13 @@ export default function TradingDashboard() {
     { id: "analytics", label: "Analytics", icon: BarChart2 },
   ];
 
+  // KPI grid columns: 3 on mobile, 6 on desktop
+  const kpiCols = isMobile ? "repeat(2,1fr)" : isTablet ? "repeat(3,1fr)" : "repeat(6,1fr)";
+  const twoCol = isMobile ? "1fr" : "1fr 1fr";
+  const pnlChartCols = isMobile ? "1fr" : "2fr 1fr";
+
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'JetBrains Mono', 'Fira Code', monospace" }}>
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'JetBrains Mono', 'Fira Code', monospace", paddingBottom: isMobile ? 70 : 0 }}>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
       <style>{`
@@ -947,24 +1085,29 @@ export default function TradingDashboard() {
         @keyframes shimmer { 0%,100%{opacity:1} 50%{opacity:.4} }
         @keyframes pulseDot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.8)} }
         @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+        /* Hide mobile scrollbar on tab bar */
+        .tab-scroll::-webkit-scrollbar { display: none; }
       `}</style>
 
       {/* HEADER */}
       <header style={{ borderBottom: `1px solid ${C.border}`, background: "rgba(6,11,20,0.97)", backdropFilter: "blur(20px)", position: "sticky", top: 0, zIndex: 100 }}>
-        <div style={{ maxWidth: 1800, margin: "0 auto", padding: "0 20px", height: 52, display: "flex", alignItems: "center", gap: 20 }}>
+        <div style={{ maxWidth: 1800, margin: "0 auto", padding: "0 12px", height: 52, display: "flex", alignItems: "center", gap: isMobile ? 8 : 20 }}>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {/* Logo */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <div style={{ background: "linear-gradient(135deg,#00d4a0,#00b4d8)", borderRadius: 7, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Zap size={14} color="#060b14" fill="#060b14" />
             </div>
-            <div>
-              <div style={{ fontWeight: 800, fontSize: 12, letterSpacing: 1 }}>AGENTTRADER</div>
-              <div style={{ fontSize: 8, color: C.textMuted, letterSpacing: 2 }}>NSE · F&O · GEMINI AI</div>
-            </div>
+            {!isMobile && (
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 12, letterSpacing: 1 }}>AGENTTRADER</div>
+                <div style={{ fontSize: 8, color: C.textMuted, letterSpacing: 2 }}>NSE · F&O · GEMINI AI</div>
+              </div>
+            )}
           </div>
 
-          {/* Index pills */}
-          <div style={{ display: "flex", gap: 16, flex: 1 }}>
+          {/* Index pills - scroll on mobile */}
+          <div style={{ display: "flex", gap: 8, flex: 1, overflowX: "auto", scrollbarWidth: "none" }}>
             {[
               { label: "NIFTY", val: indices.nifty, prev: 22000 },
               { label: "BNIFTY", val: indices.banknifty, prev: 47000 },
@@ -972,9 +1115,9 @@ export default function TradingDashboard() {
             ].map(item => {
               const chg = item.prev ? (((item.val || item.prev) - item.prev) / item.prev * 100) : 0;
               return (
-                <div key={item.label} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 10px", background: C.surface, borderRadius: 5, border: `1px solid ${C.border}` }}>
+                <div key={item.label} style={{ display: "flex", gap: 6, alignItems: "center", padding: "4px 8px", background: C.surface, borderRadius: 5, border: `1px solid ${C.border}`, flexShrink: 0 }}>
                   <span style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1 }}>{item.label}</span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: item.warn ? C.amber : C.text }}>{item.val?.toFixed(2) || "—"}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: item.warn ? C.amber : C.text }}>{item.val?.toFixed(2) || "—"}</span>
                   {item.val && <span style={{ fontSize: 9, color: chg >= 0 ? C.green : C.red }}>{chg >= 0 ? "▲" : "▼"}{Math.abs(chg).toFixed(2)}%</span>}
                 </div>
               );
@@ -982,59 +1125,65 @@ export default function TradingDashboard() {
           </div>
 
           {/* Status bar */}
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 6 : 12, flexShrink: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <Dot active={connected} color={C.green} />
-              <span style={{ fontSize: 9, color: connected ? C.green : C.textMuted, letterSpacing: 1 }}>{connected ? "LIVE" : "OFFLINE"}</span>
+              {!isMobile && <span style={{ fontSize: 9, color: connected ? C.green : C.textMuted, letterSpacing: 1 }}>{connected ? "LIVE" : "OFFLINE"}</span>}
             </div>
-            <span style={{ fontSize: 9, color: C.textDim }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>
+
+            {!isMobile && <span style={{ fontSize: 9, color: C.textDim }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>}
 
             {killSwitch && (
-              <button onClick={handleResetKillSwitch} style={{ background: `${C.red}15`, border: `1px solid ${C.red}40`, borderRadius: 5, padding: "4px 10px", cursor: "pointer", fontSize: 9, color: C.red, letterSpacing: 0.5 }}>
-                ⚠ KILL SWITCH — RESET
+              <button onClick={handleResetKillSwitch} style={{ background: `${C.red}15`, border: `1px solid ${C.red}40`, borderRadius: 5, padding: "4px 8px", cursor: "pointer", fontSize: 9, color: C.red, letterSpacing: 0.5 }}>
+                ⚠ RESET
               </button>
             )}
 
-            <button onClick={() => setShowAlerts(p => !p)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 5, padding: "5px 9px", cursor: "pointer", color: C.textMuted, position: "relative" }}>
-              <Bell size={12} />
-            </button>
+            {!isMobile && (
+              <button onClick={() => setShowAlerts(p => !p)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 5, padding: "5px 9px", cursor: "pointer", color: C.textMuted }}>
+                <Bell size={12} />
+              </button>
+            )}
 
             <button
               onClick={engineRunning ? handleStopEngine : handleStartEngine}
               disabled={startingEngine}
-              style={{ background: engineRunning ? `${C.green}15` : `${C.blue}15`, border: `1px solid ${engineRunning ? C.green : C.blue}40`, borderRadius: 5, padding: "5px 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5, fontSize: 9, fontWeight: 800, letterSpacing: 1, color: engineRunning ? C.green : C.blue }}
+              style={{ background: engineRunning ? `${C.green}15` : `${C.blue}15`, border: `1px solid ${engineRunning ? C.green : C.blue}40`, borderRadius: 5, padding: "5px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 9, fontWeight: 800, letterSpacing: 1, color: engineRunning ? C.green : C.blue, whiteSpace: "nowrap" }}
             >
               <Power size={10} />
-              {startingEngine ? "STARTING..." : engineRunning ? "RUNNING" : "START ENGINE"}
+              {isMobile ? (startingEngine ? "..." : engineRunning ? "ON" : "START") : (startingEngine ? "STARTING..." : engineRunning ? "RUNNING" : "START ENGINE")}
             </button>
           </div>
         </div>
 
-        {/* NAV TABS */}
-        <div style={{ maxWidth: 1800, margin: "0 auto", padding: "0 20px", display: "flex", gap: 2, borderTop: `1px solid ${C.border}` }}>
-          {TABS.map(tab => {
-            const Icon = tab.icon;
-            return (
-              <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
-                background: "none", border: "none", cursor: "pointer", padding: "9px 14px",
-                fontSize: 10, fontWeight: 700, letterSpacing: 0.8,
-                color: activeTab === tab.id ? C.cyan : C.textMuted,
-                borderBottom: `2px solid ${activeTab === tab.id ? C.cyan : "transparent"}`,
-                display: "flex", alignItems: "center", gap: 5, transition: "all .15s",
-              }}>
-                <Icon size={11} />
-                {tab.label.toUpperCase()}
-              </button>
-            );
-          })}
-        </div>
+        {/* NAV TABS — desktop only (mobile uses bottom bar) */}
+        {!isMobile && (
+          <div style={{ maxWidth: 1800, margin: "0 auto", padding: "0 12px", display: "flex", gap: 2, borderTop: `1px solid ${C.border}`, overflowX: "auto" }}>
+            {TABS.map(tab => {
+              const Icon = tab.icon;
+              return (
+                <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
+                  background: "none", border: "none", cursor: "pointer", padding: "9px 14px",
+                  fontSize: 10, fontWeight: 700, letterSpacing: 0.8,
+                  color: activeTab === tab.id ? C.cyan : C.textMuted,
+                  borderBottom: `2px solid ${activeTab === tab.id ? C.cyan : "transparent"}`,
+                  display: "flex", alignItems: "center", gap: 5, transition: "all .15s",
+                  whiteSpace: "nowrap", flexShrink: 0,
+                }}>
+                  <Icon size={11} />
+                  {tab.label.toUpperCase()}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </header>
 
-      <main style={{ maxWidth: 1800, margin: "0 auto", padding: "18px 20px" }}>
+      <main style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "12px 10px" : "18px 20px" }}>
 
         {/* ENGINE STATUS BANNER */}
         {!engineRunning && (
-          <div style={{ background: `${C.blue}08`, border: `1px solid ${C.blue}25`, borderRadius: 8, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ background: `${C.blue}08`, border: `1px solid ${C.blue}25`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <Power size={13} color={C.blue} />
             <span style={{ fontSize: 11, color: C.blue, fontWeight: 700 }}>Engine not running</span>
             <span style={{ fontSize: 11, color: C.textMuted }}>· Live data will appear after starting</span>
@@ -1046,12 +1195,12 @@ export default function TradingDashboard() {
 
         {/* ── OVERVIEW TAB ── */}
         {activeTab === "overview" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 
             {/* KPI Row */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 12 }}>
-              <StatCard label="Today P&L" value={<Num v={pnl.total || 0} size={20} />} sub={`${(pnl.pct || 0) >= 0 ? "+" : ""}${(pnl.pct || 0).toFixed(2)}%`} color={pnlColor} icon={pnl.total >= 0 ? TrendingUp : TrendingDown} />
-              <StatCard label="Realized" value={<Num v={pnl.realized || 0} size={20} />} sub="Booked P&L" color={C.green} icon={Target} />
+            <div style={{ display: "grid", gridTemplateColumns: kpiCols, gap: 10 }}>
+              <StatCard label="Today P&L" value={<Num v={pnl.total || 0} size={isMobile ? 16 : 20} />} sub={`${(pnl.pct || 0) >= 0 ? "+" : ""}${(pnl.pct || 0).toFixed(2)}%`} color={pnlColor} icon={pnl.total >= 0 ? TrendingUp : TrendingDown} />
+              <StatCard label="Realized" value={<Num v={pnl.realized || 0} size={isMobile ? 16 : 20} />} sub="Booked P&L" color={C.green} icon={Target} />
               <StatCard label="Available" value={`₹${((funds.available || 0) / 1000).toFixed(1)}K`} sub={`₹${((funds.used_margin || 0) / 1000).toFixed(1)}K margin`} color={C.blue} icon={DollarSign} />
               <StatCard label="Positions" value={positions.length} sub={`${10 - positions.length} slots free`} color={C.purple} icon={Activity} />
               <StatCard label="Win Rate" value={`${(risk.win_rate || 0).toFixed(1)}%`} sub={`${risk.trades_today || 0} trades`} color={C.amber} icon={Shield} />
@@ -1059,11 +1208,11 @@ export default function TradingDashboard() {
             </div>
 
             {/* Charts row */}
-            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: pnlChartCols, gap: 14 }}>
               <Card>
-                <SectionHeader title="Intraday P&L" sub="Real-time equity curve" right={<Num v={pnl.total || 0} size={16} />} />
+                <SectionHeader title="Intraday P&L" sub="Real-time equity curve" right={<Num v={pnl.total || 0} size={14} />} />
                 <div style={{ padding: "14px 18px" }}>
-                  <ResponsiveContainer width="100%" height={180}>
+                  <ResponsiveContainer width="100%" height={isMobile ? 140 : 180}>
                     <AreaChart data={pnlHistory}>
                       <defs>
                         <linearGradient id="pnlG" x1="0" y1="0" x2="0" y2="1">
@@ -1113,7 +1262,7 @@ export default function TradingDashboard() {
             </div>
 
             {/* AI Summary + Live Ticks */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: twoCol, gap: 14 }}>
               <Card>
                 <SectionHeader title="AI Cycle Status" sub="Latest decision cycle" right={
                   <div style={{ display: "flex", gap: 6 }}>
@@ -1121,7 +1270,7 @@ export default function TradingDashboard() {
                   </div>
                 } />
                 <div style={{ padding: "14px 18px" }}>
-                  <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
                     {["collecting_context", "calling_model", "risk_checks", "placing_orders", "decision_complete"].map(s => {
                       const isCurrent = agentStatus?.stage === s;
                       return (
@@ -1147,7 +1296,7 @@ export default function TradingDashboard() {
               <Card>
                 <SectionHeader title="Live Ticks" sub="Real-time price feed" right={<Dot active={connected} />} />
                 <div style={{ padding: "8px 18px 14px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-                  {Object.entries(ticks).slice(0, 9).map(([sym, ltp]) => {
+                  {Object.entries(ticks).slice(0, isMobile ? 6 : 9).map(([sym, ltp]) => {
                     const curr = Number(ltp || 0);
                     const prev = Number(prevTicks[sym] || curr);
                     const delta = curr - prev;
@@ -1155,7 +1304,7 @@ export default function TradingDashboard() {
                     return (
                       <div key={sym} style={{ background: C.bg, borderRadius: 6, padding: "8px 10px" }}>
                         <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>{sym}</div>
-                        <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace", color: delta > 0 ? C.green : delta < 0 ? C.red : C.text }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: delta > 0 ? C.green : delta < 0 ? C.red : C.text }}>
                           ₹{curr ? curr.toLocaleString("en-IN") : "—"}
                         </div>
                         <Sparkline data={series.slice(-15)} color={delta >= 0 ? C.green : C.red} height={22} />
@@ -1173,7 +1322,7 @@ export default function TradingDashboard() {
 
         {/* ── POSITIONS & SL TAB ── */}
         {activeTab === "positions" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <PositionSparklinePanel positions={positions} tickHistory={tickHistory} prevTicks={prevTicks} />
             <SLOrderStatusPanel positions={positions} ticks={ticks} />
           </div>
@@ -1181,7 +1330,7 @@ export default function TradingDashboard() {
 
         {/* ── OPTIONS FLOW TAB ── */}
         {activeTab === "options" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <OptionsChainPanel data={liveData?.options_chain || null} />
             <IntradayChartPanel ticks={ticks} tickHistory={tickHistory} />
           </div>
@@ -1189,14 +1338,14 @@ export default function TradingDashboard() {
 
         {/* ── WATCHLIST TAB ── */}
         {activeTab === "watchlist" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <WatchlistIndicatorsPanel watchlistData={liveData?.watchlist || null} />
           </div>
         )}
 
         {/* ── AI BRAIN TAB ── */}
         {activeTab === "ai" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <ConfidenceTimelinePanel decisions={agentDecisions} />
             <StrategyReviewPanel reviewData={null} />
             <ModelFallbackPanel decisions={agentDecisions} />
@@ -1204,13 +1353,13 @@ export default function TradingDashboard() {
             {/* Signal cards */}
             <Card>
               <SectionHeader title="Latest AI Signals" sub={`${reasoningSignals.length} signals · ${latestDecision?.timestamp ? new Date(latestDecision.timestamp).toLocaleTimeString("en-IN") : "No live decisions yet"}`} />
-              <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 12 }}>
+              <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill,minmax(300px,1fr))", gap: 12 }}>
                 {reasoningSignals.map((s, i) => {
                   const conf = Math.round((Number(s.confidence || 0) || 0) * 100);
                   const confColor = conf >= 70 ? C.green : conf >= 50 ? C.amber : C.red;
                   return (
                     <div key={i} style={{ background: C.bg, borderRadius: 8, padding: "14px", border: `1px solid ${C.border}` }}>
-                      <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
                         <span style={{ fontWeight: 800, fontSize: 13 }}>{s.symbol}</span>
                         <Badge text={s.action} />
                         <span style={{ marginLeft: "auto" }}><Badge text={s.strategy} /></span>
@@ -1241,20 +1390,20 @@ export default function TradingDashboard() {
 
         {/* ── ORDERS TAB ── */}
         {activeTab === "orders" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <ExecutionQueuePanel orders={orders} />
             <Card>
               <SectionHeader title="Order History" sub="All orders today" right={
                 <button onClick={refetchOrders} style={{ background: "none", border: "none", cursor: "pointer", color: C.textMuted }}><RefreshCw size={12} /></button>
               } />
-              <div style={{ padding: "0 18px 14px" }}>
+              <div style={{ padding: "0 18px 14px", overflowX: "auto" }}>
                 {orders.length === 0 ? (
                   <div style={{ textAlign: "center", padding: "40px 0", color: C.textMuted, fontSize: 12 }}>No orders today</div>
                 ) : (
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 600 : "auto" }}>
                     <thead>
                       <tr>{["Time", "Symbol", "Side", "Qty", "Price", "Avg Fill", "Status", "Tag", "Slippage"].map(h =>
-                        <th key={h} style={{ padding: "8px 6px", textAlign: "left", fontSize: 9, color: C.textMuted, letterSpacing: 1.2, borderBottom: `1px solid ${C.border}` }}>{h}</th>
+                        <th key={h} style={{ padding: "8px 6px", textAlign: "left", fontSize: 9, color: C.textMuted, letterSpacing: 1.2, borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
                       )}</tr>
                     </thead>
                     <tbody>
@@ -1262,7 +1411,7 @@ export default function TradingDashboard() {
                         const slip = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
                         return (
                           <tr key={i} style={{ borderBottom: `1px solid ${C.bg}` }}>
-                            <td style={{ padding: "9px 6px", fontSize: 10, color: C.textMuted }}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</td>
+                            <td style={{ padding: "9px 6px", fontSize: 10, color: C.textMuted, whiteSpace: "nowrap" }}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</td>
                             <td style={{ padding: "9px 6px", fontWeight: 800, fontSize: 11 }}>{o.symbol}</td>
                             <td style={{ padding: "9px 6px" }}><Badge text={o.side} /></td>
                             <td style={{ padding: "9px 6px", fontFamily: "monospace", fontSize: 11 }}>{o.quantity}</td>
@@ -1286,7 +1435,7 @@ export default function TradingDashboard() {
 
         {/* ── SYSTEM TAB ── */}
         {activeTab === "system" && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: twoCol, gap: 14 }}>
             <KillSwitchHistoryPanel risk={risk} riskEvents={riskEvents} />
             <ModelFallbackPanel decisions={agentDecisions} />
             <Card style={{ gridColumn: "1/-1" }}>
@@ -1295,11 +1444,11 @@ export default function TradingDashboard() {
                 {eventTape.length === 0 ? (
                   <div style={{ fontSize: 11, color: C.textMuted, padding: "20px 0" }}>No events yet</div>
                 ) : eventTape.slice().reverse().map((e, i) => (
-                  <div key={i} style={{ display: "flex", gap: 10, padding: "6px 8px", borderRadius: 4, marginBottom: 2, background: i % 2 === 0 ? C.bg : "transparent" }}>
-                    <span style={{ fontSize: 9, color: C.textDim, minWidth: 52, fontFamily: "monospace" }}>{new Date(e.timestamp).toLocaleTimeString("en-IN")}</span>
+                  <div key={i} style={{ display: "flex", gap: 8, padding: "6px 8px", borderRadius: 4, marginBottom: 2, background: i % 2 === 0 ? C.bg : "transparent", alignItems: "flex-start" }}>
+                    <span style={{ fontSize: 9, color: C.textDim, minWidth: 52, fontFamily: "monospace", flexShrink: 0 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN")}</span>
                     <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? C.red : e.level === "success" ? C.green : C.amber, marginTop: 5, flexShrink: 0 }} />
-                    <span style={{ fontSize: 10, color: e.level === "error" ? C.red : e.level === "success" ? C.green : C.textMuted, flex: 1 }}>{e.message}</span>
-                    <span style={{ fontSize: 9, color: C.textDim }}>{e.stage || ""}</span>
+                    <span style={{ fontSize: 10, color: e.level === "error" ? C.red : e.level === "success" ? C.green : C.textMuted, flex: 1, wordBreak: "break-word" }}>{e.message}</span>
+                    <span style={{ fontSize: 9, color: C.textDim, flexShrink: 0 }}>{e.stage || ""}</span>
                   </div>
                 ))}
               </div>
@@ -1309,8 +1458,8 @@ export default function TradingDashboard() {
 
         {/* ── ANALYTICS TAB ── */}
         {activeTab === "analytics" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : isTablet ? "repeat(3,1fr)" : "repeat(6,1fr)", gap: 10 }}>
               {[
                 { label: "30D P&L", value: `₹${((analyticsData?.total_pnl || 0) / 1000).toFixed(1)}K` },
                 { label: "Total Trades", value: analyticsData?.total_trades || 0 },
@@ -1325,7 +1474,7 @@ export default function TradingDashboard() {
               <SectionHeader title="14-Day P&L History" />
               <div style={{ padding: "14px 18px" }}>
                 {dailyHistory?.history?.length ? (
-                  <ResponsiveContainer width="100%" height={200}>
+                  <ResponsiveContainer width="100%" height={isMobile ? 160 : 200}>
                     <BarChart data={dailyHistory.history.slice().reverse()}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
                       <XAxis dataKey="date" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
@@ -1349,6 +1498,9 @@ export default function TradingDashboard() {
           </div>
         )}
       </main>
+
+      {/* MOBILE BOTTOM TAB BAR */}
+      {isMobile && <MobileTabBar tabs={TABS} activeTab={activeTab} setActiveTab={setActiveTab} />}
     </div>
   );
 }
