@@ -834,20 +834,60 @@ class TradingEngine:
         from brokers.zerodha.adapter import ZerodhaBroker
         from brokers.dhan.adapter import DhanBroker
         bc = self.config.get("brokers", {})
+        connected_order: list[str] = []
+
         if bc.get("zerodha", {}).get("enabled"):
             zb = ZerodhaBroker(bc["zerodha"])
             if await zb.login():
                 self.brokers["zerodha"] = zb
-                if not self.primary_broker:
-                    self.primary_broker = zb
-                    self._primary_broker_name = "zerodha"
+                connected_order.append("zerodha")
+
         if bc.get("dhan", {}).get("enabled"):
             db = DhanBroker(bc["dhan"])
             if await db.login():
                 self.brokers["dhan"] = db
-                if not self.primary_broker:
-                    self.primary_broker = db
-                    self._primary_broker_name = "dhan"
+                connected_order.append("dhan")
+
+        if not self.brokers:
+            return
+
+        best_name: Optional[str] = None
+        best_cash = Decimal("0")
+
+        for name in connected_order:
+            broker = self.brokers[name]
+            try:
+                funds = await broker.get_funds()
+            except Exception as e:
+                logger.warning(f"Could not fetch funds for {name} during primary selection: {e}")
+                continue
+
+            available = max(funds.available_cash, Decimal("0"))
+            total = max(funds.total_balance, Decimal("0"))
+            effective = available if available > 0 else total
+
+            logger.info(
+                f"💼 Broker capital check | {name}: available=₹{available:,.0f}, total=₹{total:,.0f}, effective=₹{effective:,.0f}"
+            )
+
+            if effective > best_cash:
+                best_cash = effective
+                best_name = name
+
+        if best_name:
+            self.primary_broker = self.brokers[best_name]
+            self._primary_broker_name = best_name
+            logger.info(f"🏦 Primary broker selected by tradable cash: {best_name} (₹{best_cash:,.0f})")
+            return
+
+        fallback = connected_order[0]
+        self.primary_broker = self.brokers[fallback]
+        self._primary_broker_name = fallback
+        logger.warning(
+            "No broker reported positive tradable capital at startup; "
+            f"falling back to first connected broker: {fallback}"
+        )
+
 
     async def _load_instruments(self) -> None:
         logger.info("📥 Loading instruments...")
