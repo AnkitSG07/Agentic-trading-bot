@@ -92,6 +92,7 @@ class RiskManager:
             peak_capital=Decimal("0"),
         )
         self._initialized = False
+        self._kill_switch = False
         self._capital_blocked = False
 
     async def initialize(self, funds: Funds) -> None:
