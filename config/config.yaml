@@ -38,6 +38,13 @@ brokers:
     access_token: "${DHAN_ACCESS_TOKEN}"
     sandbox: false
 
+  primary: "dhan"
+  replication:
+    enabled: true
+    leader: "dhan"
+    follower: "zerodha"
+    reconcile_interval_seconds: 120
+    
 ## ─── AI AGENT SETTINGS ─────────────────────────────────────
 agent:
   api_key_env: "GEMINI_API_KEY"
@@ -139,7 +146,7 @@ notifications:
 
 ## ─── BACKTESTING ────────────────────────────────────────────
 backtest:
-  data_source: "zerodha"             # zerodha | local
+  data_source: "dhan"                # dhan | zerodha | local
   default_capital: 1000000           # 10 Lakhs
   slippage_pct: 0.05
   brokerage_per_order: 20            # Zerodha flat ₹20
