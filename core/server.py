@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -27,6 +28,62 @@ from database.repository import (
 logger = logging.getLogger("api")
 ws_clients: list[WebSocket] = []
 
+
+def _engine_state_file() -> Path:
+    configured = os.getenv("ENGINE_STATE_FILE", "runtime/engine_state.json").strip()
+    return Path(configured)
+
+
+def _persist_engine_state(autostart: bool, mode: str = "paper") -> None:
+    """Persist desired engine start mode so API restarts can recover gracefully."""
+    path = _engine_state_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "autostart": bool(autostart),
+            "mode": mode,
+            "updated_at": datetime.now().isoformat(),
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Unable to persist engine state to {path}: {e}")
+
+
+def _load_engine_state() -> dict:
+    path = _engine_state_file()
+    if not path.exists():
+        return {"autostart": False, "mode": "paper"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "autostart": bool(data.get("autostart", False)),
+            "mode": str(data.get("mode", "paper") or "paper"),
+        }
+    except Exception as e:
+        logger.warning(f"Unable to load engine state from {path}: {e}")
+        return {"autostart": False, "mode": "paper"}
+
+
+async def _start_engine_task(mode: str) -> None:
+    """Shared background launcher used by API start endpoint and startup recovery."""
+    # Load config with full env-var expansion (same as main.py)
+    from config.loader import load_config
+    import copy
+
+    config = copy.deepcopy(load_config())
+
+    if mode == "paper":
+        config["app"]["environment"] = "paper"
+        for broker_cfg in config.get("brokers", {}).values():
+            if isinstance(broker_cfg, dict):
+                broker_cfg["sandbox"] = True
+
+    new_engine = TradingEngine(config)
+    try:
+        await new_engine.start()
+    except Exception as e:
+        logger.error(f"Engine crashed: {e}", exc_info=True)
+        set_engine(None)
 
 def _get_allowed_origins() -> list[str]:
     """Build CORS allowlist from env vars with safe local defaults."""
@@ -63,6 +120,13 @@ def _get_allowed_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🌐 API server online")
+
+    state = _load_engine_state()
+    if state.get("autostart"):
+        mode = state.get("mode", "paper")
+        logger.info(f"♻️ Recovering engine after API restart (mode={mode})")
+        asyncio.create_task(_start_engine_task(mode))
+
     yield
     logger.info("🌐 API server shutting down")
     engine = get_engine()
@@ -148,28 +212,8 @@ async def start_engine(req: EngineStartRequest, background_tasks: BackgroundTask
     if engine and engine._running:
         raise HTTPException(400, "Engine already running")
 
-    # Load config with full env-var expansion (same as main.py)
-    from config.loader import load_config
-    import copy
-    config = copy.deepcopy(load_config())   # deep copy so we can mutate safely
-
-    # Override mode
-    if req.mode == "paper":
-        config["app"]["environment"] = "paper"
-        for broker_cfg in config.get("brokers", {}).values():
-            if isinstance(broker_cfg, dict):
-                broker_cfg["sandbox"] = True
-
-    new_engine = TradingEngine(config)
-
-    async def _run():
-        try:
-            await new_engine.start()
-        except Exception as e:
-            logger.error(f"Engine crashed: {e}", exc_info=True)
-            set_engine(None)
-
-    background_tasks.add_task(_run)
+    _persist_engine_state(autostart=True, mode=req.mode)
+    background_tasks.add_task(_start_engine_task, req.mode)
     return {"status": "starting", "mode": req.mode}
 
 
@@ -178,6 +222,7 @@ async def stop_engine():
     engine = get_engine()
     if not engine or not engine._running:
         raise HTTPException(400, "Engine not running")
+    _persist_engine_state(autostart=False)
     asyncio.create_task(engine.stop())
     return {"status": "stopping"}
 
