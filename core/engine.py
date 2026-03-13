@@ -140,6 +140,7 @@ class TradingEngine:
         }
         self._agent_events: list[dict[str, object]] = []
         self._market_data_fallback_state: dict[str, str] = {"ohlcv": "", "ticks": ""}
+        self._active_tick_broker_name: str = ""
         
     def _set_agent_stage(self, stage: str, now: Optional[datetime] = None, error: Optional[str] = None) -> None:
         ts = now or datetime.now(IST)
@@ -232,6 +233,7 @@ class TradingEngine:
                     await self._run_strategy_review()
                     last_review = now
 
+                await self._ensure_tick_subscription_health()    
                 await self._refresh_ohlcv()
                 await self._decision_cycle(now)
                 await self._monitor_positions()
@@ -895,6 +897,18 @@ class TradingEngine:
 
     async def _subscribe_market_data(self) -> None:
         data_broker = self._select_data_broker("ticks")
+        broker_name = next((name for name, obj in self.brokers.items() if obj is data_broker), "primary")
+
+        if self._active_tick_broker_name and self._active_tick_broker_name != broker_name:
+            previous = self.brokers.get(self._active_tick_broker_name)
+            if previous:
+                try:
+                    old_insts = [await self._get_instrument_for_broker(s, previous) for s in WATCHLIST[:20]]
+                    await previous.unsubscribe_ticks(old_insts)
+                except Exception as e:
+                    logger.debug(f"Tick unsubscribe failed for {self._active_tick_broker_name}: {e}")
+            logger.warning(f"Switched live ticks: {self._active_tick_broker_name} -> {broker_name} due to websocket 403")
+
         insts = [await self._get_instrument_for_broker(s, data_broker) for s in WATCHLIST[:20]]
         self._tick_token_to_symbol = {
             str(inst.instrument_token): inst.symbol
@@ -902,7 +916,19 @@ class TradingEngine:
             if inst.instrument_token
         }
         await data_broker.subscribe_ticks(insts, self._on_tick)
-        logger.info(f"📡 Subscribed {len(insts)} instruments")
+        self._active_tick_broker_name = broker_name
+        logger.info(f"📡 Subscribed {len(insts)} instruments via {broker_name}")
+
+    async def _ensure_tick_subscription_health(self) -> None:
+        if not self._active_tick_broker_name:
+            return
+
+        active_broker = self.brokers.get(self._active_tick_broker_name)
+        preferred = self._select_data_broker("ticks")
+        preferred_name = next((name for name, obj in self.brokers.items() if obj is preferred), "primary")
+
+        if getattr(active_broker, "_ws_blocked", False) or preferred_name != self._active_tick_broker_name:
+            await self._subscribe_market_data()
 
     async def _on_tick(self, tick: dict) -> None:
         sym = (
