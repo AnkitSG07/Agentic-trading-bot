@@ -21,7 +21,7 @@ import pytz
 from agents.brain import MarketContext, TradingAgent, SignalAction, TradingSignal
 from brokers.base import (
     BaseBroker, Exchange, Instrument, InstrumentType,
-    OrderSide, OrderType, Position, ProductType,
+    OrderSide, OrderStatus, OrderType, Position, ProductType,
 )
 from data.indicators import IndicatorsEngine
 from data.nse_feed import NSEDataFeed, NewsSentimentAnalyzer
@@ -141,6 +141,15 @@ class TradingEngine:
         self._agent_events: list[dict[str, object]] = []
         self._market_data_fallback_state: dict[str, str] = {"ohlcv": "", "ticks": ""}
         self._active_tick_broker_name: str = ""
+        self.replica_broker: Optional[BaseBroker] = None
+        self._replica_broker_name: str = ""
+        self._replication_enabled: bool = False
+        self._replication_status: str = "disabled"
+        self._last_replication_error: str = ""
+        self._reconciliation_task: Optional[asyncio.Task] = None
+        self._reconcile_interval_seconds: int = int(
+            self.config.get("brokers", {}).get("replication", {}).get("reconcile_interval_seconds", 120)
+        )
         
     def _set_agent_stage(self, stage: str, now: Optional[datetime] = None, error: Optional[str] = None) -> None:
         ts = now or datetime.now(IST)
@@ -198,6 +207,9 @@ class TradingEngine:
         await self._preload_ohlcv()
         await self._subscribe_market_data()
 
+        if self._replication_enabled:
+            self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+
         self._running = True
         logger.info("✅ Trading Engine ready")
         await self._main_loop()
@@ -205,6 +217,9 @@ class TradingEngine:
     async def stop(self) -> None:
         logger.info("🛑 Stopping...")
         self._running = False
+        if self._reconciliation_task:
+            self._reconciliation_task.cancel()
+            self._reconciliation_task = None
         await self._square_off_all_intraday()
         await self._save_daily_summary()
         await self.nse_feed.close()
@@ -442,6 +457,22 @@ class TradingEngine:
                 order_type=order_type, product=product,
                 price=signal.entry_price, tag=signal.strategy[:8].upper(),
             )
+            logger.info(
+                f"✅ Dhan master execution success | {signal.action.value} {qty} {signal.symbol} [{entry_order.order_id}]"
+            )
+
+            asyncio.create_task(
+                self._copy_trade_to_replica(
+                    instrument=inst,
+                    side=side,
+                    quantity=qty,
+                    order_type=order_type,
+                    product=product,
+                    price=signal.entry_price,
+                    trigger_price=None,
+                    tag=f"COPY_{signal.strategy[:8].upper()}",
+                )
+            )
 
             logger.info(f"✅ {signal.action.value} {qty} {signal.symbol} | {signal.strategy} | {signal.confidence:.0%}")
 
@@ -506,8 +537,139 @@ class TradingEngine:
             return True
 
         except Exception as e:
+            logger.error(f"❌ Dhan master execution failed | {signal.symbol}: {e}")
             logger.error(f"Execution error {signal.symbol}: {e}", exc_info=True)
             return False
+
+    async def _copy_trade_to_replica(
+        self,
+        instrument: Instrument,
+        side: OrderSide,
+        quantity: int,
+        order_type: OrderType,
+        product: ProductType,
+        price: Optional[Decimal],
+        trigger_price: Optional[Decimal],
+        tag: Optional[str],
+    ) -> None:
+        if not self._replication_enabled or not self.replica_broker:
+            self._replication_status = "disabled"
+            return
+
+        try:
+            mapped = await self._map_instrument_for_replica(instrument)
+            if not mapped:
+                raise RuntimeError(f"No Zerodha instrument mapping found for {instrument.symbol}")
+
+            if quantity <= 0:
+                raise RuntimeError(f"Invalid quantity {quantity} for replication")
+
+            lot = max(int(mapped.lot_size or 1), 1)
+            if quantity % lot != 0:
+                raise RuntimeError(
+                    f"Quantity {quantity} incompatible with Zerodha lot size {lot} for {mapped.symbol}"
+                )
+
+            replica_order = await self.replica_broker.place_order(
+                instrument=mapped,
+                side=side,
+                quantity=quantity,
+                order_type=order_type,
+                product=product,
+                price=price,
+                trigger_price=trigger_price,
+                tag=tag,
+            )
+            self._replication_status = "ok"
+            self._last_replication_error = ""
+            logger.info(
+                f"✅ Zerodha copy success | {side.value} {quantity} {mapped.symbol} [{replica_order.order_id}]"
+            )
+        except Exception as e:
+            self._replication_status = "partial_failure"
+            self._last_replication_error = str(e)
+            logger.warning(f"⚠️ Zerodha copy attempt failed: {e}")
+            await RiskEventRepository.log(
+                "ZERODHA_COPY_FAILED",
+                f"Failed to replicate order for {instrument.symbol}: {e}",
+                severity="HIGH",
+                symbol=instrument.symbol,
+            )
+
+    async def _map_instrument_for_replica(self, master_instrument: Instrument) -> Optional[Instrument]:
+        if not self.replica_broker:
+            return None
+
+        exchange = master_instrument.exchange
+        try:
+            replica_instruments = await self.replica_broker.get_instruments(exchange)
+        except Exception as e:
+            logger.warning(f"Replica instrument fetch failed for {exchange.value}: {e}")
+            return None
+
+        for inst in replica_instruments:
+            if (
+                inst.symbol == master_instrument.symbol
+                and inst.instrument_type == master_instrument.instrument_type
+                and (not master_instrument.expiry or inst.expiry == master_instrument.expiry)
+                and (master_instrument.strike is None or inst.strike == master_instrument.strike)
+            ):
+                return inst
+
+        return next((i for i in replica_instruments if i.symbol == master_instrument.symbol), None)
+
+    async def _reconciliation_loop(self) -> None:
+        while True:
+            try:
+                await self._reconcile_master_replica_state()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Reconciliation loop error: {e}")
+            await asyncio.sleep(self._reconcile_interval_seconds)
+
+    async def _reconcile_master_replica_state(self) -> None:
+        if not self.primary_broker or not self.replica_broker:
+            return
+
+        dhan_positions = await self.primary_broker.get_positions()
+        zerodha_positions = await self.replica_broker.get_positions()
+        dhan_orders = await self.primary_broker.get_order_history()
+        zerodha_orders = await self.replica_broker.get_order_history()
+
+        def _position_key(p: Position) -> tuple[str, str, int]:
+            return (p.instrument.symbol, p.side.value, p.quantity)
+
+        dhan_pos_keys = {_position_key(p) for p in dhan_positions}
+        zerodha_pos_keys = {_position_key(p) for p in zerodha_positions}
+        missing_in_replica = sorted(dhan_pos_keys - zerodha_pos_keys)
+        extra_in_replica = sorted(zerodha_pos_keys - dhan_pos_keys)
+
+        dhan_open_orders = {
+            (o.instrument.symbol, o.side.value, o.quantity)
+            for o in dhan_orders
+            if o.status in {OrderStatus.PENDING, OrderStatus.OPEN, OrderStatus.TRIGGER_PENDING}
+        }
+        zerodha_open_orders = {
+            (o.instrument.symbol, o.side.value, o.quantity)
+            for o in zerodha_orders
+            if o.status in {OrderStatus.PENDING, OrderStatus.OPEN, OrderStatus.TRIGGER_PENDING}
+        }
+
+        order_drift = sorted(dhan_open_orders ^ zerodha_open_orders)
+        if missing_in_replica or extra_in_replica or order_drift:
+            self._replication_status = "partial_failure"
+            details = {
+                "missing_in_zerodha": missing_in_replica,
+                "extra_in_zerodha": extra_in_replica,
+                "order_drift": order_drift,
+            }
+            logger.warning(f"⚠️ Reconciliation drift detected (Dhan source of truth): {details}")
+        else:
+            if self._replication_enabled:
+                self._replication_status = "ok"
+            logger.info("✅ Reconciliation in sync: Dhan and Zerodha state aligned")
+
 
     # ── Position Monitoring ───────────────────────────────────────────────────
 
@@ -850,6 +1012,22 @@ class TradingEngine:
 
         if not self.brokers:
             return
+        if "dhan" in self.brokers:
+            self.primary_broker = self.brokers["dhan"]
+            self._primary_broker_name = "dhan"
+            logger.info("🏦 Primary broker forced to Dhan (master source of truth)")
+            if "zerodha" in self.brokers:
+                self.replica_broker = self.brokers["zerodha"]
+                self._replica_broker_name = "zerodha"
+                self._replication_enabled = True
+                self._replication_status = "ok"
+                logger.info("🔁 Zerodha connected as follower for copy trading")
+            else:
+                self._replication_status = "disabled"
+                logger.warning("Zerodha not connected. Copy trading is disabled.")
+            return
+
+        logger.warning("Dhan unavailable; fallback mode activated with non-Dhan primary broker")
 
         best_name: Optional[str] = None
         best_cash = Decimal("0")
@@ -900,20 +1078,25 @@ class TradingEngine:
             logger.error(f"Instrument load error: {e}")
 
     def _select_data_broker(self, purpose: str) -> BaseBroker:
-        broker = self.primary_broker
         dhan = self.brokers.get("dhan")
-        selected = broker
+        zerodha = self.brokers.get("zerodha")
+        selected = dhan or self.primary_broker
 
-        if purpose == "ohlcv" and getattr(broker, "_historical_data_blocked", False) and dhan:
-            selected = dhan
-        elif purpose == "ticks" and getattr(broker, "_ws_blocked", False) and dhan:
-            selected = dhan
+        if not selected:
+            return self.primary_broker
+
+        if purpose == "ohlcv" and getattr(selected, "_historical_data_blocked", False) and zerodha:
+            selected = zerodha
+        elif purpose == "ticks" and getattr(selected, "_ws_blocked", False) and zerodha:
+            selected = zerodha
 
         selected_name = next((name for name, obj in self.brokers.items() if obj is selected), "primary")
         if self._market_data_fallback_state.get(purpose) != selected_name:
-            if selected is dhan:
-                msg = "OHLCV" if purpose == "ohlcv" else "live tick"
-                logger.info(f"🔁 Falling back to Dhan for {msg} market data")
+            msg = "OHLCV" if purpose == "ohlcv" else "live tick"
+            if selected is zerodha:
+                logger.warning(f"⚠️ Dhan {msg} feed unavailable. Fallback mode activated via Zerodha")
+            else:
+                logger.info(f"✅ Using Dhan as primary source for {msg} market data")
             self._market_data_fallback_state[purpose] = selected_name
 
         return selected
