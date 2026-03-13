@@ -22,6 +22,11 @@ const API_BASE = import.meta.env.VITE_API_BASE ??
 const WS_URL = import.meta.env.VITE_WS_URL ??
   API_BASE.replace(/^http/, "ws") + "/ws";
 
+const tickPrice = (tickVal) => {
+  if (tickVal && typeof tickVal === "object") return Number(tickVal.price || 0);
+  return Number(tickVal || 0);
+};
+
 // ─── HOOKS ────────────────────────────────────────────────────────────────────
 
 function useAPI(endpoint, interval = null) {
@@ -792,7 +797,7 @@ const ExecutionQueuePanel = ({ orders }) => {
 const SLOrderStatusPanel = ({ positions, ticks }) => {
   const items = useMemo(() => {
     return (positions || []).map(p => {
-      const ltp = Number(ticks?.[p.symbol] || p.ltp || 0);
+      const ltp = tickPrice(ticks?.[p.symbol]) || Number(p.ltp || 0);
       const sl = Number(p.stop_loss || p.current_sl || 0);
       const entry = Number(p.avg || p.entry_price || 0);
       const target = Number(p.target || 0);
@@ -976,13 +981,18 @@ export default function TradingDashboard() {
   const [showAlerts, setShowAlerts] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [acknowledgedAlerts, setAcknowledgedAlerts] = useState([]);
+  const [uiPrimarySelection, setUiPrimarySelection] = useState("dhan");
+  const [brokerPrefMessage, setBrokerPrefMessage] = useState("");
+  const [savingBrokerPref, setSavingBrokerPref] = useState(false);
+  const [brokerFallbackEvents, setBrokerFallbackEvents] = useState([]);
 
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
   const { data: agentData, refetch: refetchAgent } = useAPI("/api/agent/in-memory-decisions", 5000);
   const { data: riskEvents } = useAPI("/api/risk/events?limit=20", 30000);
   const { data: dailyHistory } = useAPI("/api/analytics/daily-history?days=14", 300000);
-
+  const { data: brokerPreferenceData, refetch: refetchBrokerPreference } = useAPI("/api/settings/broker-preference", 5000);
+  
   useEffect(() => {
     if (!liveData?.pnl) return;
     setLastUpdate(new Date());
@@ -1000,7 +1010,7 @@ export default function TradingDashboard() {
     setTickHistory(prev => {
       const next = { ...prev };
       Object.entries(nextTicks).forEach(([sym, val]) => {
-        const p = Number(val || 0);
+        const p = tickPrice(val);
         if (!p) return;
         next[sym] = [...(next[sym] || []), p].slice(-30);
       });
@@ -1034,8 +1044,73 @@ export default function TradingDashboard() {
   const replicationEnabled = Boolean(liveData?.replication_enabled);
   const replicationStatus = liveData?.replication_status || "disabled";
   const replicationError = liveData?.last_replication_error || "";
-  const primaryBroker = (liveData?.primary_broker || "dhan").toUpperCase();
+  const executionPrimaryBroker = (liveData?.primary_broker || "dhan").toUpperCase();
+  const uiPrimaryBroker = (liveData?.ui_primary_broker || liveData?.primary_broker || "dhan").toUpperCase();
+  const effectivePrimaryBroker = (liveData?.effective_primary_broker || liveData?.primary_broker || "dhan").toUpperCase();
+  const primaryOverrideActive = Boolean(liveData?.primary_override_active);
+  const primaryOverrideReason = liveData?.primary_override_reason || "";
   const replicaBroker = (liveData?.replica_broker || "zerodha").toUpperCase();
+  const connectedBrokers = brokerPreferenceData?.connected_brokers || [];
+  const optionsSourceBroker = liveData?.options_chain?.NIFTY?.source_broker || liveData?.effective_primary_broker || "";
+  const watchlistSourceBroker = liveData?.watchlist?.[0]?.source_broker || liveData?.effective_primary_broker || "";
+
+
+  useEffect(() => {
+    const loadPreference = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/settings/broker-preference`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data?.ui_primary_broker) setUiPrimarySelection(data.ui_primary_broker);
+      } catch {}
+    };
+    loadPreference();
+  }, []);
+
+  useEffect(() => {
+    if (liveData?.ui_primary_broker) setUiPrimarySelection(liveData.ui_primary_broker);
+  }, [liveData?.ui_primary_broker]);
+
+  useEffect(() => {
+    if (!liveData?.timestamp) return;
+    if (!liveData?.primary_override_active) return;
+    setBrokerFallbackEvents(prev => {
+      const event = {
+        timestamp: liveData.timestamp,
+        selected: (liveData?.ui_primary_broker || "").toUpperCase(),
+        effective: (liveData?.effective_primary_broker || "").toUpperCase(),
+        reason: liveData?.primary_override_reason || "Auto-fallback active",
+      };
+      const key = `${event.timestamp}-${event.selected}-${event.effective}-${event.reason}`;
+      const exists = prev.some(e => `${e.timestamp}-${e.selected}-${e.effective}-${e.reason}` === key);
+      if (exists) return prev;
+      return [...prev, event].slice(-20);
+    });
+  }, [liveData?.timestamp, liveData?.primary_override_active, liveData?.ui_primary_broker, liveData?.effective_primary_broker, liveData?.primary_override_reason]);
+
+  const saveUiPrimaryBroker = async () => {
+    setSavingBrokerPref(true);
+    setBrokerPrefMessage("");
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/broker-preference`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ui_primary_broker: uiPrimarySelection }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || "Failed to save broker preference");
+      if (data?.pending_connection || data?.fallback_active) {
+        setBrokerPrefMessage(`Selected ${uiPrimarySelection.toUpperCase()} but unavailable. Using ${String(data?.effective_primary_broker || "").toUpperCase()} until connected.`);
+      } else {
+        setBrokerPrefMessage(`UI primary set to ${uiPrimarySelection.toUpperCase()} ✅`);
+      }
+      refetchBrokerPreference();
+    } catch (e) {
+      setBrokerPrefMessage(`Error: ${e.message}`);
+    } finally {
+      setSavingBrokerPref(false);
+    }
+  };
 
   const handleStartEngine = async () => {
     setStartingEngine(true);
@@ -1140,8 +1215,9 @@ export default function TradingDashboard() {
             {!isMobile && <span style={{ fontSize: 9, color: C.textDim }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>}
 
             <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 5, background: C.surface, border: `1px solid ${C.border}` }}>
-              <span style={{ fontSize: 9, color: C.textMuted, letterSpacing: 0.4 }}>Primary: {primaryBroker} | Replica: {replicaBroker}</span>
+              <span style={{ fontSize: 9, color: C.textMuted, letterSpacing: 0.4 }}>Exec: {executionPrimaryBroker} | UI Primary: {uiPrimaryBroker}{primaryOverrideActive ? ` → ${effectivePrimaryBroker}` : ""} | Replica: {replicaBroker}</span>
               <Badge text={replicationStatus} />
+              {primaryOverrideActive && <Badge text="ui fallback" />}
             </div>
   
             {killSwitch && (
@@ -1316,7 +1392,7 @@ export default function TradingDashboard() {
                 <SectionHeader title="Live Ticks" sub="Real-time price feed" right={<Dot active={connected} />} />
                 <div style={{ padding: "8px 18px 14px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
                   {Object.entries(ticks).slice(0, isMobile ? 6 : 9).map(([sym, ltp]) => {
-                    const curr = Number(ltp || 0);
+                    const curr = tickPrice(ltp);
                     const prev = Number(prevTicks[sym] || curr);
                     const delta = curr - prev;
                     const series = tickHistory[sym] || [];
@@ -1350,6 +1426,7 @@ export default function TradingDashboard() {
         {/* ── OPTIONS FLOW TAB ── */}
         {activeTab === "options" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 4 }}>Source: {String(optionsSourceBroker || "unknown").toUpperCase()}</div>
             <OptionsChainPanel data={liveData?.options_chain || null} />
             <IntradayChartPanel ticks={ticks} tickHistory={tickHistory} />
           </div>
@@ -1358,6 +1435,7 @@ export default function TradingDashboard() {
         {/* ── WATCHLIST TAB ── */}
         {activeTab === "watchlist" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 4 }}>Source: {String(watchlistSourceBroker || "unknown").toUpperCase()}</div>  
             <WatchlistIndicatorsPanel watchlistData={liveData?.watchlist || null} />
           </div>
         )}
@@ -1457,6 +1535,66 @@ export default function TradingDashboard() {
           <div style={{ display: "grid", gridTemplateColumns: twoCol, gap: 14 }}>
             <KillSwitchHistoryPanel risk={risk} riskEvents={riskEvents} />
             <ModelFallbackPanel decisions={agentDecisions} />
+            <Card>
+              <SectionHeader title="UI Primary Broker" sub="Dashboard data source selection (orders still visible for all brokers)" />
+              <div style={{ padding: "12px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {["dhan", "zerodha"].map((b) => (
+                    <button key={b} onClick={() => setUiPrimarySelection(b)} style={{
+                      background: uiPrimarySelection === b ? `${C.cyan}20` : "transparent",
+                      border: `1px solid ${uiPrimarySelection === b ? C.cyan : C.border}`,
+                      color: uiPrimarySelection === b ? C.cyan : C.textMuted,
+                      borderRadius: 6,
+                      padding: "6px 10px",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}>{b.toUpperCase()}</button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 10, color: C.textMuted }}>
+                  Current mode: Selected {uiPrimaryBroker} · Effective {effectivePrimaryBroker}
+                </div>
+                {primaryOverrideActive && (
+                  <div style={{ fontSize: 10, color: C.amber }}>⚠ Selected broker unavailable. {primaryOverrideReason || "Auto-fallback active."}</div>
+                )}
+                {brokerPrefMessage && <div style={{ fontSize: 10, color: brokerPrefMessage.startsWith("Error") ? C.red : C.textMuted }}>{brokerPrefMessage}</div>}
+                <div>
+                  <button onClick={saveUiPrimaryBroker} disabled={savingBrokerPref} style={{
+                    background: `${C.blue}15`, border: `1px solid ${C.blue}40`, borderRadius: 5,
+                    padding: "6px 12px", cursor: "pointer", fontSize: 10, fontWeight: 700, color: C.blue,
+                  }}>{savingBrokerPref ? "SAVING..." : "SAVE UI PRIMARY"}</button>
+                </div>
+              </div>
+            </Card>
+            <Card>
+              <SectionHeader title="Broker Health" sub="Live broker connectivity for UI source fallback" />
+              <div style={{ padding: "12px 18px", display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 10, color: C.textMuted }}>Connected brokers: {connectedBrokers.length ? connectedBrokers.map(b => b.toUpperCase()).join(" · ") : "None"}</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {["dhan", "zerodha"].map((b) => {
+                    const connected = connectedBrokers.includes(b);
+                    return <span key={b}>{tag(`${b} ${connected ? "healthy" : "down"}`, connected ? C.green : C.red)}</span>;
+                  })}
+                </div>
+                <div style={{ fontSize: 10, color: C.textMuted }}>
+                  Selected: {uiPrimaryBroker} · Effective: {effectivePrimaryBroker} · Last check: {new Date().toLocaleTimeString("en-IN")}
+                </div>
+              </div>
+            </Card>
+            <Card>
+              <SectionHeader title="Fallback Timeline" sub="Recent UI broker auto-fallback events" />
+              <div style={{ padding: "10px 18px", maxHeight: 170, overflowY: "auto" }}>
+                {brokerFallbackEvents.length === 0 ? (
+                  <div style={{ fontSize: 10, color: C.textMuted }}>No fallback events recorded in this session</div>
+                ) : brokerFallbackEvents.slice().reverse().map((e, i) => (
+                  <div key={i} style={{ fontSize: 10, color: C.textMuted, padding: "4px 0", borderBottom: `1px dashed ${C.border}` }}>
+                    <span style={{ color: C.textDim, marginRight: 8 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN")}</span>
+                    {e.selected || "UNKNOWN"} → {e.effective || "NONE"} · {e.reason}
+                  </div>
+                ))}
+              </div>
+            </Card>  
             <Card style={{ gridColumn: "1/-1" }}>
               <SectionHeader title="Event Log" sub="Full AI agent pipeline events" />
               <div style={{ padding: "10px 18px 14px", maxHeight: 320, overflowY: "auto" }}>
