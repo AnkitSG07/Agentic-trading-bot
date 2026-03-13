@@ -268,13 +268,34 @@ async def get_funds():
 # ─── ORDERS ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/orders")
-async def get_orders(status: Optional[str] = None):
-    broker = require_broker()
+async def get_orders(status: Optional[str] = None, broker: str = "all"):
+    engine = require_engine()
     try:
-        orders = await broker.get_order_history()
+        selected_brokers: list[tuple[str, object]] = []
+        requested = broker.lower().strip()
+
+        if requested in {"", "all"}:
+            selected_brokers = list(engine.brokers.items())
+            if not selected_brokers and engine.primary_broker:
+                selected_brokers = [(engine._primary_broker_name or "primary", engine.primary_broker)]
+        else:
+            selected = engine.brokers.get(requested)
+            if not selected:
+                raise HTTPException(404, f"Broker '{broker}' is not connected")
+            selected_brokers = [(requested, selected)]
+
+        orders_with_broker = []
+        for broker_name, broker_client in selected_brokers:
+            try:
+                broker_orders = await broker_client.get_order_history()
+                orders_with_broker.extend((broker_name, o) for o in broker_orders)
+            except Exception as broker_error:
+                logger.warning(f"Failed to fetch orders from {broker_name}: {broker_error}")
+
         result = [
             {
                 "order_id": o.order_id,
+                "broker": broker_name,
                 "symbol": o.instrument.symbol,
                 "exchange": o.instrument.exchange.value,
                 "side": o.side.value,
@@ -289,11 +310,14 @@ async def get_orders(status: Optional[str] = None):
                 "placed_at": o.placed_at.isoformat(),
                 "rejection_reason": o.rejection_reason,
             }
-            for o in orders
+            for broker_name, o in orders_with_broker
         ]
         if status:
             result = [o for o in result if o["status"] == status.upper()]
+        result.sort(key=lambda x: x["placed_at"], reverse=True)
         return {"orders": result, "total": len(result)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
