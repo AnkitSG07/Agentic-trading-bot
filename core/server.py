@@ -199,6 +199,10 @@ async def health():
         "timestamp": datetime.now().isoformat(),
         "engine_running": engine._running if engine else False,
         "broker": engine._primary_broker_name if engine else None,
+        "primary_broker": engine._primary_broker_name if engine else None,
+        "replication_enabled": engine._replication_enabled if engine else False,
+        "replication_status": engine._replication_status if engine else "disabled",
+        "last_replication_error": engine._last_replication_error if engine else "",
         "kill_switch": engine.risk._kill_switch if engine else False,
     }
 
@@ -235,7 +239,12 @@ async def engine_status():
     return {
         "running": engine._running,
         "broker": engine._primary_broker_name,
+        "primary_broker": engine._primary_broker_name,
+        "replica_broker": engine._replica_broker_name or None,
         "positions": len(engine.tracker.get_all()),
+        "replication_enabled": engine._replication_enabled,
+        "replication_status": engine._replication_status,
+        "last_replication_error": engine._last_replication_error,
         "kill_switch": engine.risk._kill_switch,
         "trading_allowed": engine.risk.is_trading_allowed,
     }
@@ -721,6 +730,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             "last_cycle_duration_ms": engine._agent_status.get("last_cycle_duration_ms"),
                         },
                         "engine_running": engine._running,
+                        "primary_broker": engine._primary_broker_name or "dhan",
+                        "replica_broker": engine._replica_broker_name or "zerodha",
+                        "replication_enabled": engine._replication_enabled,
+                        "replication_status": engine._replication_status,
+                        "last_replication_error": engine._last_replication_error,    
                     }
                     await websocket.send_text(json.dumps(payload))
                 except Exception as e:
