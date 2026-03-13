@@ -476,6 +476,12 @@ class ZerodhaBroker(BaseBroker):
                 self._ws_warned = True
             return
             
+        if not self.is_connected or not self.access_token:
+            logger.warning("Zerodha WebSocket requested without active session. Refreshing session once.")
+            if not await self.refresh_session():
+                self._mark_ws_blocked("Session refresh failed for WebSocket subscription")
+                return
+                
         tokens = [int(inst.instrument_token) for inst in instruments if inst.instrument_token]
 
         for token in tokens:
@@ -498,13 +504,13 @@ class ZerodhaBroker(BaseBroker):
             logger.error(f"WebSocket error [{code}]: {reason}")
             reason_str = str(reason).lower()
             if "403" in reason_str or "forbidden" in reason_str:
-                self._ws_blocked = True
+                self._mark_ws_blocked(str(reason), ws)
 
         def on_close(ws, code, reason):
             logger.warning(f"WebSocket closed [{code}]: {reason}")
             reason_str = str(reason).lower()
             if "403" in reason_str or "forbidden" in reason_str:
-                self._ws_blocked = True
+                self._mark_ws_blocked(str(reason), ws)
 
         if not self.ticker:
             self.ticker = KiteTicker(self.api_key, self.access_token, reconnect=False)
@@ -517,6 +523,30 @@ class ZerodhaBroker(BaseBroker):
             self.ticker.subscribe(tokens)
             self.ticker.set_mode(self.ticker.MODE_FULL, tokens)
 
+    def _mark_ws_blocked(self, reason: str, ws=None) -> None:
+        """Disable Zerodha WS usage for this session after auth/permission failures."""
+        self._ws_blocked = True
+        if not self._ws_warned:
+            logger.warning(
+                "Zerodha market-data websocket disabled for this session: %s. "
+                "Check Kite WebSocket permissions and access token validity.",
+                reason,
+            )
+            self._ws_warned = True
+
+        for obj in (ws, self.ticker):
+            if not obj:
+                continue
+            for method in ("stop", "close"):
+                fn = getattr(obj, method, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+
+        self.ticker = None
+        
     async def unsubscribe_ticks(self, instruments: list[Instrument]) -> None:
         tokens = [int(inst.instrument_token) for inst in instruments if inst.instrument_token]
         if self.ticker:
