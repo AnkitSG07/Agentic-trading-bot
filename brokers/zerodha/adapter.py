@@ -87,6 +87,10 @@ class ZerodhaBroker(BaseBroker):
         self.access_token: Optional[str] = None
         self._tick_callbacks: dict[int, list[Callable]] = {}
         self._instrument_cache: dict[str, list[dict]] = {}
+        self._historical_data_blocked: bool = False
+        self._historical_warned: bool = False
+        self._ws_blocked: bool = False
+        self._ws_warned: bool = False
 
     # ── Authentication ───────────────────────────────────────────────────────
 
@@ -214,6 +218,9 @@ class ZerodhaBroker(BaseBroker):
         self, instrument: Instrument, interval: str,
         from_date: datetime, to_date: datetime
     ) -> list[OHLCV]:
+        if self._historical_data_blocked:
+            return []
+
         try:
             token = instrument.instrument_token
             raw = await asyncio.to_thread(
@@ -235,6 +242,16 @@ class ZerodhaBroker(BaseBroker):
                 for r in raw
             ]
         except Exception as e:
+            err = str(e)
+            if "insufficient permission" in err.lower():
+                self._historical_data_blocked = True
+                if not self._historical_warned:
+                    logger.warning(
+                        "Historical data permission missing for Zerodha API key. "
+                        "Disabling Zerodha OHLCV fetch for this session."
+                    )
+                    self._historical_warned = True
+                return []
             logger.error(f"get_ohlcv error: {e}")
             return []
 
@@ -453,6 +470,12 @@ class ZerodhaBroker(BaseBroker):
 
     async def subscribe_ticks(self, instruments: list[Instrument], callback: Callable) -> None:
         """Connect KiteTicker and subscribe to real-time tick feed."""
+        if self._ws_blocked:
+            if not self._ws_warned:
+                logger.warning("Skipping Zerodha WebSocket subscription (permission blocked)")
+                self._ws_warned = True
+            return
+            
         tokens = [int(inst.instrument_token) for inst in instruments if inst.instrument_token]
 
         for token in tokens:
@@ -473,12 +496,18 @@ class ZerodhaBroker(BaseBroker):
 
         def on_error(ws, code, reason):
             logger.error(f"WebSocket error [{code}]: {reason}")
+            reason_str = str(reason).lower()
+            if "403" in reason_str or "forbidden" in reason_str:
+                self._ws_blocked = True
 
         def on_close(ws, code, reason):
             logger.warning(f"WebSocket closed [{code}]: {reason}")
+            reason_str = str(reason).lower()
+            if "403" in reason_str or "forbidden" in reason_str:
+                self._ws_blocked = True
 
         if not self.ticker:
-            self.ticker = KiteTicker(self.api_key, self.access_token)
+            self.ticker = KiteTicker(self.api_key, self.access_token, reconnect=False)
             self.ticker.on_ticks = on_ticks
             self.ticker.on_connect = on_connect
             self.ticker.on_error = on_error
