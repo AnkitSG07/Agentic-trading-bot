@@ -104,7 +104,7 @@ const REGIME_COLORS = { trending_up: C.green, trending_down: C.red, ranging: C.a
 
 const Badge = ({ text, type }) => {
   const c = ACTION_COLORS[text] || STRATEGY_COLORS[text] || REGIME_COLORS[text] ||
-    { complete: C.green, cancelled: C.textMuted, rejected: C.red, open: C.blue, pending: C.amber, zerodha: "#387ed1", dhan: "#00b386", risk_passed: C.green, risk_rejected: C.red }[
+    { complete: C.green, cancelled: C.textMuted, rejected: C.red, open: C.blue, pending: C.amber, zerodha: "#387ed1", dhan: "#00b386", risk_passed: C.green, risk_rejected: C.red, ok: C.green, partial_failure: C.amber, disabled: C.textMuted }[
       (text || "").toLowerCase()] || C.textMuted;
   return tag(text, c);
 };
@@ -1031,6 +1031,12 @@ export default function TradingDashboard() {
   const progressPct = Number(agentStatus?.progress_pct || 0);
   const pnlColor = (pnl.total || 0) >= 0 ? C.green : C.red;
 
+  const replicationEnabled = Boolean(liveData?.replication_enabled);
+  const replicationStatus = liveData?.replication_status || "disabled";
+  const replicationError = liveData?.last_replication_error || "";
+  const primaryBroker = (liveData?.primary_broker || "dhan").toUpperCase();
+  const replicaBroker = (liveData?.replica_broker || "zerodha").toUpperCase();
+
   const handleStartEngine = async () => {
     setStartingEngine(true);
     try {
@@ -1133,6 +1139,11 @@ export default function TradingDashboard() {
 
             {!isMobile && <span style={{ fontSize: 9, color: C.textDim }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>}
 
+            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 5, background: C.surface, border: `1px solid ${C.border}` }}>
+              <span style={{ fontSize: 9, color: C.textMuted, letterSpacing: 0.4 }}>Primary: {primaryBroker} | Replica: {replicaBroker}</span>
+              <Badge text={replicationStatus} />
+            </div>
+  
             {killSwitch && (
               <button onClick={handleResetKillSwitch} style={{ background: `${C.red}15`, border: `1px solid ${C.red}40`, borderRadius: 5, padding: "4px 8px", cursor: "pointer", fontSize: 9, color: C.red, letterSpacing: 0.5 }}>
                 ⚠ RESET
@@ -1182,6 +1193,14 @@ export default function TradingDashboard() {
       <main style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "12px 10px" : "18px 20px" }}>
 
         {/* ENGINE STATUS BANNER */}
+        {replicationEnabled && replicationStatus === "partial_failure" && (
+          <div style={{ background: `${C.amber}08`, border: `1px solid ${C.amber}35`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <AlertTriangle size={13} color={C.amber} />
+            <span style={{ fontSize: 11, color: C.amber, fontWeight: 700 }}>Replica warning: Zerodha copy partially failing</span>
+            {replicationError && <span style={{ fontSize: 10, color: C.textMuted }}>· {replicationError}</span>}
+          </div>
+        )}
+  
         {!engineRunning && (
           <div style={{ background: `${C.blue}08`, border: `1px solid ${C.blue}25`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <Power size={13} color={C.blue} />
