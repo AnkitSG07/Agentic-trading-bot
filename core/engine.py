@@ -139,7 +139,8 @@ class TradingEngine:
             "signals_rejected": 0,
         }
         self._agent_events: list[dict[str, object]] = []
-
+        self._market_data_fallback_state: dict[str, str] = {"ohlcv": "", "ticks": ""}
+        
     def _set_agent_stage(self, stage: str, now: Optional[datetime] = None, error: Optional[str] = None) -> None:
         ts = now or datetime.now(IST)
         self._agent_status["stage"] = stage
@@ -689,10 +690,11 @@ class TradingEngine:
         logger.info("📥 Preloading OHLCV...")
         now = datetime.now(IST)
         from_date = now - timedelta(days=120)
+        data_broker = self._select_data_broker("ohlcv")
         for symbol in WATCHLIST:
             try:
-                inst = await self._get_instrument(symbol)
-                candles = await self.primary_broker.get_ohlcv(inst, "day", from_date, now)
+                inst = await self._get_instrument_for_broker(symbol, data_broker)
+                candles = await data_broker.get_ohlcv(inst, "day", from_date, now)
                 if candles:
                     self._ohlcv_frames[symbol] = pd.DataFrame([
                         {"open": float(c.open), "high": float(c.high),
@@ -713,10 +715,11 @@ class TradingEngine:
     async def _refresh_ohlcv(self) -> None:
         now = datetime.now(IST)
         from_date = now - timedelta(days=2)
+        data_broker = self._select_data_broker("ohlcv")
         for symbol in WATCHLIST[:10]:
             try:
-                inst = await self._get_instrument(symbol)
-                candles = await self.primary_broker.get_ohlcv(inst, "day", from_date, now)
+                inst = await self._get_instrument_for_broker(symbol, data_broker)
+                candles = await data_broker.get_ohlcv(inst, "day", from_date, now)
                 if candles and symbol in self._ohlcv_frames:
                     new = pd.DataFrame([{
                         "open": float(c.open), "high": float(c.high),
@@ -854,17 +857,51 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Instrument load error: {e}")
 
+    def _select_data_broker(self, purpose: str) -> BaseBroker:
+        broker = self.primary_broker
+        dhan = self.brokers.get("dhan")
+        selected = broker
+
+        if purpose == "ohlcv" and getattr(broker, "_historical_data_blocked", False) and dhan:
+            selected = dhan
+        elif purpose == "ticks" and getattr(broker, "_ws_blocked", False) and dhan:
+            selected = dhan
+
+        selected_name = next((name for name, obj in self.brokers.items() if obj is selected), "primary")
+        if self._market_data_fallback_state.get(purpose) != selected_name:
+            if selected is dhan:
+                msg = "OHLCV" if purpose == "ohlcv" else "live tick"
+                logger.info(f"🔁 Falling back to Dhan for {msg} market data")
+            self._market_data_fallback_state[purpose] = selected_name
+
+        return selected
+
     async def _get_instrument(self, symbol: str, exchange: str = "NSE") -> Instrument:
         return self._instrument_cache.get(symbol) or Instrument(symbol, Exchange(exchange), InstrumentType.EQ)
 
+    async def _get_instrument_for_broker(self, symbol: str, broker: BaseBroker) -> Instrument:
+        if broker is self.primary_broker:
+            return await self._get_instrument(symbol)
+
+        try:
+            insts = await broker.get_instruments(Exchange.NSE)
+            for inst in insts:
+                if inst.symbol == symbol:
+                    return inst
+        except Exception as e:
+            logger.debug(f"Fallback instrument lookup failed for {symbol}: {e}")
+
+        return await self._get_instrument(symbol)
+
     async def _subscribe_market_data(self) -> None:
-        insts = [await self._get_instrument(s) for s in WATCHLIST[:20]]
+        data_broker = self._select_data_broker("ticks")
+        insts = [await self._get_instrument_for_broker(s, data_broker) for s in WATCHLIST[:20]]
         self._tick_token_to_symbol = {
             str(inst.instrument_token): inst.symbol
             for inst in insts
             if inst.instrument_token
         }
-        await self.primary_broker.subscribe_ticks(insts, self._on_tick)
+        await data_broker.subscribe_ticks(insts, self._on_tick)
         logger.info(f"📡 Subscribed {len(insts)} instruments")
 
     async def _on_tick(self, tick: dict) -> None:
