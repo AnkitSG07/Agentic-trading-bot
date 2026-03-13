@@ -12,6 +12,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, time, timedelta
+from time import monotonic
 from decimal import Decimal
 from typing import Optional
 
@@ -125,6 +126,10 @@ class TradingEngine:
         self._ohlcv_frames: dict[str, pd.DataFrame] = {}
         self._nifty_history: list[float] = []
         self._primary_broker_name: str = ""
+        # Broker used for order placement and execution-side risk management.
+        self.execution_primary_broker: str = ""
+        # Broker selected by user for dashboard data display (can auto-fallback).
+        self.ui_primary_broker: str = ""
         self._agent_status: dict[str, object] = {
             "cycle_id": None,
             "stage": "idle",
@@ -150,7 +155,78 @@ class TradingEngine:
         self._reconcile_interval_seconds: int = int(
             self.config.get("brokers", {}).get("replication", {}).get("reconcile_interval_seconds", 120)
         )
-        
+        self._broker_health_cache: dict[str, tuple[bool, float]] = {}
+        self._broker_health_ttl_seconds: float = 5.0
+
+    def connected_broker_names(self) -> list[str]:
+        return list(self.brokers.keys())
+
+    async def connected_broker_names_live(self) -> list[str]:
+        connected: list[str] = []
+        for name, broker in self.brokers.items():
+            now = monotonic()
+            cached = self._broker_health_cache.get(name)
+            if cached and (now - cached[1]) <= self._broker_health_ttl_seconds:
+                if cached[0]:
+                    connected.append(name)
+                continue
+
+            healthy = False
+            try:
+                await asyncio.wait_for(broker.get_funds(), timeout=2.0)
+                healthy = True
+            except Exception:
+                healthy = False
+            self._broker_health_cache[name] = (healthy, now)
+            if healthy:
+                connected.append(name)
+
+        return connected
+
+    async def resolve_ui_primary_broker_live(self) -> tuple[str, bool, str]:
+        connected = await self.connected_broker_names_live()
+        selected = self.ui_primary_broker or self._primary_broker_name
+        if selected and selected in connected:
+            return selected, False, ""
+        if connected:
+            reason = f"selected broker '{selected}' is disconnected" if selected else "no UI broker selected"
+            return connected[0], True, reason
+        return "", bool(selected), "no healthy broker available"
+
+    def set_ui_primary_broker(self, broker_name: str) -> None:
+        self.ui_primary_broker = broker_name if broker_name in {"dhan", "zerodha"} else ""
+
+    def resolve_ui_primary_broker(self) -> tuple[str, bool, str]:
+        connected = self.connected_broker_names()
+        selected = self.ui_primary_broker or self._primary_broker_name
+        if selected and selected in connected:
+            return selected, False, ""
+        if connected:
+            reason = f"selected broker '{selected}' is disconnected" if selected else "no UI broker selected"
+            return connected[0], True, reason
+        return "", bool(selected), "no brokers connected"
+
+    def get_broker(self, broker_name: str) -> Optional[BaseBroker]:
+        return self.brokers.get(broker_name)
+
+    def get_execution_broker(self) -> Optional[BaseBroker]:
+        broker = self.brokers.get(self.execution_primary_broker)
+        if broker:
+            return broker
+        if self.primary_broker:
+            if self.execution_primary_broker and self.execution_primary_broker != self._primary_broker_name:
+                logger.warning(
+                    f"Execution broker '{self.execution_primary_broker}' unavailable; "
+                    f"falling back to '{self._primary_broker_name}'"
+                )
+            self.execution_primary_broker = self._primary_broker_name
+            return self.get_execution_broker()
+        return None
+
+    def get_ui_data_broker(self) -> Optional[BaseBroker]:
+        effective_name, _, _ = self.resolve_ui_primary_broker()
+        return self.brokers.get(effective_name) or self.get_execution_broker()
+
     def _set_agent_stage(self, stage: str, now: Optional[datetime] = None, error: Optional[str] = None) -> None:
         ts = now or datetime.now(IST)
         self._agent_status["stage"] = stage
@@ -197,10 +273,11 @@ class TradingEngine:
         set_engine(self)
 
         await self._init_brokers()
-        if not self.primary_broker:
+        execution_broker = self.get_execution_broker()
+        if not execution_broker:
             raise RuntimeError("No broker connected. Check credentials.")
 
-        funds = await self.primary_broker.get_funds()
+        funds = await execution_broker.get_funds()
         await self.risk.initialize(funds)
 
         await self._load_instruments()
@@ -324,8 +401,12 @@ class TradingEngine:
             metadata={"progress_pct": 60},
         )
         if signals:
-            funds = await self.primary_broker.get_funds()
-            positions = await self.primary_broker.get_positions()
+            execution_broker = self.get_execution_broker()
+            if not execution_broker:
+                logger.error("Execution broker unavailable during risk checks")
+                return
+            funds = await execution_broker.get_funds()
+            positions = await execution_broker.get_positions()
 
             for signal in signals:
                 if not signal.is_actionable:
@@ -452,7 +533,11 @@ class TradingEngine:
             order_type = OrderType.LIMIT if signal.entry_price else OrderType.MARKET
 
             # Entry order
-            entry_order = await self.primary_broker.place_order(
+            execution_broker = self.get_execution_broker()
+            if not execution_broker:
+                raise RuntimeError("Execution broker unavailable")
+
+            entry_order = await execution_broker.place_order(
                 instrument=inst, side=side, quantity=qty,
                 order_type=order_type, product=product,
                 price=signal.entry_price, tag=signal.strategy[:8].upper(),
@@ -479,7 +564,7 @@ class TradingEngine:
             # Save trade
             await TradeRepository.save(
                 broker_order_id=entry_order.order_id,
-                broker=self._primary_broker_name,
+                broker=self.execution_primary_broker or self._primary_broker_name,
                 symbol=signal.symbol, exchange=signal.exchange,
                 instrument_type=inst.instrument_type.value,
                 side=side.value, order_type=order_type.value, product=product.value,
@@ -492,7 +577,7 @@ class TradingEngine:
             # Open DB position
             entry_price = signal.entry_price or Decimal("0")
             db_pos = await PositionRepository.open_position(
-                broker=self._primary_broker_name,
+                broker=self.execution_primary_broker or self._primary_broker_name,
                 symbol=signal.symbol, exchange=signal.exchange,
                 product=product.value, side=side.value, quantity=qty,
                 entry_price=entry_price, stop_loss=sl,
@@ -504,7 +589,7 @@ class TradingEngine:
             if sl:
                 exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
                 try:
-                    sl_order = await self.primary_broker.place_order(
+                    sl_order = await execution_broker.place_order(
                         instrument=inst, side=exit_side, quantity=qty,
                         order_type=OrderType.SL_M, product=product,
                         trigger_price=sl, tag=f"SL_{signal.strategy[:6].upper()}",
@@ -513,7 +598,7 @@ class TradingEngine:
                     await SLOrderRepository.save(
                         position_id=str(db_pos.id),
                         broker_order_id=sl_order.order_id,
-                        broker=self._primary_broker_name,
+                        broker=self.execution_primary_broker or self._primary_broker_name,
                         symbol=signal.symbol, sl_price=sl, sl_type="INITIAL",
                     )
                     logger.info(f"🛡️ SL @ ₹{sl} [{sl_order.order_id}]")
@@ -529,7 +614,7 @@ class TradingEngine:
                 side=side.value, quantity=qty, entry_price=entry_price,
                 stop_loss=sl, target=signal.target,
                 sl_broker_order_id=sl_order_id,
-                broker=self._primary_broker_name, strategy=signal.strategy,
+                broker=self.execution_primary_broker or self._primary_broker_name, strategy=signal.strategy,
             )
 
             # Telegram alert
@@ -629,12 +714,13 @@ class TradingEngine:
             await asyncio.sleep(self._reconcile_interval_seconds)
 
     async def _reconcile_master_replica_state(self) -> None:
-        if not self.primary_broker or not self.replica_broker:
+        execution_broker = self.get_execution_broker()
+        if not execution_broker or not self.replica_broker:
             return
 
-        dhan_positions = await self.primary_broker.get_positions()
+        dhan_positions = await execution_broker.get_positions()
         zerodha_positions = await self.replica_broker.get_positions()
-        dhan_orders = await self.primary_broker.get_order_history()
+        dhan_orders = await execution_broker.get_order_history()
         zerodha_orders = await self.replica_broker.get_order_history()
 
         def _position_key(p: Position) -> tuple[str, str, int]:
@@ -681,7 +767,8 @@ class TradingEngine:
         symbols = list({p["symbol"] for p in tracked})
         instruments = [await self._get_instrument(s) for s in symbols]
         instruments = [i for i in instruments if i]
-        quotes = await self.primary_broker.get_quote(instruments) if instruments else {}
+        execution_broker = self.get_execution_broker()
+        quotes = await execution_broker.get_quote(instruments) if (instruments and execution_broker) else {}
 
         for pos in tracked:
             pos_id = pos["id"]
@@ -717,21 +804,30 @@ class TradingEngine:
                 if hit:
                     await self._close_at_target(pos_id, pos, ltp)
 
-        broker_positions = await self.primary_broker.get_positions()
+        execution_broker = self.get_execution_broker()
+        if not execution_broker:
+            return
+        broker_positions = await execution_broker.get_positions()
         await self.risk.update_pnl(broker_positions)
 
     async def _update_trailing_stop(self, pos_id: str, pos: dict, new_sl: Decimal) -> None:
         try:
             old_id = pos.get("sl_broker_order_id")
             if old_id:
-                await self.primary_broker.cancel_order(old_id)
+                execution_broker = self.get_execution_broker()
+                if not execution_broker:
+                    return
+                await execution_broker.cancel_order(old_id)
                 active = await SLOrderRepository.get_active_for_position(pos_id)
                 if active:
                     await SLOrderRepository.deactivate(str(active.id))
 
             inst = await self._get_instrument(pos["symbol"])
             exit_side = OrderSide.SELL if pos["side"] == "BUY" else OrderSide.BUY
-            new_order = await self.primary_broker.place_order(
+            execution_broker = self.get_execution_broker()
+            if not execution_broker:
+                return
+            new_order = await execution_broker.place_order(
                 instrument=inst, side=exit_side, quantity=pos["quantity"],
                 order_type=OrderType.SL_M, product=ProductType.MIS,
                 trigger_price=new_sl, tag="TRAIL_SL",
@@ -752,12 +848,15 @@ class TradingEngine:
         try:
             inst = await self._get_instrument(pos["symbol"])
             exit_side = OrderSide.SELL if pos["side"] == "BUY" else OrderSide.BUY
-            await self.primary_broker.place_order(
+            execution_broker = self.get_execution_broker()
+            if not execution_broker:
+                return
+            await execution_broker.place_order(
                 instrument=inst, side=exit_side, quantity=pos["quantity"],
                 order_type=OrderType.MARKET, product=ProductType.MIS, tag="TARGET_HIT",
             )
             if pos.get("sl_broker_order_id"):
-                await self.primary_broker.cancel_order(pos["sl_broker_order_id"])
+                await execution_broker.cancel_order(pos["sl_broker_order_id"])
 
             entry = pos["entry_price"]
             gross = (ltp - entry) * pos["quantity"] if pos["side"] == "BUY" else (entry - ltp) * pos["quantity"]
@@ -816,8 +915,11 @@ class TradingEngine:
         news = await self.sentiment.get_market_sentiment()
 
         # Portfolio
-        positions = await self.primary_broker.get_positions()
-        funds = await self.primary_broker.get_funds()
+        execution_broker = self.get_execution_broker()
+        if not execution_broker:
+            raise RuntimeError("Execution broker unavailable for market context")
+        positions = await execution_broker.get_positions()
+        funds = await execution_broker.get_funds()
         pos_dicts = [
             {
                 "symbol": p.instrument.symbol, "side": p.side.value,
@@ -928,11 +1030,14 @@ class TradingEngine:
 
     async def _square_off_all_intraday(self) -> None:
         try:
-            positions = await self.primary_broker.get_positions()
+            execution_broker = self.get_execution_broker()
+            if not execution_broker:
+                return
+            positions = await execution_broker.get_positions()
             mis = [p for p in positions if p.product.value == "MIS"]
             for p in mis:
                 try:
-                    await self.primary_broker.square_off_position(p)
+                    await execution_broker.square_off_position(p)
                     logger.info(f"📤 Squared off {p.instrument.symbol}")
                 except Exception as e:
                     logger.error(f"Square off error {p.instrument.symbol}: {e}")
@@ -1015,6 +1120,8 @@ class TradingEngine:
         if "dhan" in self.brokers:
             self.primary_broker = self.brokers["dhan"]
             self._primary_broker_name = "dhan"
+            self.execution_primary_broker = "dhan"
+            self.ui_primary_broker = self.ui_primary_broker or "dhan"
             logger.info("🏦 Primary broker forced to Dhan (master source of truth)")
             if "zerodha" in self.brokers:
                 self.replica_broker = self.brokers["zerodha"]
@@ -1055,12 +1162,16 @@ class TradingEngine:
         if best_name:
             self.primary_broker = self.brokers[best_name]
             self._primary_broker_name = best_name
+            self.execution_primary_broker = best_name
+            self.ui_primary_broker = self.ui_primary_broker or best_name
             logger.info(f"🏦 Primary broker selected by tradable cash: {best_name} (₹{best_cash:,.0f})")
             return
 
         fallback = connected_order[0]
         self.primary_broker = self.brokers[fallback]
         self._primary_broker_name = fallback
+        self.execution_primary_broker = fallback
+        self.ui_primary_broker = self.ui_primary_broker or fallback
         logger.warning(
             "No broker reported positive tradable capital at startup; "
             f"falling back to first connected broker: {fallback}"
@@ -1070,7 +1181,10 @@ class TradingEngine:
     async def _load_instruments(self) -> None:
         logger.info("📥 Loading instruments...")
         try:
-            insts = await self.primary_broker.get_instruments(Exchange.NSE)
+            execution_broker = self.get_execution_broker()
+            if not execution_broker:
+                raise RuntimeError("Execution broker unavailable for instrument load")
+            insts = await execution_broker.get_instruments(Exchange.NSE)
             for i in insts:
                 self._instrument_cache[i.symbol] = i
             logger.info(f"✅ {len(insts)} instruments loaded")
@@ -1080,24 +1194,27 @@ class TradingEngine:
     def _select_data_broker(self, purpose: str) -> BaseBroker:
         dhan = self.brokers.get("dhan")
         zerodha = self.brokers.get("zerodha")
-        selected = dhan or self.primary_broker
+        selected_name, override_active, _ = self.resolve_ui_primary_broker()
+        selected = self.brokers.get(selected_name) or dhan or self.primary_broker
 
         if not selected:
-            return self.primary_broker
+            return self.get_execution_broker()
 
         if purpose == "ohlcv" and getattr(selected, "_historical_data_blocked", False) and zerodha:
             selected = zerodha
         elif purpose == "ticks" and getattr(selected, "_ws_blocked", False) and zerodha:
             selected = zerodha
 
-        selected_name = next((name for name, obj in self.brokers.items() if obj is selected), "primary")
-        if self._market_data_fallback_state.get(purpose) != selected_name:
+        effective_name = next((name for name, obj in self.brokers.items() if obj is selected), "primary")
+        if self._market_data_fallback_state.get(purpose) != effective_name:
             msg = "OHLCV" if purpose == "ohlcv" else "live tick"
             if selected is zerodha:
                 logger.warning(f"⚠️ Dhan {msg} feed unavailable. Fallback mode activated via Zerodha")
             else:
                 logger.info(f"✅ Using Dhan as primary source for {msg} market data")
-            self._market_data_fallback_state[purpose] = selected_name
+            self._market_data_fallback_state[purpose] = effective_name
+        if override_active and purpose == "ticks":
+            logger.warning(f"⚠️ UI primary override active for ticks. Using {effective_name}")
 
         return selected
 
@@ -1105,7 +1222,7 @@ class TradingEngine:
         return self._instrument_cache.get(symbol) or Instrument(symbol, Exchange(exchange), InstrumentType.EQ)
 
     async def _get_instrument_for_broker(self, symbol: str, broker: BaseBroker) -> Instrument:
-        if broker is self.primary_broker:
+        if broker is self.get_execution_broker():
             return await self._get_instrument(symbol)
 
         try:
