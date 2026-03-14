@@ -133,8 +133,7 @@ class NSEHistoricalFetcher:
         last_error: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
-                if attempt == 1:
-                    self._warmup()
+                self._warmup()
                 candles = self._fetch_from_nse(symbol=symbol, start=start, end=end)
                 logger.info(
                     "Historical backfill succeeded symbol=%s provider=nse attempt=%s candles=%s",
@@ -161,7 +160,6 @@ class NSEHistoricalFetcher:
                 self._rotate_user_agent()
                 if attempt >= 2:
                     self._refresh_session()
-                self._warmup()
                 delay = self._base_delay_seconds * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 logger.info(
                     "Historical retry scheduled symbol=%s provider=nse next_attempt=%s delay_seconds=%.2f ua_index=%s",
@@ -187,9 +185,14 @@ class NSEHistoricalFetcher:
                 if not should_retry:
                     break
                 self._refresh_session()
-                self._warmup()
                 delay = self._base_delay_seconds * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-                time.sleep(delay)
+                logger.info(
+                    "Historical retry scheduled symbol=%s provider=nse next_attempt=%s delay_seconds=%.2f session_refresh=true",
+                    symbol.upper(),
+                    attempt + 1,
+                    delay,
+                )
+                time.sleep(max(delay, 0))
         raise RuntimeError(f"nse fetch failed after {self._max_attempts} attempts: {last_error}")
 
     def _fetch_from_yahoo(self, symbol: str, start: date, end: date) -> list[dict]:
