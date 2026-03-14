@@ -153,3 +153,10 @@ backtest:
   stt_equity_delivery: 0.001
   stt_equity_intraday: 0.00025
   stt_options_sell: 0.0005
+
+
+## ─── HISTORICAL DATA BACKFILL ─────────────────────────────
+historical:
+  max_attempts: 5
+  base_delay_seconds: 1.0
+  allow_fallback: false
