@@ -43,7 +43,15 @@ class ReplayEngine:
         await ReplayRunRepository.mark_running(run_id)
         candles = await HistoricalCandleRepository.fetch_window(cfg.symbols, cfg.exchange, cfg.timeframe, cfg.start_date, cfg.end_date)
         if not candles:
-            await ReplayRunRepository.mark_failed(run_id, "No historical candles available for the selected window.")
+            symbols = ", ".join(cfg.symbols) if cfg.symbols else "(none)"
+            start = cfg.start_date.date().isoformat() if cfg.start_date else "(open)"
+            end = cfg.end_date.date().isoformat() if cfg.end_date else "(open)"
+            error_msg = (
+                "No historical candles available for the selected window. "
+                f"symbols={symbols}, exchange={cfg.exchange}, timeframe={cfg.timeframe}, "
+                f"start={start}, end={end}. Backfill candles first and rerun."
+            )
+            await ReplayRunRepository.mark_failed(run_id, error_msg)
             return {"status": "failed", "error": "No historical candles available"}
 
         by_ts: dict[datetime, dict[str, dict]] = {}
