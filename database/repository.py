@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from database.models import (
     Base, Trade, Position, SLOrder, AgentDecision,
     TickData, OHLCVCandle, DailySummary, RiskEvent,
+    HistoricalCandle, ReplayRun, ReplayTrade,
 )
 
 logger = logging.getLogger("database")
@@ -565,5 +566,114 @@ class RiskEventRepository:
         async with get_session() as session:
             result = await session.execute(
                 select(RiskEvent).order_by(desc(RiskEvent.timestamp)).limit(limit)
+            )
+            return result.scalars().all()
+
+
+class HistoricalCandleRepository:
+
+    @staticmethod
+    async def upsert_many(candles: list[dict]) -> None:
+        if not candles:
+            return
+        async with get_session() as session:
+            stmt = pg_insert(HistoricalCandle).values(candles)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_historical_candles",
+                set_={
+                    "open": stmt.excluded.open,
+                    "high": stmt.excluded.high,
+                    "low": stmt.excluded.low,
+                    "close": stmt.excluded.close,
+                    "volume": stmt.excluded.volume,
+                },
+            )
+            await session.execute(stmt)
+
+    @staticmethod
+    async def fetch_window(symbols: list[str], exchange: str, timeframe: str, start_date: datetime | None, end_date: datetime | None) -> list[dict]:
+        async with get_session() as session:
+            q = select(HistoricalCandle).where(
+                and_(
+                    HistoricalCandle.symbol.in_([s.upper() for s in symbols]),
+                    HistoricalCandle.exchange == exchange,
+                    HistoricalCandle.timeframe == timeframe,
+                )
+            )
+            if start_date:
+                q = q.where(HistoricalCandle.timestamp >= start_date)
+            if end_date:
+                q = q.where(HistoricalCandle.timestamp <= end_date)
+            result = await session.execute(q.order_by(HistoricalCandle.timestamp))
+            rows = result.scalars().all()
+            return [
+                {
+                    "symbol": r.symbol,
+                    "exchange": r.exchange,
+                    "timeframe": r.timeframe,
+                    "timestamp": r.timestamp,
+                    "open": float(r.open),
+                    "high": float(r.high),
+                    "low": float(r.low),
+                    "close": float(r.close),
+                    "volume": int(r.volume or 0),
+                }
+                for r in rows
+            ]
+
+
+class ReplayRunRepository:
+
+    @staticmethod
+    async def create(run_id: str, config: dict) -> None:
+        async with get_session() as session:
+            session.add(ReplayRun(id=run_id, status="queued", config=config))
+
+    @staticmethod
+    async def mark_running(run_id: str) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(ReplayRun).where(ReplayRun.id == run_id).values(status="running", started_at=datetime.utcnow())
+            )
+
+    @staticmethod
+    async def mark_failed(run_id: str, error: str) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(ReplayRun).where(ReplayRun.id == run_id).values(status="failed", error=error, completed_at=datetime.utcnow())
+            )
+
+    @staticmethod
+    async def save_results(run_id: str, metrics: dict, equity_curve: list[dict], trades: list[dict]) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(ReplayRun).where(ReplayRun.id == run_id).values(
+                    status="completed",
+                    metrics=metrics,
+                    equity_curve=equity_curve,
+                    completed_at=datetime.utcnow(),
+                )
+            )
+            if trades:
+                stmt = pg_insert(ReplayTrade).values(trades)
+                await session.execute(stmt)
+
+    @staticmethod
+    async def get(run_id: str) -> ReplayRun | None:
+        async with get_session() as session:
+            result = await session.execute(select(ReplayRun).where(ReplayRun.id == run_id))
+            return result.scalar_one_or_none()
+
+    @staticmethod
+    async def list_runs(limit: int = 20) -> list[ReplayRun]:
+        async with get_session() as session:
+            result = await session.execute(select(ReplayRun).order_by(desc(ReplayRun.created_at)).limit(limit))
+            return result.scalars().all()
+
+    @staticmethod
+    async def get_trades(run_id: str, limit: int = 500) -> list[ReplayTrade]:
+        async with get_session() as session:
+            result = await session.execute(
+                select(ReplayTrade).where(ReplayTrade.run_id == run_id).order_by(desc(ReplayTrade.timestamp)).limit(limit)
             )
             return result.scalars().all()
