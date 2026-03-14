@@ -221,3 +221,51 @@ trading-bot/
 - [ ] Multi-timeframe signal confluence
 - [ ] Discord notifications
 - [ ] Mobile app (React Native)
+
+
+## Historical AI Replay (Paper Sim)
+
+Paper Sim now supports backend historical replay using the same AI decision + risk checks pipeline used by the engine.
+
+### 1) Backfill NSE historical candles
+
+```bash
+python main.py --api-only --backfill-symbols RELIANCE,TCS,INFY --backfill-start 2024-01-01 --backfill-end 2024-12-31
+```
+
+Or via API:
+
+```bash
+curl -X POST http://localhost:8000/api/historical/backfill \
+  -H 'Content-Type: application/json' \
+  -d '{"symbols":["RELIANCE","TCS"],"exchange":"NSE","timeframe":"day","start_date":"2024-01-01T00:00:00","end_date":"2024-12-31T00:00:00"}'
+```
+
+### 2) Run replay from CLI (debug mode)
+
+```bash
+python main.py --api-only --run-replay --replay-symbols RELIANCE,TCS
+```
+
+### 3) Run replay from UI/API
+
+- Dashboard tab: **Paper Sim**
+- API start endpoint: `POST /api/replay/runs`
+- Status endpoint: `GET /api/replay/runs/{run_id}`
+- Results endpoint: `GET /api/replay/runs/{run_id}/results`
+- History endpoint: `GET /api/replay/runs`
+
+### Weekend test example config
+
+```json
+{
+  "symbols": ["RELIANCE", "TCS", "INFY"],
+  "exchange": "NSE",
+  "timeframe": "day",
+  "start_date": "2024-01-01T00:00:00",
+  "end_date": "2024-12-31T00:00:00",
+  "initial_capital": 100000,
+  "fee_pct": 0.0003,
+  "slippage_pct": 0.0005
+}
+```
