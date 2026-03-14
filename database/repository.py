@@ -17,6 +17,7 @@ from sqlalchemy import text, select, update, and_, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from database.json_utils import make_json_serializable
 from database.models import (
     Base, Trade, Position, SLOrder, AgentDecision,
     TickData, OHLCVCandle, DailySummary, RiskEvent,
@@ -627,7 +628,7 @@ class ReplayRunRepository:
     @staticmethod
     async def create(run_id: str, config: dict) -> None:
         async with get_session() as session:
-            session.add(ReplayRun(id=run_id, status="queued", config=config))
+            session.add(ReplayRun(id=run_id, status="queued", config=make_json_serializable(config)))
 
     @staticmethod
     async def mark_running(run_id: str) -> None:
