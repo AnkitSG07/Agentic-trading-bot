@@ -241,3 +241,61 @@ class RiskEvent(Base):
     pnl_at_event = Column(Numeric(12, 2), nullable=True)
     drawdown_at_event = Column(Float, nullable=True)
     resolved = Column(Boolean, default=False)
+
+# ─── HISTORICAL CANDLES FOR REPLAY ──────────────────────────────────────────
+
+class HistoricalCandle(Base):
+    __tablename__ = "historical_candles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    exchange = Column(String(10), nullable=False, index=True)
+    timeframe = Column(String(20), nullable=False, default="day")
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+
+    open = Column(Numeric(12, 4), nullable=False)
+    high = Column(Numeric(12, 4), nullable=False)
+    low = Column(Numeric(12, 4), nullable=False)
+    close = Column(Numeric(12, 4), nullable=False)
+    volume = Column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "exchange", "timeframe", "timestamp", name="uq_historical_candles"),
+        Index("idx_historical_candles_lookup", "symbol", "exchange", "timeframe", "timestamp"),
+    )
+
+
+class ReplayRun(Base):
+    __tablename__ = "replay_runs"
+
+    id = Column(String(40), primary_key=True)
+    status = Column(String(20), nullable=False, default="queued")
+    config = Column(JSONB, nullable=False)
+    metrics = Column(JSONB, nullable=True)
+    equity_curve = Column(JSONB, nullable=True)
+    error = Column(Text, nullable=True)
+
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReplayTrade(Base):
+    __tablename__ = "replay_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(40), ForeignKey("replay_runs.id"), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    symbol = Column(String(50), nullable=False)
+    exchange = Column(String(10), nullable=False)
+    action = Column(String(10), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    price = Column(Numeric(12, 4), nullable=False)
+    fees = Column(Numeric(12, 4), nullable=True)
+    slippage_pct = Column(Float, nullable=True)
+    pnl = Column(Numeric(12, 4), nullable=True)
+    rationale = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_replay_trades_run_time", "run_id", "timestamp"),
+    )
