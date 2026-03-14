@@ -202,6 +202,11 @@ async def main() -> None:
     parser.add_argument("--api-only", action="store_true")
     parser.add_argument("--no-db", action="store_true", help="Skip DB init (for testing)")
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--backfill-symbols", default="", help="Comma-separated NSE symbols for historical backfill")
+    parser.add_argument("--backfill-start", default="")
+    parser.add_argument("--backfill-end", default="")
+    parser.add_argument("--run-replay", action="store_true", help="Run historical replay once from CLI")
+    parser.add_argument("--replay-symbols", default="")
     args = parser.parse_args()
 
     # Default to API-only mode if no mode specified
@@ -212,6 +217,32 @@ async def main() -> None:
     setup_logging(config.get("app", {}).get("log_level", args.log_level))
     logger = logging.getLogger("main")
 
+
+
+    if args.backfill_symbols:
+        from datetime import datetime
+        from data.historical_data import BackfillRequest, backfill_historical_data
+
+        start = datetime.strptime(args.backfill_start, "%Y-%m-%d").date() if args.backfill_start else (datetime.now().date().replace(day=1))
+        end = datetime.strptime(args.backfill_end, "%Y-%m-%d").date() if args.backfill_end else datetime.now().date()
+        reqs = [BackfillRequest(symbol=s.strip().upper(), start_date=start, end_date=end) for s in args.backfill_symbols.split(",") if s.strip()]
+        result = await backfill_historical_data(reqs)
+        logger.info(f"Historical backfill complete: {result}")
+        return
+
+    if args.run_replay:
+        from datetime import datetime
+        from core.replay_engine import ReplayEngine, ReplayConfig
+        run_id = f"cli-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        symbols = [s.strip().upper() for s in (args.replay_symbols or "RELIANCE,TCS").split(",") if s.strip()]
+        from database.repository import ReplayRunRepository
+        payload = ReplayConfig(symbols=symbols).__dict__
+        await ReplayRunRepository.create(run_id, payload)
+        engine = ReplayEngine(config)
+        result = await engine.run(run_id, ReplayConfig(symbols=symbols))
+        logger.info(f"Replay finished: {result.get('metrics')}")
+        return
+        
     logger.info("=" * 60)
     logger.info("🤖  AgentTrader India v2.0")
     if args.api_only:
