@@ -988,6 +988,7 @@ export default function TradingDashboard() {
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
   const [brokerFallbackEvents, setBrokerFallbackEvents] = useState([]);
   const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "" });
+  const [simBackfilling, setSimBackfilling] = useState(false);  
   const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 100000, fee_pct: 0.0003, slippage_pct: 0.0005 });
   
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
@@ -1167,6 +1168,42 @@ export default function TradingDashboard() {
     }
   }, [simConfig]);
 
+  const backfillAndRunSimulation = useCallback(async () => {
+    const symbols = simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+    if (!symbols.length) {
+      setSimState(prev => ({ ...prev, error: "Please add at least one symbol before backfill." }));
+      return;
+    }
+
+    setSimBackfilling(true);
+    setSimState(prev => ({ ...prev, error: "" }));
+    try {
+      const payload = {
+        symbols,
+        exchange: simConfig.exchange,
+        timeframe: simConfig.timeframe,
+        start_date: simConfig.start_date ? `${simConfig.start_date}T00:00:00` : null,
+        end_date: simConfig.end_date ? `${simConfig.end_date}T23:59:59` : null,
+      };
+      const res = await fetch(`${API_BASE}/api/historical/backfill`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const out = await res.json();
+      if (!res.ok) throw new Error(out?.detail || "Historical backfill failed");
+      if (Array.isArray(out?.failures) && out.failures.length) {
+        const firstFailure = out.failures[0]?.error || "some symbols failed";
+        throw new Error(`Backfill failed: ${firstFailure}`);
+      }
+      await loadSimulation();
+    } catch (e) {
+      setSimState(prev => ({ ...prev, error: e.message || "Backfill failed", data: null }));
+    } finally {
+      setSimBackfilling(false);
+    }
+  }, [loadSimulation, simConfig]);
+  
   const TABS = [
     { id: "overview", label: "Overview", icon: Activity },
     { id: "positions", label: "Positions", icon: Target },
@@ -1656,7 +1693,48 @@ export default function TradingDashboard() {
             </div>
 
             <Card>
-              <SectionHeader title="Paper Sim (Historical AI Replay)" sub={SIM_SOURCE} right={<button onClick={loadSimulation} style={{ background: `${C.blue}15`, border: `1px solid ${C.blue}40`, borderRadius: 5, padding: "5px 10px", cursor: "pointer", color: C.blue, fontSize: 10, fontWeight: 700 }}>RERUN</button>} />
+              <SectionHeader
+                title="Paper Sim (Historical AI Replay)"
+                sub={SIM_SOURCE}
+                right={(
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      onClick={backfillAndRunSimulation}
+                      disabled={simState.loading || simBackfilling}
+                      style={{
+                        background: `${C.cyan}15`,
+                        border: `1px solid ${C.cyan}40`,
+                        borderRadius: 5,
+                        padding: "5px 10px",
+                        cursor: simState.loading || simBackfilling ? "not-allowed" : "pointer",
+                        color: C.cyan,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        opacity: simState.loading || simBackfilling ? 0.65 : 1,
+                      }}
+                    >
+                      {simBackfilling ? "BACKFILLING..." : "BACKFILL & RERUN"}
+                    </button>
+                    <button
+                      onClick={loadSimulation}
+                      disabled={simState.loading || simBackfilling}
+                      style={{
+                        background: `${C.blue}15`,
+                        border: `1px solid ${C.blue}40`,
+                        borderRadius: 5,
+                        padding: "5px 10px",
+                        cursor: simState.loading || simBackfilling ? "not-allowed" : "pointer",
+                        color: C.blue,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        opacity: simState.loading || simBackfilling ? 0.65 : 1,
+                      }}
+                    >
+                      RERUN
+                    </button>
+                  </div>
+                )}
+              />
               <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)", gap: 10 }}>
                 <input value={simConfig.symbols} onChange={e => setSimConfig(prev => ({ ...prev, symbols: e.target.value }))} placeholder="Symbols (comma separated)" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11 }} />
                 <input value={simConfig.start_date} onChange={e => setSimConfig(prev => ({ ...prev, start_date: e.target.value }))} type="date" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11 }} />
@@ -1666,8 +1744,16 @@ export default function TradingDashboard() {
                 <input value={simConfig.slippage_pct} onChange={e => setSimConfig(prev => ({ ...prev, slippage_pct: Number(e.target.value || 0) }))} type="number" step="0.0001" placeholder="Slippage" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11 }} />
               </div>
               <div style={{ padding: "0 18px 14px", display: "flex", flexDirection: "column", gap: 12 }}>
+                {simBackfilling && <div style={{ fontSize: 11, color: C.textMuted }}>Backfilling historical candles…</div>}
                 {simState.loading && <div style={{ fontSize: 11, color: C.textMuted }}>Running replay in backend…</div>}
-                {simState.error && <div style={{ fontSize: 11, color: C.red }}>Replay error: {simState.error}</div>}
+                {simState.error && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ fontSize: 11, color: C.red }}>Replay error: {simState.error}</div>
+                    <div style={{ fontSize: 10, color: C.textMuted }}>
+                      Tip: backfill candles for the same symbols/date window, then click RERUN.
+                    </div>
+                  </div>
+                )}
                 {!simState.loading && !simState.error && !simState.data && <div style={{ fontSize: 11, color: C.textMuted }}>No historical data/run yet. Backfill candles then click RERUN.</div>}
 
                 {!!simState.data?.equity_curve?.length && (
