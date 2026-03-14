@@ -27,6 +27,67 @@ const tickPrice = (tickVal) => {
   return Number(tickVal || 0);
 };
 
+const SIM_SOURCE = "CoinGecko (free public API)";
+
+const fetchHistoricalSeries = async (days = 120) => {
+  const res = await fetch(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=inr&days=${days}&interval=daily`);
+  if (!res.ok) throw new Error("Unable to fetch historical market data");
+  const raw = await res.json();
+  return (raw?.prices || []).map(([ts, price]) => ({
+    date: new Date(ts).toISOString().slice(0, 10),
+    price: Number(price),
+  }));
+};
+
+const runPaperSimulation = (rows, initialCash = 100000) => {
+  if (!rows?.length) {
+    return { points: [], trades: [], finalValue: initialCash, profit: 0 };
+  }
+
+  let cash = initialCash;
+  let units = 0;
+  const trades = [];
+  const points = rows.map((row, i) => {
+    const lookback = rows.slice(Math.max(0, i - 9), i + 1);
+    const sma = lookback.reduce((sum, x) => sum + x.price, 0) / lookback.length;
+    const prev = rows[i - 1];
+    const prevSma = i > 0
+      ? rows.slice(Math.max(0, i - 10), i).reduce((sum, x) => sum + x.price, 0) / Math.max(1, Math.min(10, i))
+      : sma;
+
+    const crossedUp = prev && prev.price <= prevSma && row.price > sma;
+    const crossedDown = prev && prev.price >= prevSma && row.price < sma;
+
+    let action = "HOLD";
+    if (crossedUp && cash > 0) {
+      units = cash / row.price;
+      cash = 0;
+      action = "BUY";
+      trades.push({ date: row.date, action, price: row.price });
+    } else if (crossedDown && units > 0) {
+      cash = units * row.price;
+      units = 0;
+      action = "SELL";
+      trades.push({ date: row.date, action, price: row.price });
+    }
+
+    const equity = cash + units * row.price;
+    return { ...row, sma, equity, action };
+  });
+
+  const lastPrice = points[points.length - 1]?.price || 0;
+  const finalValue = cash + units * lastPrice;
+  return {
+    points,
+    trades,
+    finalValue,
+    profit: finalValue - initialCash,
+    totalTrades: trades.length,
+    buys: trades.filter(t => t.action === "BUY").length,
+    sells: trades.filter(t => t.action === "SELL").length,
+  };
+};
+
 // ─── HOOKS ────────────────────────────────────────────────────────────────────
 
 function useAPI(endpoint, interval = null) {
@@ -985,7 +1046,8 @@ export default function TradingDashboard() {
   const [brokerPrefMessage, setBrokerPrefMessage] = useState("");
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
   const [brokerFallbackEvents, setBrokerFallbackEvents] = useState([]);
-
+  const [simState, setSimState] = useState({ loading: false, error: "", data: null });
+  
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
   const { data: agentData, refetch: refetchAgent } = useAPI("/api/agent/in-memory-decisions", 5000);
@@ -1136,6 +1198,23 @@ export default function TradingDashboard() {
     } catch (e) { alert("Error: " + e.message); }
   };
 
+  const loadSimulation = useCallback(async () => {
+    setSimState({ loading: true, error: "", data: null });
+    try {
+      const candles = await fetchHistoricalSeries(120);
+      const sim = runPaperSimulation(candles, 100000);
+      setSimState({ loading: false, error: "", data: sim });
+    } catch (e) {
+      setSimState({ loading: false, error: e.message || "Failed to run simulation", data: null });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "simulator" && !simState.data && !simState.loading) {
+      loadSimulation();
+    }
+  }, [activeTab, simState.data, simState.loading, loadSimulation]);
+
   const TABS = [
     { id: "overview", label: "Overview", icon: Activity },
     { id: "positions", label: "Positions", icon: Target },
@@ -1144,6 +1223,7 @@ export default function TradingDashboard() {
     { id: "ai", label: "AI Brain", icon: Cpu },
     { id: "orders", label: "Orders", icon: List },
     { id: "system", label: "System", icon: Shield },
+    { id: "simulator", label: "Paper Sim", icon: Database },  
     { id: "analytics", label: "Analytics", icon: BarChart2 },
   ];
 
@@ -1613,6 +1693,79 @@ export default function TradingDashboard() {
           </div>
         )}
 
+        {/* ── PAPER SIMULATOR TAB ── */}
+        {activeTab === "simulator" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 10 }}>
+              <StatCard label="Mode" value="Fake Money" sub="No real broker orders" color={C.cyan} icon={Shield} />
+              <StatCard label="Capital" value="₹100,000" sub="Starting paper balance" color={C.blue} icon={DollarSign} />
+              <StatCard label="Strategy" value="SMA-10" sub="Cross above/below signal" color={C.purple} icon={Cpu} />
+              <StatCard label="Data Source" value="CoinGecko" sub="BTC/INR historical candles" color={C.amber} icon={Database} />
+            </div>
+
+            <Card>
+              <SectionHeader
+                title="AI Paper Trading Replay"
+                sub={`Weekend-safe simulation using ${SIM_SOURCE}`}
+                right={
+                  <button
+                    onClick={loadSimulation}
+                    style={{ background: `${C.blue}15`, border: `1px solid ${C.blue}40`, borderRadius: 5, padding: "5px 10px", cursor: "pointer", color: C.blue, fontSize: 10, fontWeight: 700 }}
+                  >
+                    RERUN
+                  </button>
+                }
+              />
+              <div style={{ padding: "14px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+                {simState.loading && <div style={{ fontSize: 11, color: C.textMuted }}>Running historical simulation...</div>}
+                {simState.error && <div style={{ fontSize: 11, color: C.red }}>Simulation error: {simState.error}</div>}
+
+                {!!simState.data?.points?.length && (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 10 }}>
+                      <StatCard label="Final Value" value={`₹${Math.round(simState.data.finalValue).toLocaleString("en-IN")}`} color={C.cyan} />
+                      <StatCard label="Net P&L" value={<Num v={simState.data.profit} size={16} />} color={simState.data.profit >= 0 ? C.green : C.red} />
+                      <StatCard label="Total Trades" value={simState.data.totalTrades || 0} color={C.amber} />
+                      <StatCard label="Buys / Sells" value={`${simState.data.buys || 0} / ${simState.data.sells || 0}`} color={C.purple} />
+                    </div>
+
+                    <ResponsiveContainer width="100%" height={isMobile ? 220 : 280}>
+                      <LineChart data={simState.data.points}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                        <XAxis dataKey="date" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} minTickGap={20} />
+                        <YAxis yAxisId="price" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(0)}K`} />
+                        <YAxis yAxisId="equity" orientation="right" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(0)}K`} />
+                        <Tooltip
+                          contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
+                          formatter={(v, n) => [
+                            `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`,
+                            n === "equity" ? "Portfolio Value" : n === "price" ? "BTC Price" : "SMA-10",
+                          ]}
+                        />
+                        <Line yAxisId="price" type="monotone" dataKey="price" stroke={C.blue} dot={false} strokeWidth={1.5} />
+                        <Line yAxisId="price" type="monotone" dataKey="sma" stroke={C.amber} dot={false} strokeWidth={1} strokeDasharray="4 2" />
+                        <Line yAxisId="equity" type="monotone" dataKey="equity" stroke={C.green} dot={false} strokeWidth={2} />
+                      </LineChart>
+                    </ResponsiveContainer>
+
+                    <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px", maxHeight: 180, overflowY: "auto" }}>
+                      <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 8 }}>Trade log (latest first)</div>
+                      {(simState.data.trades || []).length === 0 ? (
+                        <div style={{ fontSize: 10, color: C.textMuted }}>No trade generated in this sample window.</div>
+                      ) : simState.data.trades.slice().reverse().map((t, i) => (
+                        <div key={`${t.date}-${i}`} style={{ fontSize: 10, color: C.textMuted, padding: "4px 0", borderBottom: `1px dashed ${C.border}` }}>
+                          <span style={{ color: t.action === "BUY" ? C.green : C.red, fontWeight: 700, marginRight: 8 }}>{t.action}</span>
+                          {t.date} @ ₹{Math.round(t.price).toLocaleString("en-IN")}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </Card>
+          </div>
+        )}
+  
         {/* ── ANALYTICS TAB ── */}
         {activeTab === "analytics" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
