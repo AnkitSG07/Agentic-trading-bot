@@ -23,6 +23,7 @@ from core.engine import get_engine, set_engine, TradingEngine
 from database.repository import (
     AgentDecisionRepository, DailySummaryRepository,
     PositionRepository, RiskEventRepository, TradeRepository,
+    ReplayRunRepository,
 )
 
 logger = logging.getLogger("api")
@@ -930,6 +931,107 @@ async def broadcast(message: dict) -> None:
     for c in dead:
         ws_clients.remove(c)
 
+
+class HistoricalBackfillRequest(BaseModel):
+    symbols: list[str]
+    exchange: str = "NSE"
+    timeframe: str = "day"
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+
+
+@app.post("/api/historical/backfill")
+async def backfill_history(req: HistoricalBackfillRequest):
+    from datetime import datetime, timedelta
+    from data.historical_data import BackfillRequest, backfill_historical_data
+
+    start = (req.start_date or (datetime.utcnow() - timedelta(days=365))).date()
+    end = (req.end_date or datetime.utcnow()).date()
+    jobs = [BackfillRequest(symbol=s.upper(), exchange=req.exchange, timeframe=req.timeframe, start_date=start, end_date=end) for s in req.symbols]
+    return await backfill_historical_data(jobs)
+
+
+class ReplayRunCreateRequest(BaseModel):
+    symbols: list[str]
+    exchange: str = "NSE"
+    timeframe: str = "day"
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    initial_capital: float = 100000
+    fee_pct: float = 0.0003
+    slippage_pct: float = 0.0005
+
+
+@app.post("/api/replay/runs")
+async def create_replay_run(req: ReplayRunCreateRequest):
+    from config.loader import load_config
+    from core.replay_engine import create_and_start_replay
+
+    if not req.symbols:
+        raise HTTPException(400, "symbols are required")
+    payload = req.model_dump()
+    result = await create_and_start_replay(load_config(), payload)
+    return result
+
+
+@app.get("/api/replay/runs")
+async def list_replay_runs(limit: int = 20):
+    rows = await ReplayRunRepository.list_runs(limit=limit)
+    return {
+        "runs": [
+            {
+                "id": r.id,
+                "status": r.status,
+                "config": r.config,
+                "metrics": r.metrics,
+                "error": r.error,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "started_at": r.started_at.isoformat() if r.started_at else None,
+                "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/replay/runs/{run_id}")
+async def replay_run_status(run_id: str):
+    row = await ReplayRunRepository.get(run_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    return {
+        "id": row.id,
+        "status": row.status,
+        "config": row.config,
+        "metrics": row.metrics,
+        "error": row.error,
+    }
+
+
+@app.get("/api/replay/runs/{run_id}/results")
+async def replay_run_results(run_id: str):
+    row = await ReplayRunRepository.get(run_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    trades = await ReplayRunRepository.get_trades(run_id)
+    return {
+        "summary": row.metrics or {},
+        "equity_curve": row.equity_curve or [],
+        "trades": [
+            {
+                "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+                "symbol": t.symbol,
+                "exchange": t.exchange,
+                "action": t.action,
+                "quantity": t.quantity,
+                "price": float(t.price),
+                "fees": float(t.fees or 0),
+                "pnl": float(t.pnl or 0),
+                "rationale": t.rationale,
+            }
+            for t in trades
+        ],
+    }
 
 # ─── ENTRYPOINT ───────────────────────────────────────────────────────────────
 
