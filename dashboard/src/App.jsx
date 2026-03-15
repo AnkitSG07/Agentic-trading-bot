@@ -1846,10 +1846,18 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
               { placeholder: "Initial capital", key: "initial_capital", type: "number" },
               { placeholder: "Fee %", key: "fee_pct", type: "number", step: "0.0001" },
               { placeholder: "Slippage %", key: "slippage_pct", type: "number", step: "0.0001" },
+              { placeholder: "AI every N candles", key: "ai_every_n_candles", type: "number" },
+              { placeholder: "Confidence threshold", key: "confidence_threshold", type: "number", step: "0.01" },
             ].map(f => (
               <input key={f.key} type={f.type} step={f.step} placeholder={f.placeholder}
                 value={simConfig[f.key]}
-                onChange={e => setSimConfig(p => ({ ...p, [f.key]: f.type === "number" ? Number(e.target.value || 0) : e.target.value }))}
+                onChange={e => setSimConfig(p => {
+                  if (f.type !== "number") return { ...p, [f.key]: e.target.value };
+                  const numeric = Number(e.target.value || 0);
+                  if (f.key === "ai_every_n_candles") return { ...p, [f.key]: Math.max(1, Math.round(numeric)) };
+                  if (f.key === "confidence_threshold") return { ...p, [f.key]: Math.max(0.3, Math.min(0.95, numeric)) };
+                  return { ...p, [f.key]: numeric };
+                })}
                 style={inputStyle}
               />
             ))}
@@ -1951,7 +1959,7 @@ export default function TradingDashboard() {
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
   const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null, liveReplay: null });
   const [simBackfilling, setSimBackfilling] = useState(false);
-  const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 100000, fee_pct: 0.0003, slippage_pct: 0.0005 });
+  const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 500000, fee_pct: 0.0003, slippage_pct: 0.0005, ai_every_n_candles: 5, confidence_threshold: 0.5 });
 
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
@@ -2085,8 +2093,11 @@ export default function TradingDashboard() {
       const payload = {
         ...simConfig,
         symbols: simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean),
-        start_date: normalizedStartDate,
-        end_date: normalizedEndDate,
+        start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
+        end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
+        ai_every_n_candles: Math.max(1, Math.round(Number(simConfig.ai_every_n_candles || 1))),
+        confidence_threshold: Math.max(0.3, Math.min(0.95, Number(simConfig.confidence_threshold || 0.5))),
+
       };
       const startRes = await fetch(`${API_BASE}/api/replay/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const started = await startRes.json();
