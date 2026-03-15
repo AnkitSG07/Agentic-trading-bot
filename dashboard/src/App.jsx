@@ -1113,7 +1113,7 @@ export default function TradingDashboard() {
     while (true) {
       const statusRes = await fetch(`${API_BASE}/api/replay/runs/${runId}`);
       const status = await statusRes.json();
-      if (!statusRes.ok) throw new Error(status?.detail || "Status failed");
+      if (!statusRes.ok) throw new Error(extractErrorMessage(status?.detail) || "Status failed");
 
       setSimState(prev => ({ ...prev, runStatus: status.status || prev.runStatus, progress: status?.metrics?.progress || null }));
 
@@ -1123,7 +1123,7 @@ export default function TradingDashboard() {
         setSimState(prev => ({ ...prev, loading: false, error: "", data: { ...result, status }, runId, runStatus: "completed", progress: status?.metrics?.progress || null }));
         return;
       }
-      if (status.status === "failed") throw new Error(status.error || "Replay failed");
+      if (status.status === "failed") throw new Error(extractErrorMessage(status.error) || "Replay failed");
 
       const elapsedSeconds = (Date.now() - startedAt) / 1000;
       if (elapsedSeconds >= REPLAY_POLL_TIMEOUT_SECONDS) {
@@ -1158,12 +1158,12 @@ export default function TradingDashboard() {
       const payload = { ...simConfig, symbols: simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) };
       const startRes = await fetch(`${API_BASE}/api/replay/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const started = await startRes.json();
-      if (!startRes.ok) throw new Error(started?.detail || "Unable to start replay");
+      if (!startRes.ok) throw new Error(extractErrorMessage(started?.detail) || "Unable to start replay");
       const runId = started.run_id;
       setSimState(prev => ({ ...prev, runId, runStatus: started?.status || "queued", progress: null }));
       await pollReplayRun(runId);
     } catch (e) {
-      setSimState(prev => ({ ...prev, loading: false, error: e.message, data: null, runStatus: "failed" }));
+      setSimState(prev => ({ ...prev, loading: false, error: toUiError(e, "Replay failed"), data: null, runStatus: "failed" }));
     }
   }, [pollReplayRun, simConfig, simState.runId]);
 
@@ -1177,7 +1177,9 @@ export default function TradingDashboard() {
       const res = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const out = await res.json();
       if (!res.ok) throw new Error(extractErrorMessage(out?.detail) || "Backfill failed");
-      if (Array.isArray(out?.failures) && out.failures.length) throw new Error(`Backfill: ${out.failures[0]?.error || "some symbols failed"}`);
+      if (Array.isArray(out?.failures) && out.failures.length) {
+        throw new Error(`Backfill: ${extractErrorMessage(out.failures[0]?.error) || "some symbols failed"}`);
+      }
       await loadSimulation();
     } catch (e) { setSimState(prev => ({ ...prev, error: toUiError(e, "Backfill failed"), data: null })); }
     finally { setSimBackfilling(false); }
