@@ -26,6 +26,31 @@ const tickPrice = (v) => {
   return Number(v || 0);
 };
 
+const extractErrorMessage = (value) => {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return extractErrorMessage(value.message);
+  if (Array.isArray(value)) {
+    return value.map(extractErrorMessage).filter(Boolean).join("; ");
+  }
+  if (typeof value === "object") {
+    if (value.detail !== undefined) return extractErrorMessage(value.detail);
+    if (value.error !== undefined) return extractErrorMessage(value.error);
+    if (value.message !== undefined) return extractErrorMessage(value.message);
+    if (value.msg) {
+      const loc = Array.isArray(value.loc) ? value.loc.join(".") : value.loc;
+      return loc ? `${loc}: ${value.msg}` : String(value.msg);
+    }
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
+};
+
+const toUiError = (err, fallback = "Unexpected error") => {
+  const msg = extractErrorMessage(err);
+  return msg && msg.trim() ? msg : fallback;
+};
+
 // ─── THEME ───────────────────────────────────────────────────────────────────
 const DARK = {
   bg: "#080c14",
@@ -969,7 +994,7 @@ export default function TradingDashboard() {
   const [brokerPrefMessage, setBrokerPrefMessage] = useState("");
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
   const [brokerFallbackEvents, setBrokerFallbackEvents] = useState([]);
-  const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null });  
+  const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null });
   const [simBackfilling, setSimBackfilling] = useState(false);
   const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 100000, fee_pct: 0.0003, slippage_pct: 0.0005 });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -1050,7 +1075,7 @@ export default function TradingDashboard() {
       const res = await fetch(`${API_BASE}/api/engine/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "paper" }) });
       const d = await res.json();
       if (d.status === "starting") setEngineRunning(true);
-    } catch (e) { alert("Failed to start engine: " + e.message); }
+    } catch (e) { alert("Failed to start engine: " + toUiError(e, "Failed")); }
     finally { setTimeout(() => setStartingEngine(false), 3000); }
   };
 
@@ -1065,7 +1090,7 @@ export default function TradingDashboard() {
       const res = await fetch(`${API_BASE}/api/risk/kill-switch/reset`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ override_code: code }) });
       const d = await res.json();
       alert(d.status === "reset" ? "Kill switch reset ✅" : "Invalid code ❌");
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { alert("Error: " + toUiError(e, "Failed")); }
   };
 
   const saveUiPrimaryBroker = async () => {
@@ -1077,7 +1102,7 @@ export default function TradingDashboard() {
       if (!res.ok) throw new Error(data?.detail || "Failed");
       setBrokerPrefMessage(data?.fallback_active ? `Selected ${uiPrimarySelection.toUpperCase()} unavailable, using ${String(data?.effective_primary_broker || "").toUpperCase()}` : `UI primary set to ${uiPrimarySelection.toUpperCase()} ✅`);
       refetchBrokerPreference();
-    } catch (e) { setBrokerPrefMessage(`Error: ${e.message}`); }
+    } catch (e) { setBrokerPrefMessage(`Error: ${toUiError(e, "Failed")}`); }
     finally { setSavingBrokerPref(false); }
   };
 
@@ -1151,10 +1176,10 @@ export default function TradingDashboard() {
       const payload = { symbols, exchange: simConfig.exchange, timeframe: simConfig.timeframe, start_date: simConfig.start_date ? `${simConfig.start_date}T00:00:00` : null, end_date: simConfig.end_date ? `${simConfig.end_date}T23:59:59` : null };
       const res = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const out = await res.json();
-      if (!res.ok) throw new Error(out?.detail || "Backfill failed");
+      if (!res.ok) throw new Error(extractErrorMessage(out?.detail) || "Backfill failed");
       if (Array.isArray(out?.failures) && out.failures.length) throw new Error(`Backfill: ${out.failures[0]?.error || "some symbols failed"}`);
       await loadSimulation();
-    } catch (e) { setSimState(prev => ({ ...prev, error: e.message, data: null })); }
+    } catch (e) { setSimState(prev => ({ ...prev, error: toUiError(e, "Backfill failed"), data: null })); }
     finally { setSimBackfilling(false); }
   }, [loadSimulation, simConfig]);
 
