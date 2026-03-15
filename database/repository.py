@@ -645,6 +645,13 @@ class ReplayRunRepository:
             )
 
     @staticmethod
+    async def mark_progress(run_id: str, metrics: dict) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(ReplayRun).where(ReplayRun.id == run_id).values(status="running", metrics=metrics)
+            )
+
+    @staticmethod
     async def save_results(run_id: str, metrics: dict, equity_curve: list[dict], trades: list[dict]) -> None:
         async with get_session() as session:
             await session.execute(
