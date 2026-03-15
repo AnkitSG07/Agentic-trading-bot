@@ -1993,7 +1993,13 @@ export default function TradingDashboard() {
                       />
                       <StatTile T={T} label="Drawdown" value={`${(simState.data.summary.drawdown_pct || 0).toFixed(2)}%`} color={T.red} />
                       <StatTile T={T} label="Win Rate" value={`${(simState.data.summary.win_rate || 0).toFixed(1)}%`} color={T.amber} />
-                      <StatTile T={T} label="Total Trades" value={simState.data.summary.trade_count || 0} color={T.purple} />
+                      <StatTile
+                        T={T}
+                        label="Total Trades"
+                        value={simState.data.summary.completed_trades ?? simState.data.summary.trade_count ?? 0}
+                        sub={`${simState.data.summary.order_count ?? simState.data.trades?.length ?? 0} orders`}
+                        color={T.purple}
+                      />
                     </div>
                     <ResponsiveContainer width="100%" height={isMobile ? 180 : 240}>
                       <LineChart data={(simState.data.equity_curve || []).map(x => ({ ...x, date: x.timestamp?.slice(0, 10) }))} margin={{ left: isMobile ? -8 : 0 }}>
