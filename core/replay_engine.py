@@ -23,7 +23,8 @@ class ReplayConfig:
     initial_capital: float = 100000
     fee_pct: float = 0.0003
     slippage_pct: float = 0.0005
-
+    ai_every_n_candles: int = 1
+    
 
 class ReplayEngine:
     def __init__(self, app_config: dict):
@@ -65,7 +66,10 @@ class ReplayEngine:
 
         await self.risk.initialize(Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash))
 
-        for ts in sorted(by_ts):
+        sorted_ts = sorted(by_ts)
+        total_points = len(sorted_ts)
+
+        for idx, ts in enumerate(sorted_ts, start=1):
             snap = by_ts[ts]
             watch = []
             for symbol, candle in snap.items():
@@ -108,10 +112,14 @@ class ReplayEngine:
                 pcr=1.0,
             )
 
-            try:
-                signals = await self.agent.analyze_and_decide(context)
-            except Exception as exc:
-                logger.warning("AI analyze failed in replay, skipping candle: %s", exc)
+            should_run_ai = max(int(cfg.ai_every_n_candles or 1), 1)
+            if idx % should_run_ai == 0:
+                try:
+                    signals = await self.agent.analyze_and_decide(context)
+                except Exception as exc:
+                    logger.warning("AI analyze failed in replay, skipping candle: %s", exc)
+                    signals = []
+            else:
                 signals = []
 
             for s in signals:
@@ -154,6 +162,19 @@ class ReplayEngine:
                 equity += Decimal(str(snap.get(symbol, {"close": float(p["entry_price"])})["close"])) * p["qty"]
             equity_curve.append({"timestamp": ts.isoformat(), "equity": float(equity)})
 
+            if idx == 1 or idx % 10 == 0 or idx == total_points:
+                await ReplayRunRepository.mark_progress(
+                    run_id,
+                    metrics={
+                        "progress": {
+                            "processed": idx,
+                            "total": total_points,
+                            "pct": round((idx / total_points) * 100, 2) if total_points else 0,
+                            "current_timestamp": ts.isoformat(),
+                        }
+                    },
+                )
+    
         final_value = equity_curve[-1]["equity"] if equity_curve else float(cfg.initial_capital)
         total_return = ((final_value - cfg.initial_capital) / cfg.initial_capital * 100) if cfg.initial_capital else 0.0
         wins = [t for t in trades if (t.get("pnl") or 0) > 0]
