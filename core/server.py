@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from core.engine import get_engine, set_engine, TradingEngine
+from core.replay_schema import ReplayRunCreateRequest
 from database.repository import (
     AgentDecisionRepository, DailySummaryRepository,
     PositionRepository, RiskEventRepository, TradeRepository,
@@ -950,18 +951,6 @@ async def backfill_history(req: HistoricalBackfillRequest):
     jobs = [BackfillRequest(symbol=s.upper(), exchange=req.exchange, timeframe=req.timeframe, start_date=start, end_date=end) for s in req.symbols]
     return await backfill_historical_data(jobs)
 
-
-class ReplayRunCreateRequest(BaseModel):
-    symbols: list[str]
-    exchange: str = "NSE"
-    timeframe: str = "day"
-    start_date: Optional[datetime] = None
-    end_date: Optional[datetime] = None
-    initial_capital: float = 100000
-    fee_pct: float = 0.0003
-    slippage_pct: float = 0.0005
-    ai_every_n_candles: int = 1
-    
 
 @app.post("/api/replay/runs")
 async def create_replay_run(req: ReplayRunCreateRequest):
