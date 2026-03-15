@@ -1,53 +1,104 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
-  AreaChart, Area, BarChart, Bar, LineChart, Line, ScatterChart, Scatter,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
-  Cell, ComposedChart,
+  AreaChart, Area, BarChart, Bar, LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  ReferenceLine, Cell, ComposedChart,
 } from "recharts";
 import {
   TrendingUp, TrendingDown, Activity, Shield, Zap,
-  AlertTriangle, Power, RefreshCw, ArrowUpRight,
-  ArrowDownRight, Target, DollarSign, ChevronUp, ChevronDown,
+  AlertTriangle, Power, RefreshCw, Target, DollarSign,
   Cpu, Radio, Database, BarChart2, Bell, Settings,
-  Eye, Layers, GitBranch, Clock, Flame, TrendingUp as Trend,
-  CheckCircle, XCircle, AlertCircle, Wifi, WifiOff,
-  List, BarChart as BarChartIcon, ChevronRight,
+  Eye, Layers, GitBranch, Clock, CheckCircle, XCircle,
+  AlertCircle, Wifi, WifiOff, List, BarChart as BarChartIcon,
+  ChevronRight, Sun, Moon, Menu, X,
 } from "lucide-react";
 
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
 const isProduction = window.location.hostname !== "localhost";
 const API_BASE = import.meta.env.VITE_API_BASE ??
-  (isProduction
-    ? "https://agentic-trading-bot-188e.onrender.com"
-    : "http://localhost:8000");
-const WS_URL = import.meta.env.VITE_WS_URL ??
-  API_BASE.replace(/^http/, "ws") + "/ws";
-
-const tickPrice = (tickVal) => {
-  if (tickVal && typeof tickVal === "object") return Number(tickVal.price || 0);
-  return Number(tickVal || 0);
-};
-
+  (isProduction ? "https://agentic-trading-bot-188e.onrender.com" : "http://localhost:8000");
+const WS_URL = import.meta.env.VITE_WS_URL ?? API_BASE.replace(/^http/, "ws") + "/ws";
 const SIM_SOURCE = "NSE historical candles + AI decision/risk pipeline";
 
-// ─── HOOKS ────────────────────────────────────────────────────────────────────
+const tickPrice = (v) => {
+  if (v && typeof v === "object") return Number(v.price || 0);
+  return Number(v || 0);
+};
 
+// ─── THEME ───────────────────────────────────────────────────────────────────
+const DARK = {
+  bg: "#080c14",
+  bgAlt: "#0c1220",
+  surface: "#101828",
+  card: "#111927",
+  cardHover: "#141f30",
+  border: "#1e2d45",
+  borderLight: "#243454",
+  text: "#e8edf5",
+  textSub: "#8fa3be",
+  textMuted: "#4a607a",
+  textDim: "#263245",
+  accent: "#2dd4bf",
+  accentDim: "#2dd4bf18",
+  green: "#22c55e",
+  greenDim: "#22c55e14",
+  red: "#ef4444",
+  redDim: "#ef444414",
+  amber: "#f59e0b",
+  amberDim: "#f59e0b14",
+  blue: "#3b82f6",
+  blueDim: "#3b82f614",
+  purple: "#a855f7",
+  cyan: "#06b6d4",
+  shadow: "0 1px 3px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03)",
+  shadowHover: "0 4px 16px rgba(0,0,0,0.5)",
+};
+
+const LIGHT = {
+  bg: "#f0f4f8",
+  bgAlt: "#e8eef5",
+  surface: "#ffffff",
+  card: "#ffffff",
+  cardHover: "#f8fafc",
+  border: "#d1dce8",
+  borderLight: "#b8cad8",
+  text: "#0f1a26",
+  textSub: "#44607a",
+  textMuted: "#7a96ae",
+  textDim: "#b8cad8",
+  accent: "#0d9488",
+  accentDim: "#0d948814",
+  green: "#16a34a",
+  greenDim: "#16a34a12",
+  red: "#dc2626",
+  redDim: "#dc262612",
+  amber: "#d97706",
+  amberDim: "#d9770612",
+  blue: "#2563eb",
+  blueDim: "#2563eb12",
+  purple: "#9333ea",
+  cyan: "#0891b2",
+  shadow: "0 1px 3px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04)",
+  shadowHover: "0 4px 16px rgba(0,0,0,0.12)",
+};
+
+// ─── HOOKS ───────────────────────────────────────────────────────────────────
 function useAPI(endpoint, interval = null) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
   const fetch_ = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}${endpoint}`);
-      if (!res.ok) { setData(null); setError(null); setLoading(false); return; }
-      setData(await res.json()); setError(null);
-    } catch (e) { setError(e.message); setData(null); }
+      if (!res.ok) { setData(null); setLoading(false); return; }
+      setData(await res.json());
+    } catch { setData(null); }
     finally { setLoading(false); }
   }, [endpoint]);
   useEffect(() => {
     fetch_();
     if (interval) { const t = setInterval(fetch_, interval); return () => clearInterval(t); }
   }, [fetch_, interval]);
-  return { data, loading, error, refetch: fetch_ };
+  return { data, loading, refetch: fetch_ };
 }
 
 function useWebSocket() {
@@ -59,355 +110,327 @@ function useWebSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
-    ws.onopen = () => { setConnected(true); clearInterval(reconnectRef.current); };
+    ws.onopen = () => { setConnected(true); clearTimeout(reconnectRef.current); };
     ws.onmessage = (e) => { try { setLiveData(JSON.parse(e.data)); } catch {} };
     ws.onclose = () => { setConnected(false); reconnectRef.current = setTimeout(connect, 3000); };
     ws.onerror = () => ws.close();
   }, []);
-  useEffect(() => { connect(); return () => { clearInterval(reconnectRef.current); wsRef.current?.close(); }; }, [connect]);
+  useEffect(() => { connect(); return () => { clearTimeout(reconnectRef.current); wsRef.current?.close(); }; }, [connect]);
   return { liveData, connected };
 }
 
-// ─── RESPONSIVE HOOK ──────────────────────────────────────────────────────────
-
 function useBreakpoint() {
-  const [width, setWidth] = useState(window.innerWidth);
+  const [w, setW] = useState(window.innerWidth);
   useEffect(() => {
-    const handler = () => setWidth(window.innerWidth);
-    window.addEventListener("resize", handler);
-    return () => window.removeEventListener("resize", handler);
+    const h = () => setW(window.innerWidth);
+    window.addEventListener("resize", h);
+    return () => window.removeEventListener("resize", h);
   }, []);
-  return {
-    isMobile: width < 640,
-    isTablet: width >= 640 && width < 1024,
-    isDesktop: width >= 1024,
-    width,
-  };
+  return { isMobile: w < 768, isTablet: w >= 768 && w < 1200, isDesktop: w >= 1200, width: w };
 }
 
-// ─── UI PRIMITIVES ────────────────────────────────────────────────────────────
+// ─── DESIGN SYSTEM ───────────────────────────────────────────────────────────
+const ACTION_COLORS_FN = (T) => ({
+  BUY: T.green, SELL: T.red, SHORT: T.amber, COVER: T.blue,
+  NO_ACTION: T.textMuted, HOLD: T.textMuted,
+});
+const STRATEGY_COLORS_FN = (T) => ({
+  momentum: T.purple, mean_reversion: T.amber,
+  options_selling: "#ec4899", breakout: T.cyan, scalping: T.blue,
+});
+const SIGNAL_COLORS_FN = (T) => ({
+  strong_buy: T.green, buy: T.green, neutral: T.amber,
+  sell: T.red, strong_sell: T.red,
+});
 
-const C = {
-  bg: "#060b14", surface: "#0a1020", card: "#0d1526",
-  border: "#1a2540", borderHover: "#243050",
-  text: "#e2e8f0", textMuted: "#4a5568", textDim: "#2d3748",
-  green: "#00d4a0", red: "#ff4757", amber: "#ffa502",
-  blue: "#00b4d8", purple: "#7c3aed", cyan: "#22d3ee",
-  greenDim: "#00d4a015", redDim: "#ff475715",
-};
-
-const tag = (text, color) => (
+// ─── PRIMITIVES ──────────────────────────────────────────────────────────────
+const Pill = ({ label, color, T }) => (
   <span style={{
-    background: `${color}18`, color, border: `1px solid ${color}30`,
-    borderRadius: 4, padding: "2px 7px", fontSize: 10, fontWeight: 700,
-    letterSpacing: 0.6, textTransform: "uppercase", whiteSpace: "nowrap",
-    fontFamily: "'JetBrains Mono', monospace",
-  }}>{(text || "").replace(/_/g, " ")}</span>
+    background: `${color}16`, color, border: `1px solid ${color}30`,
+    borderRadius: 3, padding: "1px 6px", fontSize: 9.5, fontWeight: 700,
+    letterSpacing: 0.7, textTransform: "uppercase", whiteSpace: "nowrap",
+    fontFamily: "'IBM Plex Mono', monospace",
+  }}>{(label || "").replace(/_/g, " ")}</span>
 );
 
-const ACTION_COLORS = { BUY: C.green, SELL: C.red, SHORT: C.amber, COVER: C.blue, NO_ACTION: C.textMuted, HOLD: C.textMuted };
-const STRATEGY_COLORS = { momentum: "#a855f7", mean_reversion: "#f97316", options_selling: "#ec4899", breakout: "#eab308", scalping: C.cyan, unknown: C.textMuted };
-const REGIME_COLORS = { trending_up: C.green, trending_down: C.red, ranging: C.amber, high_volatility: "#ff6b6b" };
+const StatusDot = ({ active, color }) => (
+  <span style={{
+    display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+    background: active ? color : "currentColor",
+    boxShadow: active ? `0 0 0 2px ${color}30, 0 0 6px ${color}60` : "none",
+    opacity: active ? 1 : 0.3,
+  }} />
+);
 
-const Badge = ({ text, type }) => {
-  const c = ACTION_COLORS[text] || STRATEGY_COLORS[text] || REGIME_COLORS[text] ||
-    { complete: C.green, cancelled: C.textMuted, rejected: C.red, open: C.blue, pending: C.amber, zerodha: "#387ed1", dhan: "#00b386", risk_passed: C.green, risk_rejected: C.red, ok: C.green, partial_failure: C.amber, disabled: C.textMuted }[
-      (text || "").toLowerCase()] || C.textMuted;
-  return tag(text, c);
+const Delta = ({ value, size = 12, showPrefix = true }) => {
+  const up = value >= 0;
+  return (
+    <span style={{
+      color: up ? "#22c55e" : "#ef4444",
+      fontFamily: "'IBM Plex Mono', monospace",
+      fontWeight: 600, fontSize: size,
+    }}>
+      {showPrefix && (up ? "+" : "")}{typeof value === "number" ? value.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : value}
+    </span>
+  );
 };
 
-const Num = ({ v, size = 14, prefix = "₹" }) => (
-  <span style={{ color: v >= 0 ? C.green : C.red, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: size }}>
-    {v >= 0 ? "+" : ""}{prefix}{Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
-  </span>
+const Mono = ({ children, size = 12, color, weight = 600 }) => (
+  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: size, fontWeight: weight, color }}>{children}</span>
 );
 
-const Dot = ({ active, color = C.green }) => (
-  <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: active ? color : C.textMuted, boxShadow: active ? `0 0 6px ${color}` : "none" }} />
-);
-
-const Card = ({ children, style = {} }) => (
-  <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, ...style }}>{children}</div>
-);
-
-const SectionHeader = ({ title, sub, right }) => (
-  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "14px 18px", borderBottom: `1px solid ${C.border}`, flexWrap: "wrap", gap: 8 }}>
-    <div style={{ minWidth: 0, flex: 1 }}>
-      <div style={{ fontWeight: 700, fontSize: 12, letterSpacing: 0.3, wordBreak: "break-word" }}>{title}</div>
-      {sub && <div style={{ fontSize: 10, color: C.textMuted, marginTop: 2, wordBreak: "break-word" }}>{sub}</div>}
-    </div>
-    {right && <div style={{ flexShrink: 0, maxWidth: "100%" }}>{right}</div>}
+const ProgressBar = ({ value, max, color, height = 3 }) => (
+  <div style={{ width: "100%", height, background: "rgba(255,255,255,0.06)", borderRadius: height, overflow: "hidden" }}>
+    <div style={{
+      width: `${Math.min((value / max) * 100, 100)}%`, height: "100%",
+      background: color, borderRadius: height, transition: "width 0.4s ease",
+    }} />
   </div>
 );
 
-const MiniBar = ({ value, max, color }) => (
-  <div style={{ width: "100%", height: 4, background: C.bg, borderRadius: 2, overflow: "hidden", marginTop: 4 }}>
-    <div style={{ width: `${Math.min((value / max) * 100, 100)}%`, height: "100%", background: color, borderRadius: 2, transition: "width .4s" }} />
-  </div>
-);
-
-const StatCard = ({ label, value, sub, color = C.cyan, icon: Icon, loading }) => (
-  <Card>
-    <div style={{ padding: "14px 16px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ color: C.textMuted, fontSize: 9, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6, fontFamily: "'JetBrains Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</div>
-          {loading
-            ? <div style={{ height: 22, background: C.border, borderRadius: 4, width: "55%", animation: "shimmer 1.5s infinite" }} />
-            : <div style={{ color: C.text, fontSize: 18, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", letterSpacing: -1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value}</div>}
-          {sub && <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
-        </div>
-        {Icon && <div style={{ background: `${color}12`, border: `1px solid ${color}20`, borderRadius: 8, padding: 8, flexShrink: 0, marginLeft: 8 }}><Icon size={14} color={color} /></div>}
-      </div>
-    </div>
-  </Card>
-);
-
-const Sparkline = ({ data, color, height = 32 }) => {
+const Sparkline = ({ data, color, height = 28 }) => {
   if (!data?.length) return <div style={{ height }} />;
   const min = Math.min(...data), max = Math.max(...data), range = max - min || 1;
-  const w = 100, h = height;
-  const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - ((v - min) / range) * h * 0.85 - h * 0.075}`).join(" ");
+  const w = 80, h = height;
+  const pts = data.map((v, i) => `${(i / Math.max(data.length - 1, 1)) * w},${h - ((v - min) / range) * h * 0.8 - h * 0.1}`).join(" ");
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" width="100%" height={h} style={{ display: "block" }}>
-      <polyline fill="none" stroke={color} strokeWidth="1.5" points={pts} strokeLinejoin="round" />
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" width="100%" height={h}>
+      <defs>
+        <linearGradient id={`sg-${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <polyline fill={`url(#sg-${color.replace("#","")})`} stroke="none" points={`0,${h} ${pts} ${w},${h}`} />
+      <polyline fill="none" stroke={color} strokeWidth="1.5" points={pts} strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   );
 };
 
-// ─── PANELS ───────────────────────────────────────────────────────────────────
+// Card component
+const Card = ({ children, T, style = {}, className }) => (
+  <div className={className} style={{
+    background: T.card, border: `1px solid ${T.border}`,
+    borderRadius: 8, boxShadow: T.shadow, ...style,
+  }}>{children}</div>
+);
 
-// 1. OPTIONS CHAIN PANEL
-const OptionsChainPanel = ({ data }) => {
-  const { isMobile } = useBreakpoint();
+const CardHeader = ({ title, subtitle, right, T }) => (
+  <div style={{
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    padding: "12px 16px", borderBottom: `1px solid ${T.border}`,
+    gap: 12,
+  }}>
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: T.text, textTransform: "uppercase" }}>{title}</div>
+      {subtitle && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{subtitle}</div>}
+    </div>
+    {right && <div style={{ flexShrink: 0 }}>{right}</div>}
+  </div>
+);
+
+// KPI stat card
+const StatTile = ({ label, value, sub, delta, color, icon: Icon, T }) => (
+  <Card T={T} style={{ padding: "14px 16px", position: "relative", overflow: "hidden" }}>
+    <div style={{
+      position: "absolute", top: 0, left: 0, right: 0, height: 2,
+      background: `linear-gradient(90deg, ${color}60, transparent)`,
+    }} />
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: T.textMuted, marginBottom: 8 }}>{label}</div>
+        <div style={{ fontSize: 20, fontWeight: 800, color: T.text, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: -0.5, lineHeight: 1 }}>{value}</div>
+        {sub && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6 }}>{sub}</div>}
+        {delta !== undefined && <div style={{ marginTop: 4 }}><Delta value={delta} size={10} /></div>}
+      </div>
+      {Icon && (
+        <div style={{ background: `${color}14`, border: `1px solid ${color}22`, borderRadius: 6, padding: 8, flexShrink: 0 }}>
+          <Icon size={14} color={color} />
+        </div>
+      )}
+    </div>
+  </Card>
+);
+
+// ─── TOOLTIP STYLE ───────────────────────────────────────────────────────────
+const tooltipStyle = (T) => ({
+  contentStyle: { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 6, fontSize: 10, color: T.text, boxShadow: T.shadowHover },
+  labelStyle: { color: T.textMuted },
+});
+
+// ─── PANELS ──────────────────────────────────────────────────────────────────
+
+// 1. Options Chain
+function OptionsChainPanel({ data, T }) {
   const opts = data || {};
   const nifty = opts.NIFTY || {};
   const bnk = opts.BANKNIFTY || {};
-
   const pcr = Number(nifty.pcr);
   const hasPcr = Number.isFinite(pcr);
-  const pcrColor = pcr > 1.2 ? C.green : pcr < 0.8 ? C.red : C.amber;
+  const pcrColor = pcr > 1.2 ? T.green : pcr < 0.8 ? T.red : T.amber;
   const pcrLabel = pcr > 1.5 ? "EXTREME BULL" : pcr > 1.2 ? "BULLISH" : pcr > 0.8 ? "NEUTRAL" : pcr > 0.5 ? "BEARISH" : "EXTREME BEAR";
-
   const callOI = (nifty.top_call_oi || []).map((s, i) => ({ strike: s, oi: [4.2, 3.1, 2.8][i] || 1.5, type: "CE" }));
   const putOI = (nifty.top_put_oi || []).map((s, i) => ({ strike: s, oi: [3.8, 2.9, 2.1][i] || 1.2, type: "PE" }));
   const combined = [...putOI.reverse(), ...callOI].map(x => ({ ...x, label: `${x.strike}${x.type}` }));
+  const { isMobile } = useBreakpoint();
 
   return (
-    <Card>
-      <SectionHeader title="Options Chain Intelligence" sub="Live PCR · Max Pain · OI Heatmap" right={
-        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace" }}>PCR</span>
-          <span style={{ fontSize: 14, fontWeight: 800, color: hasPcr ? pcrColor : C.textMuted, fontFamily: "monospace" }}>{hasPcr ? pcr.toFixed(2) : "—"}</span>
-          {hasPcr ? tag(pcrLabel, pcrColor) : tag("NO DATA", C.textMuted)}
-        </div>
-      } />
-      <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr", gap: 16 }}>
+    <Card T={T}>
+      <CardHeader T={T} title="Options Chain" subtitle="PCR · Max Pain · OI Heatmap"
+        right={
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 10, color: T.textMuted, fontFamily: "monospace" }}>PCR</span>
+            <Mono size={15} color={hasPcr ? pcrColor : T.textMuted} weight={800}>{hasPcr ? pcr.toFixed(2) : "—"}</Mono>
+            {hasPcr && <Pill label={pcrLabel} color={pcrColor} T={T} />}
+          </div>
+        }
+      />
+      <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.5fr 1fr", gap: 16 }}>
         <div>
-          <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 8, letterSpacing: 1 }}>TOP OI CONCENTRATION — NIFTY</div>
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.2, color: T.textMuted, textTransform: "uppercase", marginBottom: 10 }}>OI Concentration — NIFTY</div>
           {combined.length === 0 ? (
-            <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.textMuted, background: C.bg, borderRadius: 6 }}>
-              No live options OI data
-            </div>
+            <div style={{ height: 150, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: T.textMuted, background: T.bg, borderRadius: 6 }}>No live OI data</div>
           ) : (
-            <ResponsiveContainer width="100%" height={160}>
-              <BarChart data={combined} layout="vertical" margin={{ left: isMobile ? 50 : 60, right: 10 }}>
-                <XAxis type="number" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
-                <YAxis type="category" dataKey="label" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} width={isMobile ? 45 : 55} />
-                <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
-                  formatter={(v, n, p) => [`${v.toFixed(1)}L OI`, p.payload.type === "CE" ? "Call" : "Put"]} />
+            <ResponsiveContainer width="100%" height={150}>
+              <BarChart data={combined} layout="vertical" margin={{ left: 55, right: 8 }}>
+                <XAxis type="number" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
+                <YAxis type="category" dataKey="label" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} width={50} />
+                <Tooltip {...tooltipStyle(T)} formatter={(v, n, p) => [`${v.toFixed(1)}L`, p.payload.type === "CE" ? "Call OI" : "Put OI"]} />
                 <Bar dataKey="oi" radius={[0, 3, 3, 0]}>
-                  {combined.map((entry, i) => <Cell key={i} fill={entry.type === "CE" ? C.red : C.green} opacity={0.75} />)}
+                  {combined.map((e, i) => <Cell key={i} fill={e.type === "CE" ? T.red : T.green} opacity={0.8} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
           )}
         </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
           {[
-            { label: "ATM Strike", value: nifty.atm_strike?.toLocaleString("en-IN") || "—", color: C.cyan },
-            { label: "Straddle Price", value: Number.isFinite(Number(nifty.atm_straddle)) ? `₹${nifty.atm_straddle}` : "—", color: C.purple },
-            { label: "Expected Move", value: Number.isFinite(Number(nifty.expected_move_pct)) ? `±${Number(nifty.expected_move_pct).toFixed(2)}%` : "—", color: C.amber },
-            { label: "Max Pain", value: nifty.max_pain?.toLocaleString("en-IN") || "—", color: C.amber },
-            { label: "Key Resistance", value: nifty.key_resistance?.toLocaleString("en-IN") || "—", color: C.red },
-            { label: "Key Support", value: nifty.key_support?.toLocaleString("en-IN") || "—", color: C.green },
-          ].map(row => (
-            <div key={row.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", background: C.bg, borderRadius: 6 }}>
-              <span style={{ fontSize: 10, color: C.textMuted }}>{row.label}</span>
-              <span style={{ fontSize: 11, fontWeight: 700, color: row.color, fontFamily: "monospace" }}>{row.value}</span>
+            { label: "ATM Strike", v: nifty.atm_strike?.toLocaleString("en-IN") || "—", c: T.cyan },
+            { label: "Straddle Price", v: Number.isFinite(Number(nifty.atm_straddle)) ? `₹${nifty.atm_straddle}` : "—", c: T.purple },
+            { label: "Expected Move", v: Number.isFinite(Number(nifty.expected_move_pct)) ? `±${Number(nifty.expected_move_pct).toFixed(2)}%` : "—", c: T.amber },
+            { label: "Max Pain", v: nifty.max_pain?.toLocaleString("en-IN") || "—", c: T.amber },
+            { label: "Key Resistance", v: nifty.key_resistance?.toLocaleString("en-IN") || "—", c: T.red },
+            { label: "Key Support", v: nifty.key_support?.toLocaleString("en-IN") || "—", c: T.green },
+            { label: "BANKNIFTY PCR", v: Number.isFinite(Number(bnk.pcr)) ? Number(bnk.pcr).toFixed(2) : "—", c: Number(bnk.pcr) > 1 ? T.green : T.red },
+          ].map(r => (
+            <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: T.bg, borderRadius: 5 }}>
+              <span style={{ fontSize: 9.5, color: T.textMuted }}>{r.label}</span>
+              <Mono size={10.5} color={r.c} weight={700}>{r.v}</Mono>
             </div>
           ))}
-          <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 10px", background: C.bg, borderRadius: 6 }}>
-            <span style={{ fontSize: 10, color: C.textMuted }}>BANKNIFTY PCR</span>
-            <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: Number.isFinite(Number(bnk.pcr)) ? (Number(bnk.pcr) > 1 ? C.green : C.red) : C.textMuted }}>{Number.isFinite(Number(bnk.pcr)) ? Number(bnk.pcr).toFixed(2) : "—"}</span>
-          </div>
         </div>
       </div>
     </Card>
   );
-};
+}
 
-// 2. WATCHLIST INDICATORS PANEL
-const SIGNAL_COLORS = { strong_buy: C.green, buy: "#4ade80", neutral: C.amber, sell: "#f87171", strong_sell: C.red };
-const SIGNAL_LABELS = { strong_buy: "STRONG BUY", buy: "BUY", neutral: "NEUTRAL", sell: "SELL", strong_sell: "STRONG SELL" };
-
-const WatchlistIndicatorsPanel = ({ watchlistData }) => {
-  const { isMobile } = useBreakpoint();
-  const data = watchlistData?.length ? watchlistData : [];
+// 2. Watchlist
+const SIGNAL_LABEL = { strong_buy: "STRONG BUY", buy: "BUY", neutral: "NEUTRAL", sell: "SELL", strong_sell: "STRONG SELL" };
+function WatchlistPanel({ data, T }) {
+  const items = data?.length ? data : [];
   const [selected, setSelected] = useState(null);
+  const { isMobile } = useBreakpoint();
+  const SC = SIGNAL_COLORS_FN(T);
 
   return (
-    <Card>
-      <SectionHeader title="Watchlist Intelligence" sub="Real-time indicator matrix — what the AI sees" right={
-        <span style={{ fontSize: 10, color: C.textMuted }}>{data.length} symbols</span>
-      } />
-      <div style={{ padding: "0 18px 14px", overflowX: "auto" }}>
+    <Card T={T}>
+      <CardHeader T={T} title="Watchlist" subtitle="Indicator matrix · live signals"
+        right={<Pill label={`${items.length} symbols`} color={T.textMuted} T={T} />}
+      />
+      <div style={{ padding: "0 16px 12px", overflowX: "auto" }}>
         {isMobile ? (
-          // Mobile: card-style layout
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-            {data.map((w, i) => {
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 12 }}>
+            {items.map(w => {
               const ind = w.indicators || {};
               const sig = ind.overall_signal || "neutral";
-              const sigColor = SIGNAL_COLORS[sig] || C.textMuted;
               const rsi = Number(ind.rsi || 50);
-              const rsiColor = rsi > 70 ? C.red : rsi < 30 ? C.green : C.text;
-              const isSelected = selected === w.symbol;
+              const isSel = selected === w.symbol;
               return (
                 <div key={w.symbol}>
-                  <div
-                    onClick={() => setSelected(isSelected ? null : w.symbol)}
-                    style={{
-                      background: isSelected ? `${C.cyan}08` : C.bg,
-                      borderRadius: 8, padding: "12px 14px", cursor: "pointer",
-                      border: `1px solid ${isSelected ? C.cyan + "40" : C.border}`,
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 6 }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontWeight: 800, fontSize: 13 }}>{w.symbol}</span>
-                        <span style={{ fontFamily: "monospace", fontSize: 12 }}>₹{(w.ltp || 0).toFixed(0)}</span>
-                        <span style={{ fontSize: 11, fontFamily: "monospace", color: (w.change_pct || 0) >= 0 ? C.green : C.red }}>
-                          {(w.change_pct || 0) >= 0 ? "+" : ""}{(w.change_pct || 0).toFixed(2)}%
-                        </span>
+                  <div onClick={() => setSelected(isSel ? null : w.symbol)}
+                    style={{ background: isSel ? `${T.accent}08` : T.bg, border: `1px solid ${isSel ? T.accent + "40" : T.border}`, borderRadius: 6, padding: "10px 12px", cursor: "pointer" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontWeight: 800, fontSize: 12, color: T.text }}>{w.symbol}</span>
+                        <Mono size={11} color={T.text}>₹{(w.ltp || 0).toFixed(0)}</Mono>
+                        <Delta value={w.change_pct || 0} size={10} />
                       </div>
-                      <span style={{ fontSize: 9, fontWeight: 800, color: sigColor }}>{SIGNAL_LABELS[sig] || sig.toUpperCase()}</span>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 9, color: C.textMuted }}>RSI <span style={{ color: rsiColor, fontFamily: "monospace" }}>{rsi}</span></span>
-                      {tag(ind.macd_signal || "neutral", ind.macd_signal === "bullish" ? C.green : ind.macd_signal === "bearish" ? C.red : C.amber)}
-                      {tag(ind.bb_signal || "middle", ind.bb_signal === "upper" ? C.amber : ind.bb_signal === "lower" ? C.blue : C.textMuted)}
-                      <span style={{ fontSize: 9, color: (ind.volume_ratio || 1) > 1.5 ? C.amber : C.textMuted, fontFamily: "monospace" }}>VOL {(ind.volume_ratio || 1).toFixed(1)}x</span>
+                      <Pill label={SIGNAL_LABEL[sig] || sig} color={SC[sig] || T.textMuted} T={T} />
                     </div>
                   </div>
-                  {isSelected && (
-                    <div style={{ padding: "10px 8px 12px", background: `${C.cyan}06`, borderRadius: 8, marginTop: 4 }}>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8 }}>
-                        {[
-                          { label: "Pivot", v: w.levels?.pivot, color: C.textMuted },
-                          { label: "R1", v: w.levels?.r1, color: C.red },
-                          { label: "S1", v: w.levels?.s1, color: C.green },
-                          { label: "Supertrend", v: ind.supertrend || "—", color: ind.supertrend === "bullish" ? C.green : C.red, isText: true },
-                        ].map(item => (
-                          <div key={item.label} style={{ background: C.surface, borderRadius: 6, padding: "8px 10px" }}>
-                            <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>{item.label}</div>
-                            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: item.color }}>
-                              {item.isText ? item.v : item.v ? `₹${item.v}` : "—"}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                  {isSel && (
+                    <div style={{ background: T.bgAlt, borderRadius: 6, padding: "10px 12px", marginTop: 3, display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8 }}>
+                      {[{ label: "RSI", v: rsi, c: rsi > 70 ? T.red : rsi < 30 ? T.green : T.text },
+                        { label: "MACD", v: ind.macd_signal || "—", c: ind.macd_signal === "bullish" ? T.green : T.red },
+                        { label: "BB", v: ind.bb_signal || "—", c: T.textMuted },
+                        { label: "Vol Ratio", v: `${(ind.volume_ratio || 1).toFixed(1)}x`, c: (ind.volume_ratio || 1) > 1.5 ? T.amber : T.textMuted },
+                      ].map(it => (
+                        <div key={it.label} style={{ background: T.surface, borderRadius: 5, padding: "7px 10px" }}>
+                          <div style={{ fontSize: 9, color: T.textMuted }}>{it.label}</div>
+                          <Mono size={11} color={it.c} weight={700}>{it.v}</Mono>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
               );
             })}
-            {data.length === 0 && <div style={{ fontSize: 11, color: C.textMuted, paddingTop: 8 }}>No live watchlist data</div>}
+            {!items.length && <div style={{ fontSize: 11, color: T.textMuted, padding: "20px 0" }}>No watchlist data</div>}
           </div>
         ) : (
-          // Desktop: table layout
-          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 1, marginTop: 12, minWidth: 580 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "100px 70px 55px 60px 65px 65px 65px 80px", gap: 4, padding: "4px 0 8px", marginBottom: 4, borderBottom: `1px solid ${C.border}` }}>
-              {["SYMBOL", "LTP", "CHG%", "RSI", "MACD", "BB", "VOL", "SIGNAL"].map(h =>
-                <span key={h} style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: "monospace" }}>{h}</span>
-              )}
-            </div>
-            {data.map((w, i) => {
-              const ind = w.indicators || {};
-              const sig = ind.overall_signal || "neutral";
-              const sigColor = SIGNAL_COLORS[sig] || C.textMuted;
-              const rsi = Number(ind.rsi || 50);
-              const rsiColor = rsi > 70 ? C.red : rsi < 30 ? C.green : C.text;
-              const isSelected = selected === w.symbol;
-              return (
-                <div key={w.symbol}>
-                  <div
-                    onClick={() => setSelected(isSelected ? null : w.symbol)}
-                    style={{
-                      display: "grid", gridTemplateColumns: "100px 70px 55px 60px 65px 65px 65px 80px", gap: 4,
-                      padding: "9px 6px", borderRadius: 6, cursor: "pointer",
-                      background: isSelected ? `${C.cyan}08` : i % 2 === 0 ? C.bg : "transparent",
-                      transition: "background .15s",
-                    }}
-                  >
-                    <span style={{ fontSize: 11, fontWeight: 700 }}>{w.symbol}</span>
-                    <span style={{ fontSize: 11, fontFamily: "monospace", color: C.text }}>₹{(w.ltp || 0).toFixed(0)}</span>
-                    <span style={{ fontSize: 11, fontFamily: "monospace", color: (w.change_pct || 0) >= 0 ? C.green : C.red }}>
-                      {(w.change_pct || 0) >= 0 ? "+" : ""}{(w.change_pct || 0).toFixed(2)}%
-                    </span>
-                    <span style={{ fontSize: 11, fontFamily: "monospace", color: rsiColor }}>{rsi}</span>
-                    <span style={{ fontSize: 10 }}>{tag(ind.macd_signal || "neutral", ind.macd_signal === "bullish" ? C.green : ind.macd_signal === "bearish" ? C.red : C.amber)}</span>
-                    <span style={{ fontSize: 10 }}>{tag(ind.bb_signal || "middle", ind.bb_signal === "upper" ? C.amber : ind.bb_signal === "lower" ? C.blue : C.textMuted)}</span>
-                    <span style={{ fontSize: 11, fontFamily: "monospace", color: (ind.volume_ratio || 1) > 1.5 ? C.amber : C.textMuted }}>{(ind.volume_ratio || 1).toFixed(1)}x</span>
-                    <span style={{ fontSize: 9, fontWeight: 800, color: sigColor }}>{SIGNAL_LABELS[sig] || sig.toUpperCase()}</span>
-                  </div>
-                  {isSelected && (
-                    <div style={{ padding: "10px 8px 12px", background: `${C.cyan}06`, borderRadius: 6, marginBottom: 4 }}>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-                        {[
-                          { label: "Pivot", v: w.levels?.pivot, color: C.textMuted },
-                          { label: "R1", v: w.levels?.r1, color: C.red },
-                          { label: "S1", v: w.levels?.s1, color: C.green },
-                          { label: "Supertrend", v: ind.supertrend || "—", color: ind.supertrend === "bullish" ? C.green : C.red, isText: true },
-                        ].map(item => (
-                          <div key={item.label} style={{ background: C.surface, borderRadius: 6, padding: "8px 10px" }}>
-                            <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>{item.label}</div>
-                            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: item.color }}>
-                              {item.isText ? item.v : item.v ? `₹${item.v}` : "—"}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {data.length === 0 && <div style={{ fontSize: 11, color: C.textMuted, paddingTop: 8 }}>No live watchlist data</div>}
-          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10, minWidth: 560 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                {["Symbol", "LTP", "Chg%", "RSI", "MACD", "BB", "Volume", "Signal"].map(h =>
+                  <th key={h} style={{ padding: "6px 8px", textAlign: "left", fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: 0.8, textTransform: "uppercase" }}>{h}</th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((w, i) => {
+                const ind = w.indicators || {};
+                const sig = ind.overall_signal || "neutral";
+                const rsi = Number(ind.rsi || 50);
+                const isSel = selected === w.symbol;
+                return (
+                  <tr key={w.symbol} onClick={() => setSelected(isSel ? null : w.symbol)}
+                    style={{ borderBottom: `1px solid ${T.border}20`, cursor: "pointer", background: isSel ? `${T.accent}06` : i % 2 ? T.bg + "80" : "transparent" }}>
+                    <td style={{ padding: "9px 8px", fontWeight: 800, fontSize: 11, color: T.text }}>{w.symbol}</td>
+                    <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.text}>₹{(w.ltp || 0).toFixed(0)}</Mono></td>
+                    <td style={{ padding: "9px 8px" }}><Delta value={w.change_pct || 0} size={10} /></td>
+                    <td style={{ padding: "9px 8px" }}><Mono size={10.5} color={rsi > 70 ? T.red : rsi < 30 ? T.green : T.text}>{rsi}</Mono></td>
+                    <td style={{ padding: "9px 8px" }}><Pill label={ind.macd_signal || "—"} color={ind.macd_signal === "bullish" ? T.green : ind.macd_signal === "bearish" ? T.red : T.amber} T={T} /></td>
+                    <td style={{ padding: "9px 8px" }}><Pill label={ind.bb_signal || "mid"} color={ind.bb_signal === "upper" ? T.amber : ind.bb_signal === "lower" ? T.blue : T.textMuted} T={T} /></td>
+                    <td style={{ padding: "9px 8px" }}><Mono size={10.5} color={(ind.volume_ratio || 1) > 1.5 ? T.amber : T.textMuted}>{(ind.volume_ratio || 1).toFixed(1)}x</Mono></td>
+                    <td style={{ padding: "9px 8px" }}><Pill label={SIGNAL_LABEL[sig] || sig} color={SC[sig] || T.textMuted} T={T} /></td>
+                  </tr>
+                );
+              })}
+              {!items.length && <tr><td colSpan={8} style={{ padding: "30px 8px", textAlign: "center", fontSize: 11, color: T.textMuted }}>No live watchlist data</td></tr>}
+            </tbody>
+          </table>
         )}
       </div>
     </Card>
   );
-};
+}
 
-// 3. POSITION SPARKLINES WITH SL DISTANCE
-const PositionSparklinePanel = ({ positions, tickHistory, prevTicks }) => {
+// 3. Positions with sparklines
+function PositionsPanel({ positions, tickHistory, T }) {
   const { isMobile } = useBreakpoint();
-
   if (!positions?.length) return (
-    <Card>
-      <SectionHeader title="Open Positions" sub="Live P&L with sparklines" />
-      <div style={{ padding: "40px 18px", textAlign: "center", color: C.textMuted, fontSize: 12 }}>No open positions</div>
+    <Card T={T}>
+      <CardHeader T={T} title="Open Positions" subtitle="Live P&L with sparklines" />
+      <div style={{ padding: "48px 16px", textAlign: "center", color: T.textMuted, fontSize: 12 }}>No open positions</div>
     </Card>
   );
 
   return (
-    <Card>
-      <SectionHeader title="Open Positions" sub="Live P&L with price sparklines" right={
-        <span style={{ fontSize: 11, fontWeight: 700, color: C.text }}>{positions.length} open</span>
-      } />
-      <div style={{ padding: "0 0 8px" }}>
+    <Card T={T}>
+      <CardHeader T={T} title="Open Positions" subtitle="Live P&L with sparklines"
+        right={<Pill label={`${positions.length} open`} color={T.accent} T={T} />}
+      />
+      <div>
         {positions.map((p, i) => {
           const ltp = Number(p.ltp || p.avg || 0);
           const avg = Number(p.avg || 0);
@@ -418,75 +441,69 @@ const PositionSparklinePanel = ({ positions, tickHistory, prevTicks }) => {
           const isUp = pnl >= 0;
           const slDist = p.stop_loss ? Math.abs(((ltp - Number(p.stop_loss)) / ltp) * 100) : null;
 
-          // Mobile layout
           return (
-            <div key={i} style={{ borderBottom: `1px solid ${C.border}`, padding: isMobile ? "14px 16px" : "12px 18px" }}>
+            <div key={i} style={{ borderBottom: i < positions.length - 1 ? `1px solid ${T.border}` : "none", padding: "14px 16px" }}>
               {isMobile ? (
                 <>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                      <span style={{ fontWeight: 800, fontSize: 13 }}>{p.symbol}</span>
-                      {tag(p.side, p.side === "BUY" ? C.green : C.red)}
-                      <span style={{ fontFamily: "monospace", fontSize: 11, color: C.textMuted }}>×{qty}</span>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <span style={{ fontWeight: 800, fontSize: 13, color: T.text }}>{p.symbol}</span>
+                      <Pill label={p.side} color={p.side === "BUY" ? T.green : T.red} T={T} />
+                      <Mono size={10} color={T.textMuted}>×{qty}</Mono>
                     </div>
-                    <Num v={pnl} size={13} />
+                    <div style={{ textAlign: "right" }}>
+                      <div><Delta value={pnl} size={13} /></div>
+                      <Delta value={pnlPct} size={10} />%
+                    </div>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 8 }}>
                     <div>
-                      <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 2 }}>AVG / LTP</div>
-                      <div style={{ fontFamily: "monospace", fontSize: 10 }}>₹{avg.toFixed(0)} / <span style={{ color: isUp ? C.green : C.red }}>₹{ltp.toFixed(0)}</span></div>
-                      <div style={{ fontSize: 10, color: isUp ? C.green : C.red }}>{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%</div>
+                      <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>AVG / LTP</div>
+                      <Mono size={10} color={T.text}>₹{avg.toFixed(0)} / <span style={{ color: isUp ? T.green : T.red }}>₹{ltp.toFixed(0)}</span></Mono>
                     </div>
-                    <div>
-                      {slDist !== null ? (
-                        <>
-                          <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 2 }}>SL Distance</div>
-                          <div style={{ fontFamily: "monospace", fontSize: 11, color: slDist < 0.5 ? C.red : slDist < 1.5 ? C.amber : C.green }}>{slDist.toFixed(2)}%</div>
-                          <MiniBar value={Math.min(slDist, 5)} max={5} color={slDist < 1 ? C.red : slDist < 2 ? C.amber : C.green} />
-                        </>
-                      ) : <span style={{ fontSize: 10, color: C.textMuted }}>No SL</span>}
-                    </div>
+                    {slDist !== null && (
+                      <div>
+                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>SL Distance</div>
+                        <Mono size={11} color={slDist < 0.5 ? T.red : slDist < 1.5 ? T.amber : T.green}>{slDist.toFixed(2)}%</Mono>
+                        <div style={{ marginTop: 3 }}><ProgressBar value={Math.min(slDist, 5)} max={5} color={slDist < 1 ? T.red : T.amber} /></div>
+                      </div>
+                    )}
                   </div>
-                  <div style={{ width: "100%", opacity: 0.85 }}>
-                    <Sparkline data={series.length ? series : [avg, ltp]} color={isUp ? C.green : C.red} height={38} />
-                  </div>
+                  <Sparkline data={series.length ? series : [avg, ltp]} color={isUp ? T.green : T.red} height={36} />
                 </>
               ) : (
-                // Desktop layout
-                <div style={{ display: "grid", gridTemplateColumns: "90px 50px 80px 90px 100px 80px 1fr", alignItems: "center", gap: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "120px 55px 100px 110px 110px 80px 1fr", alignItems: "center", gap: 14 }}>
                   <div>
-                    <div style={{ fontWeight: 800, fontSize: 12 }}>{p.symbol}</div>
-                    <div style={{ marginTop: 3 }}>{tag(p.side, p.side === "BUY" ? C.green : C.red)}</div>
+                    <div style={{ fontWeight: 800, fontSize: 12, color: T.text, marginBottom: 4 }}>{p.symbol}</div>
+                    <Pill label={p.side} color={p.side === "BUY" ? T.green : T.red} T={T} />
                   </div>
-                  <div style={{ fontFamily: "monospace", fontSize: 11, color: C.textMuted }}>{qty}</div>
+                  <Mono size={11} color={T.textSub}>{qty}</Mono>
                   <div>
-                    <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 2 }}>AVG / LTP</div>
-                    <div style={{ fontFamily: "monospace", fontSize: 10 }}>₹{avg.toFixed(0)} / <span style={{ color: isUp ? C.green : C.red }}>₹{ltp.toFixed(0)}</span></div>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>AVG / LTP</div>
+                    <Mono size={10} color={T.text}>₹{avg.toFixed(0)} / <span style={{ color: isUp ? T.green : T.red }}>₹{ltp.toFixed(0)}</span></Mono>
                   </div>
                   <div>
-                    <Num v={pnl} size={13} />
-                    <div style={{ fontSize: 10, color: isUp ? C.green : C.red }}>{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%</div>
+                    <div style={{ marginBottom: 2 }}><Delta value={pnl} size={13} /></div>
+                    <Delta value={pnlPct} size={10} />%
                   </div>
                   <div>
                     {slDist !== null ? (
                       <>
-                        <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>SL Distance</div>
-                        <div style={{ fontFamily: "monospace", fontSize: 11, color: slDist < 0.5 ? C.red : slDist < 1.5 ? C.amber : C.green }}>{slDist.toFixed(2)}%</div>
-                        <MiniBar value={Math.min(slDist, 5)} max={5} color={slDist < 1 ? C.red : slDist < 2 ? C.amber : C.green} />
+                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 4 }}>SL Distance</div>
+                        <Mono size={11} color={slDist < 0.5 ? T.red : slDist < 1.5 ? T.amber : T.green}>{slDist.toFixed(2)}%</Mono>
+                        <div style={{ marginTop: 4 }}><ProgressBar value={Math.min(slDist, 5)} max={5} color={slDist < 1 ? T.red : T.amber} /></div>
                       </>
-                    ) : <span style={{ fontSize: 10, color: C.textMuted }}>No SL</span>}
+                    ) : <span style={{ fontSize: 10, color: T.textMuted }}>No SL</span>}
                   </div>
                   <div>
                     {p.target ? (
                       <>
-                        <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>Target</div>
-                        <div style={{ fontFamily: "monospace", fontSize: 11, color: C.cyan }}>₹{Number(p.target).toFixed(0)}</div>
+                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>Target</div>
+                        <Mono size={11} color={T.accent}>₹{Number(p.target).toFixed(0)}</Mono>
                       </>
-                    ) : <span style={{ fontSize: 10, color: C.textMuted }}>—</span>}
+                    ) : <Mono size={10} color={T.textMuted}>—</Mono>}
                   </div>
-                  <div style={{ width: "100%", opacity: 0.85 }}>
-                    <Sparkline data={series.length ? series : [avg, ltp]} color={isUp ? C.green : C.red} height={38} />
-                  </div>
+                  <Sparkline data={series.length ? series : [avg, ltp]} color={isUp ? T.green : T.red} height={36} />
                 </div>
               )}
             </div>
@@ -495,60 +512,116 @@ const PositionSparklinePanel = ({ positions, tickHistory, prevTicks }) => {
       </div>
     </Card>
   );
-};
+}
 
-// 4. AI CONFIDENCE TIMELINE
-const ConfidenceTimelinePanel = ({ decisions }) => {
+// 4. SL/Target Tracker
+function SLTrackerPanel({ positions, ticks, T }) {
+  const { isMobile } = useBreakpoint();
+  const items = useMemo(() => (positions || []).map(p => {
+    const ltp = tickPrice(ticks?.[p.symbol]) || Number(p.ltp || 0);
+    const sl = Number(p.stop_loss || p.current_sl || 0);
+    const entry = Number(p.avg || p.entry_price || 0);
+    const target = Number(p.target || 0);
+    const slDist = sl && ltp ? Math.abs(((ltp - sl) / ltp) * 100) : null;
+    const targetDist = target && ltp ? Math.abs(((target - ltp) / ltp) * 100) : null;
+    const progress = (entry && target && ltp && entry !== target)
+      ? Math.max(0, Math.min(100, ((ltp - entry) / (target - entry)) * 100)) : 0;
+    return { ...p, ltp, sl, entry, target, slDist, targetDist, progress };
+  }), [positions, ticks]);
+
+  return (
+    <Card T={T}>
+      <CardHeader T={T} title="SL / Target Tracker" subtitle="Stop-loss status · trailing stops · target proximity" />
+      <div style={{ padding: "12px 16px" }}>
+        {items.map((p, i) => (
+          <div key={i} style={{ marginBottom: 12, padding: "12px 14px", background: T.bg, borderRadius: 7, border: `1px solid ${T.border}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontWeight: 800, fontSize: 12, color: T.text }}>{p.symbol}</span>
+                <Pill label={p.side || "BUY"} color={(p.side || "") === "SELL" ? T.red : T.green} T={T} />
+              </div>
+              <Mono size={13} color={T.text} weight={700}>₹{p.ltp.toFixed(0)}</Mono>
+            </div>
+            <div style={{ position: "relative", height: 8, background: T.border, borderRadius: 4, margin: "0 0 12px", overflow: "visible" }}>
+              <div style={{ position: "absolute", left: 0, width: `${p.progress}%`, height: "100%", background: `linear-gradient(90deg, ${T.accent}50, ${T.accent})`, borderRadius: 4 }} />
+              <div style={{ position: "absolute", left: "4%", top: -4, height: 16, width: 1.5, background: T.red, opacity: 0.7 }} />
+              <div style={{ position: "absolute", right: "4%", top: -4, height: 16, width: 1.5, background: T.green, opacity: 0.7 }} />
+              <div style={{ position: "absolute", left: `${p.progress}%`, top: -5, transform: "translateX(-50%)", width: 14, height: 14, background: T.accent, borderRadius: "50%", border: `2px solid ${T.card}`, boxShadow: `0 0 0 2px ${T.accent}40` }} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 8 }}>
+              {[
+                { label: "Entry", v: `₹${p.entry.toFixed(0)}`, c: T.textSub },
+                { label: "Stop Loss", v: p.sl ? `₹${p.sl.toFixed(0)}` : "—", c: T.red, sub: p.slDist ? `${p.slDist.toFixed(1)}% away` : null },
+                { label: "Target", v: p.target ? `₹${p.target.toFixed(0)}` : "—", c: T.green, sub: p.targetDist ? `${p.targetDist.toFixed(1)}% away` : null },
+                { label: "Progress", v: `${p.progress.toFixed(0)}%`, c: p.progress > 50 ? T.green : T.amber },
+              ].map(it => (
+                <div key={it.label}>
+                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 3 }}>{it.label}</div>
+                  <Mono size={11} color={it.c} weight={700}>{it.v}</Mono>
+                  {it.sub && <div style={{ fontSize: 9, color: T.textMuted, marginTop: 1 }}>{it.sub}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        {!items.length && <div style={{ fontSize: 12, color: T.textMuted, padding: "24px 0" }}>No tracked positions</div>}
+      </div>
+    </Card>
+  );
+}
+
+// 5. AI Confidence Timeline
+function AITimelinePanel({ decisions, T }) {
   const { isMobile } = useBreakpoint();
   const chartData = useMemo(() => {
-    const all = decisions || [];
-    return all.slice(-30).map((d, i) => ({
-      time: d.timestamp ? new Date(d.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : `T-${all.length - i}`,
+    return (decisions || []).slice(-30).map((d, i, arr) => ({
+      time: d.timestamp ? new Date(d.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : `T-${arr.length - i}`,
       confidence: Math.round(((d.signals || [])[0]?.confidence || 0.5) * 100),
-      signals: d.signals_generated || 0,
       latency: d.latency_ms || 0,
-      regime: d.market_regime || "unknown",
     }));
   }, [decisions]);
 
   if (!chartData.length) return (
-    <Card>
-      <SectionHeader title="AI Confidence Timeline" sub="Signal quality over time" />
-      <div style={{ padding: "40px 18px", textAlign: "center", color: C.textMuted, fontSize: 12 }}>No decision history yet</div>
+    <Card T={T}>
+      <CardHeader T={T} title="AI Confidence Timeline" subtitle="Signal quality over time" />
+      <div style={{ padding: "48px 16px", textAlign: "center", color: T.textMuted, fontSize: 12 }}>No decision history yet</div>
     </Card>
   );
 
   return (
-    <Card>
-      <SectionHeader title="AI Confidence Timeline" sub="Signal confidence & latency per cycle" />
-      <div style={{ padding: "14px 18px" }}>
-        <ResponsiveContainer width="100%" height={isMobile ? 160 : 180}>
+    <Card T={T}>
+      <CardHeader T={T} title="AI Confidence Timeline" subtitle="Signal confidence & latency per cycle" />
+      <div style={{ padding: "14px 16px" }}>
+        <ResponsiveContainer width="100%" height={isMobile ? 150 : 180}>
           <ComposedChart data={chartData} margin={{ left: isMobile ? -10 : 0, right: isMobile ? -10 : 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-            <XAxis dataKey="time" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} interval={isMobile ? 6 : 4} />
-            <YAxis yAxisId="conf" domain={[0, 100]} tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={isMobile ? 32 : 40} />
-            <YAxis yAxisId="lat" orientation="right" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `${v}ms`} width={isMobile ? 36 : 44} />
-            <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
-              formatter={(v, n) => [n === "confidence" ? `${v}%` : n === "latency" ? `${v}ms` : v, n]} />
-            <ReferenceLine yAxisId="conf" y={65} stroke={C.amber} strokeDasharray="4 2" strokeWidth={1} />
-            <Bar yAxisId="conf" dataKey="confidence" fill={C.cyan} opacity={0.2} radius={[2, 2, 0, 0]} />
-            <Line yAxisId="conf" type="monotone" dataKey="confidence" stroke={C.cyan} strokeWidth={2} dot={false} />
-            <Line yAxisId="lat" type="monotone" dataKey="latency" stroke={C.purple} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
+            <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
+            <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} interval={isMobile ? 6 : 4} />
+            <YAxis yAxisId="c" domain={[0, 100]} tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={isMobile ? 30 : 38} />
+            <YAxis yAxisId="l" orientation="right" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `${v}ms`} width={isMobile ? 34 : 42} />
+            <Tooltip {...tooltipStyle(T)} formatter={(v, n) => [n === "confidence" ? `${v}%` : `${v}ms`, n]} />
+            <ReferenceLine yAxisId="c" y={65} stroke={T.amber} strokeDasharray="4 2" strokeWidth={1} opacity={0.6} />
+            <Bar yAxisId="c" dataKey="confidence" fill={T.accent} opacity={0.15} radius={[2, 2, 0, 0]} />
+            <Line yAxisId="c" type="monotone" dataKey="confidence" stroke={T.accent} strokeWidth={2} dot={false} />
+            <Line yAxisId="l" type="monotone" dataKey="latency" stroke={T.purple} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
           </ComposedChart>
         </ResponsiveContainer>
-        <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 12, height: 2, background: C.cyan, display: "inline-block" }} /><span style={{ fontSize: 10, color: C.textMuted }}>Confidence</span></div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 12, height: 2, background: C.purple, display: "inline-block" }} /><span style={{ fontSize: 10, color: C.textMuted }}>Latency</span></div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ width: 12, height: 2, background: C.amber, borderStyle: "dashed", borderWidth: 1, display: "inline-block" }} /><span style={{ fontSize: 10, color: C.textMuted }}>65% threshold</span></div>
+        <div style={{ display: "flex", gap: 16, marginTop: 10, flexWrap: "wrap" }}>
+          {[{ label: "Confidence", c: T.accent }, { label: "Latency (ms)", c: T.purple }, { label: "65% threshold", c: T.amber }].map(l => (
+            <div key={l.label} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+              <div style={{ width: 14, height: 2, background: l.c }} />
+              <span style={{ fontSize: 10, color: T.textMuted }}>{l.label}</span>
+            </div>
+          ))}
         </div>
       </div>
     </Card>
   );
-};
+}
 
-// 5. STRATEGY REVIEW PANEL
-const StrategyReviewPanel = ({ reviewData }) => {
+// 6. Strategy Review
+function StrategyReviewPanel({ reviewData, T }) {
   const { isMobile } = useBreakpoint();
+  const STRAT_C = STRATEGY_COLORS_FN(T);
   const review = reviewData || {
     strategy_weights: { momentum: 0.30, mean_reversion: 0.25, options_selling: 0.30, breakout: 0.15 },
     avoid_patterns: ["Avoid chasing breakouts in first 30 minutes", "Skip signals when VIX > 22"],
@@ -556,425 +629,331 @@ const StrategyReviewPanel = ({ reviewData }) => {
     overall_assessment: "Momentum and options selling strategies are performing best. Mean reversion needs tighter stops.",
     parameter_adjustments: { rsi_overbought: 72, confidence_threshold: 0.70 },
   };
-
   const weights = review.strategy_weights || {};
-  const maxWeight = Math.max(...Object.values(weights));
+  const maxW = Math.max(...Object.values(weights));
 
   return (
-    <Card>
-      <SectionHeader title="AI Strategy Review" sub="Latest performance review & parameter adjustments" right={
-        tag("auto-updated", C.green)
-      } />
-      <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
+    <Card T={T}>
+      <CardHeader T={T} title="AI Strategy Review" subtitle="Performance review & parameter adjustments"
+        right={<Pill label="auto-updated" color={T.green} T={T} />}
+      />
+      <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
         <div>
-          <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: 1, marginBottom: 10 }}>STRATEGY WEIGHTS</div>
-          {Object.entries(weights).map(([strategy, weight]) => (
-            <div key={strategy} style={{ marginBottom: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                <span style={{ fontSize: 11, color: C.text, textTransform: "capitalize" }}>{strategy.replace(/_/g, " ")}</span>
-                <span style={{ fontSize: 11, fontFamily: "monospace", color: STRATEGY_COLORS[strategy] || C.cyan }}>{(weight * 100).toFixed(0)}%</span>
+          <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, marginBottom: 12, textTransform: "uppercase", fontWeight: 700 }}>Strategy Weights</div>
+          {Object.entries(weights).map(([k, v]) => (
+            <div key={k} style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                <span style={{ fontSize: 11, color: T.text }}>{k.replace(/_/g, " ")}</span>
+                <Mono size={11} color={STRAT_C[k] || T.accent}>{(v * 100).toFixed(0)}%</Mono>
               </div>
-              <MiniBar value={weight} max={maxWeight} color={STRATEGY_COLORS[strategy] || C.cyan} />
+              <ProgressBar value={v} max={maxW} color={STRAT_C[k] || T.accent} height={4} />
             </div>
           ))}
-
-          <div style={{ marginTop: 14, padding: "10px 12px", background: C.bg, borderRadius: 6 }}>
-            <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 8, letterSpacing: 1 }}>PARAMETER ADJUSTMENTS</div>
+          <div style={{ marginTop: 14, padding: "10px 12px", background: T.bg, borderRadius: 6 }}>
+            <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, marginBottom: 8, textTransform: "uppercase" }}>Parameter Adjustments</div>
             {Object.entries(review.parameter_adjustments || {}).map(([k, v]) => (
-              <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                <span style={{ fontSize: 10, color: C.textMuted }}>{k.replace(/_/g, " ")}</span>
-                <span style={{ fontSize: 11, fontFamily: "monospace", color: C.cyan }}>{v}</span>
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                <span style={{ fontSize: 10, color: T.textMuted }}>{k.replace(/_/g, " ")}</span>
+                <Mono size={10.5} color={T.accent}>{v}</Mono>
               </div>
             ))}
           </div>
         </div>
-
         <div>
-          <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: 1, marginBottom: 8 }}>ASSESSMENT</div>
-          <div style={{ fontSize: 11, color: C.text, lineHeight: 1.7, padding: "10px 12px", background: C.bg, borderRadius: 6, marginBottom: 12 }}>
-            {review.overall_assessment}
-          </div>
-
+          <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, marginBottom: 8, textTransform: "uppercase" }}>Assessment</div>
+          <p style={{ fontSize: 11, color: T.textSub, lineHeight: 1.7, padding: "10px 12px", background: T.bg, borderRadius: 6, marginBottom: 12 }}>{review.overall_assessment}</p>
           <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 10, color: C.green, letterSpacing: 1, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
-              <CheckCircle size={10} /> FOCUS PATTERNS
+            <div style={{ fontSize: 9, color: T.green, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "flex", gap: 5, alignItems: "center" }}>
+              <CheckCircle size={9} /> Focus Patterns
             </div>
             {(review.focus_patterns || []).map((p, i) => (
-              <div key={i} style={{ fontSize: 10, color: C.textMuted, padding: "5px 10px", background: `${C.green}08`, borderLeft: `2px solid ${C.green}40`, borderRadius: 3, marginBottom: 4 }}>{p}</div>
+              <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "5px 10px", background: T.greenDim, borderLeft: `2px solid ${T.green}50`, borderRadius: 3, marginBottom: 4 }}>{p}</div>
             ))}
           </div>
-
           <div>
-            <div style={{ fontSize: 10, color: C.red, letterSpacing: 1, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
-              <XCircle size={10} /> AVOID PATTERNS
+            <div style={{ fontSize: 9, color: T.red, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "flex", gap: 5, alignItems: "center" }}>
+              <XCircle size={9} /> Avoid Patterns
             </div>
             {(review.avoid_patterns || []).map((p, i) => (
-              <div key={i} style={{ fontSize: 10, color: C.textMuted, padding: "5px 10px", background: `${C.red}08`, borderLeft: `2px solid ${C.red}40`, borderRadius: 3, marginBottom: 4 }}>{p}</div>
+              <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "5px 10px", background: T.redDim, borderLeft: `2px solid ${T.red}50`, borderRadius: 3, marginBottom: 4 }}>{p}</div>
             ))}
           </div>
         </div>
       </div>
     </Card>
   );
-};
+}
 
-// 6. MODEL FALLBACK INDICATOR
-const ModelFallbackPanel = ({ decisions }) => {
+// 7. Model Performance
+function ModelPerformancePanel({ decisions, T }) {
   const { isMobile } = useBreakpoint();
   const stats = useMemo(() => {
     const all = decisions || [];
-    const counts = {};
-    const latencies = {};
+    const counts = {}, lats = {};
     all.forEach(d => {
       const m = d.model_used || "unknown";
       counts[m] = (counts[m] || 0) + 1;
-      if (!latencies[m]) latencies[m] = [];
-      if (d.latency_ms) latencies[m].push(d.latency_ms);
+      if (!lats[m]) lats[m] = [];
+      if (d.latency_ms) lats[m].push(d.latency_ms);
     });
     return Object.entries(counts).map(([model, count]) => ({
       model: model.replace("gemini-", "").replace("-preview", "").replace("-latest", ""),
-      fullModel: model,
-      count,
-      pct: all.length ? Math.round((count / all.length) * 100) : 0,
-      avgLatency: latencies[model]?.length ? Math.round(latencies[model].reduce((a, b) => a + b, 0) / latencies[model].length) : 0,
+      count, pct: all.length ? Math.round((count / all.length) * 100) : 0,
+      avgLatency: lats[model]?.length ? Math.round(lats[model].reduce((a, b) => a + b, 0) / lats[model].length) : 0,
       isFallback: model !== (all[0]?.model_requested || model),
     })).sort((a, b) => b.count - a.count);
   }, [decisions]);
 
-  const primary = stats[0];
-  const fallbacks = stats.slice(1);
-  const fallbackRate = stats.length > 1 ? fallbacks.reduce((s, x) => s + x.pct, 0) : 0;
-
-  const displayStats = stats.length === 0 ? [
+  const display = stats.length ? stats : [
     { model: "2.5-flash", pct: 82, isFallback: false, avgLatency: 1240 },
     { model: "2.0-flash", pct: 12, isFallback: true, avgLatency: 890 },
     { model: "2.5-flash-lite", pct: 4, isFallback: true, avgLatency: 640 },
     { model: "2.0-flash-lite", pct: 2, isFallback: true, avgLatency: 410 },
-  ] : stats;
-
-  return (
-    <Card>
-      <SectionHeader title="Model Performance" sub="Gemini model usage & fallback tracking" right={
-        fallbackRate > 0 ? tag(`${fallbackRate}% fallback`, C.amber) : tag("100% primary", C.green)
-      } />
-      <div style={{ padding: "14px 18px" }}>
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2,1fr)", gap: 10 }}>
-          {displayStats.map(m => (
-            <div key={m.model} style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", border: `1px solid ${m.isFallback ? C.amber + "30" : C.green + "30"}` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 4 }}>
-                <span style={{ fontSize: 10, fontWeight: 700, fontFamily: "monospace" }}>gemini-{m.model}</span>
-                {tag(m.isFallback ? "fallback" : "primary", m.isFallback ? C.amber : C.green)}
-              </div>
-              <MiniBar value={m.pct} max={100} color={m.isFallback ? C.amber : C.green} />
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                <span style={{ fontSize: 10, color: C.textMuted }}>{m.pct}% of calls</span>
-                <span style={{ fontSize: 10, color: C.textMuted }}>{m.avgLatency}ms avg</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </Card>
-  );
-};
-
-// 7. KILL SWITCH HISTORY
-const KillSwitchHistoryPanel = ({ risk, riskEvents }) => {
-  const daily_pnl_pct = risk?.daily_pnl_pct || 0;
-  const drawdown = risk?.drawdown_pct || 0;
-  const killSwitch = risk?.kill_switch;
-  const dailyLossLimit = 2.0;
-  const drawdownLimit = 8.0;
-  const events = (riskEvents?.events || []).filter(e => e.type?.includes("KILL") || e.type?.includes("STOP") || e.severity === "CRITICAL");
-
-  const gaugeData = [
-    { label: "Daily Loss", value: Math.abs(Math.min(0, daily_pnl_pct)), max: dailyLossLimit, color: C.red },
-    { label: "Drawdown", value: drawdown, max: drawdownLimit, color: C.amber },
   ];
+  const fallbackRate = display.filter(m => m.isFallback).reduce((s, x) => s + x.pct, 0);
 
   return (
-    <Card>
-      <SectionHeader title="Kill Switch Monitor" sub="Live safety gauges & trigger history" right={
-        killSwitch ? tag("TRIGGERED", C.red) : tag("SAFE", C.green)
-      } />
-      <div style={{ padding: "14px 18px" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12, marginBottom: 14 }}>
-          {gaugeData.map(g => {
-            const pct = Math.min((g.value / g.max) * 100, 100);
-            return (
-              <div key={g.label} style={{ background: C.bg, borderRadius: 8, padding: "12px 14px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 4 }}>
-                  <span style={{ fontSize: 10, color: C.textMuted }}>{g.label}</span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: pct > 75 ? g.color : C.text }}>{g.value.toFixed(2)}% / {g.max}%</span>
-                </div>
-                <div style={{ position: "relative", height: 8, background: C.border, borderRadius: 4 }}>
-                  <div style={{ position: "absolute", width: `${pct}%`, height: "100%", background: `linear-gradient(90deg, ${g.color}88, ${g.color})`, borderRadius: 4, transition: "width .4s", boxShadow: pct > 75 ? `0 0 8px ${g.color}` : "none" }} />
-                  <div style={{ position: "absolute", left: "75%", top: 0, height: "100%", width: 1, background: C.border }} />
-                </div>
-                <div style={{ fontSize: 9, color: C.textMuted, marginTop: 4 }}>Trigger at {g.max}% — {(g.max - g.value).toFixed(2)}% remaining</div>
-              </div>
-            );
-          })}
-        </div>
-
-        <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: 1, marginBottom: 8 }}>RECENT RISK EVENTS</div>
-        {events.length === 0 ? (
-          <div style={{ fontSize: 11, color: C.textMuted, padding: "12px 0" }}>No critical events today — system operating normally</div>
-        ) : events.slice(0, 5).map((e, i) => (
-          <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "8px 10px", background: C.bg, borderRadius: 6, marginBottom: 4, borderLeft: `2px solid ${C.red}`, flexWrap: "wrap" }}>
-            <AlertTriangle size={11} color={C.red} style={{ flexShrink: 0, marginTop: 2 }} />
-            <span style={{ fontSize: 10, fontFamily: "monospace", color: C.textMuted, whiteSpace: "nowrap" }}>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString("en-IN") : "—"}</span>
-            <span style={{ fontSize: 11, color: C.text, flex: 1, wordBreak: "break-word", minWidth: 120 }}>{e.description || e.message}</span>
-            {tag(e.severity || "CRITICAL", C.red)}
+    <Card T={T}>
+      <CardHeader T={T} title="Model Performance" subtitle="Gemini usage & fallback tracking"
+        right={<Pill label={fallbackRate > 0 ? `${fallbackRate}% fallback` : "100% primary"} color={fallbackRate > 0 ? T.amber : T.green} T={T} />}
+      />
+      <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2,1fr)", gap: 10 }}>
+        {display.map(m => (
+          <div key={m.model} style={{ background: T.bg, borderRadius: 7, padding: "12px 14px", border: `1px solid ${(m.isFallback ? T.amber : T.green) + "30"}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, alignItems: "center" }}>
+              <Mono size={10.5} color={T.text} weight={700}>gemini-{m.model}</Mono>
+              <Pill label={m.isFallback ? "fallback" : "primary"} color={m.isFallback ? T.amber : T.green} T={T} />
+            </div>
+            <ProgressBar value={m.pct} max={100} color={m.isFallback ? T.amber : T.accent} height={4} />
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 7 }}>
+              <span style={{ fontSize: 10, color: T.textMuted }}>{m.pct}% calls</span>
+              <span style={{ fontSize: 10, color: T.textMuted }}>{m.avgLatency}ms avg</span>
+            </div>
           </div>
         ))}
       </div>
     </Card>
   );
-};
+}
 
-// 8. ORDER EXECUTION QUEUE
-const ExecutionQueuePanel = ({ orders }) => {
+// 8. Kill Switch
+function KillSwitchPanel({ risk, riskEvents, T, onReset }) {
+  const daily_pnl_pct = risk?.daily_pnl_pct || 0;
+  const drawdown = risk?.drawdown_pct || 0;
+  const killSwitch = risk?.kill_switch;
+  const events = (riskEvents?.events || []).filter(e => e.type?.includes("KILL") || e.type?.includes("STOP") || e.severity === "CRITICAL");
+
+  return (
+    <Card T={T}>
+      <CardHeader T={T} title="Kill Switch Monitor" subtitle="Safety gauges & trigger history"
+        right={
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <Pill label={killSwitch ? "TRIGGERED" : "SAFE"} color={killSwitch ? T.red : T.green} T={T} />
+            {killSwitch && (
+              <button onClick={onReset} style={{ background: T.redDim, border: `1px solid ${T.red}40`, borderRadius: 5, padding: "4px 8px", cursor: "pointer", fontSize: 10, color: T.red, fontWeight: 700 }}>RESET</button>
+            )}
+          </div>
+        }
+      />
+      <div style={{ padding: "14px 16px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 14 }}>
+          {[
+            { label: "Daily Loss", value: Math.abs(Math.min(0, daily_pnl_pct)), max: 2.0, color: T.red },
+            { label: "Drawdown", value: drawdown, max: 8.0, color: T.amber },
+          ].map(g => {
+            const pct = Math.min((g.value / g.max) * 100, 100);
+            return (
+              <div key={g.label} style={{ background: T.bg, borderRadius: 7, padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                  <span style={{ fontSize: 10, color: T.textMuted }}>{g.label}</span>
+                  <Mono size={11} color={pct > 75 ? g.color : T.text}>{g.value.toFixed(2)}% / {g.max}%</Mono>
+                </div>
+                <div style={{ position: "relative", height: 10, background: T.border, borderRadius: 5 }}>
+                  <div style={{ position: "absolute", width: `${pct}%`, height: "100%", background: `linear-gradient(90deg, ${g.color}80, ${g.color})`, borderRadius: 5, boxShadow: pct > 75 ? `0 0 8px ${g.color}60` : "none" }} />
+                  <div style={{ position: "absolute", left: "75%", top: 0, height: "100%", width: 1, background: T.textDim }} />
+                </div>
+                <div style={{ fontSize: 9, color: T.textMuted, marginTop: 5 }}>{(g.max - g.value).toFixed(2)}% remaining to trigger</div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Recent Risk Events</div>
+        {events.length === 0 ? (
+          <div style={{ fontSize: 11, color: T.textMuted, padding: "12px 0" }}>No critical events — system operating normally</div>
+        ) : events.slice(0, 5).map((e, i) => (
+          <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 10px", background: T.bg, borderRadius: 5, marginBottom: 4, borderLeft: `2px solid ${T.red}` }}>
+            <AlertTriangle size={11} color={T.red} style={{ marginTop: 1, flexShrink: 0 }} />
+            <Mono size={9.5} color={T.textMuted}>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString("en-IN") : "—"}</Mono>
+            <span style={{ fontSize: 11, color: T.textSub, flex: 1 }}>{e.description || e.message}</span>
+            <Pill label={e.severity || "CRITICAL"} color={T.red} T={T} />
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// 9. Execution Queue
+function ExecutionQueuePanel({ orders, T }) {
   const { isMobile } = useBreakpoint();
   const pending = (orders || []).filter(o => ["PENDING", "OPEN", "TRIGGER PENDING"].includes((o.status || "").toUpperCase()));
   const recent = (orders || []).filter(o => ["COMPLETE", "FILLED"].includes((o.status || "").toUpperCase())).slice(0, 8);
 
   return (
-    <Card>
-      <SectionHeader title="Execution Queue" sub="Pending orders & recent fills" right={
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {pending.length > 0 && <span style={{ fontSize: 11, color: C.amber, fontFamily: "monospace" }}>{pending.length} pending</span>}
-          {tag("live", C.green)}
-        </div>
-      } />
-      <div style={{ padding: "10px 18px 14px" }}>
+    <Card T={T}>
+      <CardHeader T={T} title="Execution Queue" subtitle="Pending orders & recent fills"
+        right={
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {pending.length > 0 && <Pill label={`${pending.length} pending`} color={T.amber} T={T} />}
+            <Pill label="live" color={T.green} T={T} />
+          </div>
+        }
+      />
+      <div style={{ padding: "10px 16px 14px" }}>
         {pending.length > 0 && (
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 10, color: C.amber, letterSpacing: 1, marginBottom: 6 }}>PENDING ORDERS</div>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Pending</div>
             {pending.map((o, i) => {
               const age = o.placed_at ? Math.round((Date.now() - new Date(o.placed_at).getTime()) / 1000) : 0;
               return (
-                <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "9px 12px", background: C.bg, borderRadius: 6, marginBottom: 4, border: `1px solid ${C.amber}20`, flexWrap: "wrap" }}>
-                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.amber, animation: "pulseDot 1.5s infinite", flexShrink: 0, marginTop: 4 }} />
-                  <span style={{ fontWeight: 700, fontSize: 11, minWidth: isMobile ? 60 : 70 }}>{o.symbol}</span>
-                  {tag(o.side, o.side === "BUY" ? C.green : C.red)}
-                  <span style={{ fontFamily: "monospace", fontSize: 10, color: C.textMuted, wordBreak: "break-word" }}>{o.quantity} @ {o.price ? `₹${o.price}` : `₹${o.trigger_price} TRIGGER`}</span>
-                  {tag(o.order_type || "LIMIT", C.blue)}
-                  <span style={{ marginLeft: "auto", fontSize: 10, color: C.textMuted }}>{age}s ago</span>
-                  {tag(o.tag || "—", C.textMuted)}
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "9px 12px", background: T.bg, borderRadius: 6, marginBottom: 4, border: `1px solid ${T.amber}20`, flexWrap: "wrap" }}>
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.amber, flexShrink: 0, animation: "pulse 1.5s infinite" }} />
+                  <span style={{ fontWeight: 800, fontSize: 11, color: T.text, minWidth: 70 }}>{o.symbol}</span>
+                  <Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} />
+                  <Mono size={10} color={T.textSub}>{o.quantity} @ {o.price ? `₹${o.price}` : `₹${o.trigger_price} TRG`}</Mono>
+                  <Pill label={o.order_type || "LIMIT"} color={T.blue} T={T} />
+                  <span style={{ marginLeft: "auto", fontSize: 10, color: T.textMuted }}>{age}s</span>
                 </div>
               );
             })}
           </div>
         )}
-
-        <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: 1, marginBottom: 6 }}>RECENT FILLS</div>
-        {(recent.length ? recent : []).slice(0, 5).map((o, i) => {
-          const slippage = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
+        <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Recent Fills</div>
+        {recent.slice(0, 5).map((o, i) => {
+          const slip = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
           return (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 12px", background: C.bg, borderRadius: 6, marginBottom: 3, flexWrap: "wrap" }}>
-              <CheckCircle size={11} color={C.green} style={{ flexShrink: 0, marginTop: 2 }} />
-              <span style={{ fontWeight: 700, fontSize: 11, minWidth: isMobile ? 60 : 70 }}>{o.symbol}</span>
-              {tag(o.side, o.side === "BUY" ? C.green : C.red)}
-              <span style={{ fontFamily: "monospace", fontSize: 10, color: C.textMuted }}>{o.quantity}</span>
-              <span style={{ fontFamily: "monospace", fontSize: 10, color: C.text }}>
-                ₹{o.average_price?.toLocaleString("en-IN") || o.price?.toLocaleString("en-IN") || "MKT"}
-              </span>
-              {slippage !== null && (
-                <span style={{ fontSize: 10, color: Math.abs(slippage) > 0.1 ? C.amber : C.green, fontFamily: "monospace" }}>
-                  {slippage >= 0 ? "+" : ""}{slippage.toFixed(3)}% slip
-                </span>
-              )}
-              <span style={{ marginLeft: "auto", fontSize: 9, color: C.textMuted }}>
-                {o.placed_at ? new Date(o.placed_at).toLocaleTimeString("en-IN") : "—"}
-              </span>
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 12px", background: T.bg, borderRadius: 5, marginBottom: 3, flexWrap: "wrap" }}>
+              <CheckCircle size={10} color={T.green} />
+              <span style={{ fontWeight: 800, fontSize: 11, color: T.text, minWidth: 70 }}>{o.symbol}</span>
+              <Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} />
+              <Mono size={10} color={T.text}>₹{o.average_price?.toLocaleString("en-IN") || o.price?.toLocaleString("en-IN") || "MKT"}</Mono>
+              {slip !== null && <Mono size={10} color={Math.abs(slip) > 0.1 ? T.amber : T.green}>{slip >= 0 ? "+" : ""}{slip.toFixed(3)}% slip</Mono>}
+              <span style={{ marginLeft: "auto", fontSize: 9, color: T.textMuted }}>{o.placed_at ? new Date(o.placed_at).toLocaleTimeString("en-IN") : "—"}</span>
             </div>
           );
         })}
-        {recent.length === 0 && (
-          <div style={{ fontSize: 11, color: C.textMuted, paddingTop: 4 }}>No fills yet today</div>
-        )}
+        {!recent.length && <div style={{ fontSize: 11, color: T.textMuted, paddingTop: 4 }}>No fills today</div>}
       </div>
     </Card>
   );
-};
+}
 
-// 9. SL ORDER STATUS PANEL
-const SLOrderStatusPanel = ({ positions, ticks }) => {
-  const { isMobile } = useBreakpoint();
-  const items = useMemo(() => {
-    return (positions || []).map(p => {
-      const ltp = tickPrice(ticks?.[p.symbol]) || Number(p.ltp || 0);
-      const sl = Number(p.stop_loss || p.current_sl || 0);
-      const entry = Number(p.avg || p.entry_price || 0);
-      const target = Number(p.target || 0);
-      const side = (p.side || "BUY").toUpperCase();
-      const slDist = sl && ltp ? Math.abs(((ltp - sl) / ltp) * 100) : null;
-      const targetDist = target && ltp ? Math.abs(((target - ltp) / ltp) * 100) : null;
-      const progressToTarget = (entry && target && ltp && entry !== target)
-        ? Math.max(0, Math.min(100, ((ltp - entry) / (target - entry)) * 100))
-        : 0;
-      return { ...p, ltp, sl, entry, target, slDist, targetDist, progressToTarget, side };
-    });
-  }, [positions, ticks]);
-
-  return (
-    <Card>
-      <SectionHeader title="SL / Target Tracker" sub="Stop-loss status, trailing stops, target proximity" />
-      <div style={{ padding: "10px 18px 14px" }}>
-        {items.map((p, i) => (
-          <div key={i} style={{ marginBottom: 14, padding: "12px 14px", background: C.bg, borderRadius: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ fontWeight: 800, fontSize: 12 }}>{p.symbol}</span>
-                {tag(p.side, p.side === "BUY" ? C.green : C.red)}
-              </div>
-              <span style={{ fontFamily: "monospace", fontSize: 12, fontWeight: 700 }}>₹{p.ltp.toFixed(0)}</span>
-            </div>
-
-            <div style={{ position: "relative", height: 14, background: C.border, borderRadius: 7, marginBottom: 8, overflow: "visible" }}>
-              <div style={{ position: "absolute", left: 0, width: `${p.progressToTarget}%`, height: "100%", background: `linear-gradient(90deg, ${C.green}60, ${C.green})`, borderRadius: 7, transition: "width .5s" }} />
-              <div style={{ position: "absolute", left: "5%", top: -3, height: 20, width: 2, background: C.red }} title={`SL: ₹${p.sl}`} />
-              <div style={{ position: "absolute", right: "5%", top: -3, height: 20, width: 2, background: C.green }} title={`Target: ₹${p.target}`} />
-              <div style={{ position: "absolute", left: `${p.progressToTarget}%`, top: -5, transform: "translateX(-50%)", width: 10, height: 10, background: C.cyan, borderRadius: "50%", border: "2px solid #060b14", boxShadow: `0 0 6px ${C.cyan}` }} />
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 8 }}>
-              {[
-                { label: "Entry", value: `₹${p.entry.toFixed(0)}`, color: C.textMuted },
-                { label: "Stop Loss", value: p.sl ? `₹${p.sl.toFixed(0)}` : "—", color: C.red, sub: p.slDist ? `${p.slDist.toFixed(1)}% away` : null },
-                { label: "Target", value: p.target ? `₹${p.target.toFixed(0)}` : "—", color: C.green, sub: p.targetDist ? `${p.targetDist.toFixed(1)}% away` : null },
-                { label: "Progress", value: `${p.progressToTarget.toFixed(0)}%`, color: p.progressToTarget > 50 ? C.green : C.amber },
-              ].map(item => (
-                <div key={item.label}>
-                  <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3 }}>{item.label}</div>
-                  <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "monospace", color: item.color }}>{item.value}</div>
-                  {item.sub && <div style={{ fontSize: 9, color: C.textMuted }}>{item.sub}</div>}
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-        {items.length === 0 && <div style={{ fontSize: 12, color: C.textMuted, padding: "20px 0" }}>No tracked positions</div>}
-      </div>
-    </Card>
-  );
-};
-
-// 10. INTRADAY CANDLESTICK CHART
-const IntradayChartPanel = ({ ticks, tickHistory }) => {
+// 10. Intraday Chart
+function IntradayChartPanel({ ticks, tickHistory, T }) {
   const { isMobile } = useBreakpoint();
   const [symbol, setSymbol] = useState("NIFTY");
   const symbols = ["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "TCS", "SBIN"];
-
   const chartData = useMemo(() => {
     const series = tickHistory?.[symbol] || [];
     if (series.length < 2) return [];
-    return series.map((v, i) => ({
-      time: `T-${series.length - i}`, open: v * 0.999, close: v, high: v * 1.001, low: v * 0.998, volume: Math.round(Math.random() * 50000),
-    }));
+    return series.map((v, i) => ({ time: `T-${series.length - i}`, open: v * 0.999, close: v, high: v * 1.001, low: v * 0.998, volume: Math.round(Math.random() * 50000) }));
   }, [symbol, tickHistory]);
-
-  const lastBar = chartData[chartData.length - 1];
-  const firstBar = chartData[0];
-  const dayChange = lastBar && firstBar ? ((lastBar.close - firstBar.open) / firstBar.open) * 100 : 0;
+  const dayChange = chartData.length > 1 ? ((chartData.at(-1).close - chartData[0].open) / chartData[0].open * 100) : 0;
+  const color = dayChange >= 0 ? T.green : T.red;
 
   return (
-    <Card>
-      <SectionHeader
-        title="Intraday Chart"
-        sub="15-min OHLCV with volume"
+    <Card T={T}>
+      <CardHeader T={T} title="Intraday Chart" subtitle="15-min OHLCV"
         right={
-          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", maxWidth: isMobile ? 200 : "none" }}>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
             {symbols.map(s => (
               <button key={s} onClick={() => setSymbol(s)} style={{
-                background: symbol === s ? `${C.cyan}20` : "transparent",
-                border: `1px solid ${symbol === s ? C.cyan : C.border}`,
-                borderRadius: 4, padding: "3px 6px", cursor: "pointer",
-                fontSize: 9, color: symbol === s ? C.cyan : C.textMuted, fontFamily: "monospace",
+                background: symbol === s ? `${T.accent}20` : "transparent",
+                border: `1px solid ${symbol === s ? T.accent : T.border}`,
+                borderRadius: 4, padding: "3px 7px", cursor: "pointer",
+                fontSize: 9.5, color: symbol === s ? T.accent : T.textMuted,
+                fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700,
+                transition: "all 0.15s",
               }}>{s}</button>
             ))}
           </div>
         }
       />
-      <div style={{ padding: "10px 18px 14px" }}>
-        <div style={{ display: "flex", gap: isMobile ? 10 : 20, marginBottom: 12, flexWrap: "wrap" }}>
-          {lastBar && [
-            { label: "Open", value: firstBar?.open.toFixed(2) },
-            { label: "High", value: Math.max(...chartData.map(d => d.high)).toFixed(2), color: C.green },
-            { label: "Low", value: Math.min(...chartData.map(d => d.low)).toFixed(2), color: C.red },
-            { label: "Last", value: lastBar.close.toFixed(2), color: dayChange >= 0 ? C.green : C.red },
-            { label: "Change", value: `${dayChange >= 0 ? "+" : ""}${dayChange.toFixed(2)}%`, color: dayChange >= 0 ? C.green : C.red },
-          ].map(item => (
-            <div key={item.label}>
-              <div style={{ fontSize: 9, color: C.textMuted }}>{item.label}</div>
-              <div style={{ fontSize: isMobile ? 11 : 12, fontFamily: "monospace", fontWeight: 700, color: item.color || C.text }}>
-                {item.value}
+      <div style={{ padding: "10px 16px 14px" }}>
+        {chartData.length > 0 && (
+          <div style={{ display: "flex", gap: isMobile ? 12 : 24, marginBottom: 12, flexWrap: "wrap" }}>
+            {[
+              { l: "Open", v: chartData[0]?.open.toFixed(2) },
+              { l: "High", v: Math.max(...chartData.map(d => d.high)).toFixed(2), c: T.green },
+              { l: "Low", v: Math.min(...chartData.map(d => d.low)).toFixed(2), c: T.red },
+              { l: "Last", v: chartData.at(-1)?.close.toFixed(2), c: color },
+              { l: "Change", v: `${dayChange >= 0 ? "+" : ""}${dayChange.toFixed(2)}%`, c: color },
+            ].map(it => (
+              <div key={it.l}>
+                <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>{it.l}</div>
+                <Mono size={12} color={it.c || T.text} weight={700}>{it.v}</Mono>
               </div>
-            </div>
-          ))}
-        </div>
-
+            ))}
+          </div>
+        )}
         {chartData.length === 0 ? (
-          <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.textMuted, background: C.bg, borderRadius: 6 }}>
-            No live intraday ticks for {symbol}
+          <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: T.textMuted, background: T.bg, borderRadius: 6 }}>
+            No live ticks for {symbol}
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={isMobile ? 160 : 200}>
-            <ComposedChart data={chartData} margin={{ top: 5, right: isMobile ? 0 : 5, bottom: 0, left: isMobile ? -10 : 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-              <XAxis dataKey="time" tick={{ fill: C.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} interval={8} />
-              <YAxis yAxisId="price" domain={["auto", "auto"]} tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v.toFixed(0)} width={isMobile ? 38 : 45} />
-              <YAxis yAxisId="vol" orientation="right" tick={{ fill: C.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} tickFormatter={v => `${(v / 1000).toFixed(0)}K`} width={isMobile ? 30 : 36} />
-              <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }}
-                formatter={(v, name) => [name === "volume" ? `${(v / 1000).toFixed(1)}K` : v.toFixed(2), name]} />
-              <Bar yAxisId="vol" dataKey="volume" fill={C.purple} opacity={0.25} radius={[1, 1, 0, 0]} />
-              <Line yAxisId="price" type="monotone" dataKey="close" stroke={dayChange >= 0 ? C.green : C.red} strokeWidth={2} dot={false} />
-              <Line yAxisId="price" type="monotone" dataKey="high" stroke={C.green} strokeWidth={0.5} dot={false} strokeDasharray="2 2" />
-              <Line yAxisId="price" type="monotone" dataKey="low" stroke={C.red} strokeWidth={0.5} dot={false} strokeDasharray="2 2" />
+          <ResponsiveContainer width="100%" height={isMobile ? 150 : 190}>
+            <ComposedChart data={chartData} margin={{ top: 5, right: isMobile ? -5 : 5, bottom: 0, left: isMobile ? -10 : 0 }}>
+              <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
+              <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} interval={8} />
+              <YAxis yAxisId="p" domain={["auto", "auto"]} tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v.toFixed(0)} width={isMobile ? 38 : 46} />
+              <YAxis yAxisId="v" orientation="right" tick={{ fill: T.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} tickFormatter={v => `${(v / 1000).toFixed(0)}K`} width={isMobile ? 28 : 34} />
+              <Tooltip {...tooltipStyle(T)} formatter={(v, n) => [n === "volume" ? `${(v / 1000).toFixed(1)}K` : v.toFixed(2), n]} />
+              <Bar yAxisId="v" dataKey="volume" fill={T.purple} opacity={0.2} radius={[1, 1, 0, 0]} />
+              <Line yAxisId="p" type="monotone" dataKey="close" stroke={color} strokeWidth={2} dot={false} />
+              <Line yAxisId="p" type="monotone" dataKey="high" stroke={T.green} strokeWidth={0.5} dot={false} strokeDasharray="2 3" opacity={0.5} />
+              <Line yAxisId="p" type="monotone" dataKey="low" stroke={T.red} strokeWidth={0.5} dot={false} strokeDasharray="2 3" opacity={0.5} />
             </ComposedChart>
           </ResponsiveContainer>
         )}
       </div>
     </Card>
   );
-};
+}
 
-// ─── MOBILE TAB BAR ───────────────────────────────────────────────────────────
+// ─── MOBILE BOTTOM TAB BAR ────────────────────────────────────────────────────
+function BottomNav({ tabs, active, onChange, T }) {
+  return (
+    <div style={{
+      position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
+      background: T.card, borderTop: `1px solid ${T.border}`,
+      display: "flex", overflowX: "auto", WebkitOverflowScrolling: "touch",
+      scrollbarWidth: "none", backdropFilter: "blur(20px)",
+    }}>
+      {tabs.map(tab => {
+        const Icon = tab.icon;
+        const isActive = active === tab.id;
+        return (
+          <button key={tab.id} onClick={() => onChange(tab.id)} style={{
+            flex: "0 0 auto", background: "none", border: "none", cursor: "pointer",
+            padding: "10px 14px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+            color: isActive ? T.accent : T.textMuted,
+            borderTop: `2px solid ${isActive ? T.accent : "transparent"}`,
+            minWidth: 54, transition: "color 0.15s",
+          }}>
+            <Icon size={14} />
+            <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.4, whiteSpace: "nowrap" }}>{tab.label.toUpperCase()}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
-const MobileTabBar = ({ tabs, activeTab, setActiveTab }) => (
-  <div style={{
-    position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
-    background: "rgba(10,16,32,0.97)", backdropFilter: "blur(20px)",
-    borderTop: `1px solid ${C.border}`,
-    display: "flex", overflowX: "auto",
-    WebkitOverflowScrolling: "touch",
-    scrollbarWidth: "none",
-  }}>
-    {tabs.map(tab => {
-      const Icon = tab.icon;
-      const isActive = activeTab === tab.id;
-      return (
-        <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
-          flex: "0 0 auto",
-          background: "none", border: "none", cursor: "pointer",
-          padding: "10px 14px",
-          display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
-          color: isActive ? C.cyan : C.textMuted,
-          borderTop: `2px solid ${isActive ? C.cyan : "transparent"}`,
-          minWidth: 56,
-        }}>
-          <Icon size={15} />
-          <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.5, whiteSpace: "nowrap" }}>{tab.label.toUpperCase()}</span>
-        </button>
-      );
-    })}
-  </div>
-);
-
-// ─── MAIN DASHBOARD ───────────────────────────────────────────────────────────
-
+// ─── MAIN DASHBOARD ──────────────────────────────────────────────────────────
 export default function TradingDashboard() {
+  const [isDark, setIsDark] = useState(true);
+  const T = isDark ? DARK : LIGHT;
+
   const { liveData, connected } = useWebSocket();
   const { isMobile, isTablet } = useBreakpoint();
   const [activeTab, setActiveTab] = useState("overview");
@@ -985,24 +964,22 @@ export default function TradingDashboard() {
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [engineRunning, setEngineRunning] = useState(false);
   const [startingEngine, setStartingEngine] = useState(false);
-  const [showAlerts, setShowAlerts] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [acknowledgedAlerts, setAcknowledgedAlerts] = useState([]);
   const [uiPrimarySelection, setUiPrimarySelection] = useState("dhan");
   const [brokerPrefMessage, setBrokerPrefMessage] = useState("");
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
   const [brokerFallbackEvents, setBrokerFallbackEvents] = useState([]);
   const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "" });
-  const [simBackfilling, setSimBackfilling] = useState(false);  
+  const [simBackfilling, setSimBackfilling] = useState(false);
   const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 100000, fee_pct: 0.0003, slippage_pct: 0.0005 });
-  
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
-  const { data: agentData, refetch: refetchAgent } = useAPI("/api/agent/in-memory-decisions", 5000);
+  const { data: agentData } = useAPI("/api/agent/in-memory-decisions", 5000);
   const { data: riskEvents } = useAPI("/api/risk/events?limit=20", 30000);
   const { data: dailyHistory } = useAPI("/api/analytics/daily-history?days=14", 300000);
   const { data: brokerPreferenceData, refetch: refetchBrokerPreference } = useAPI("/api/settings/broker-preference", 5000);
-  
+
   useEffect(() => {
     if (!liveData?.pnl) return;
     setLastUpdate(new Date());
@@ -1029,11 +1006,18 @@ export default function TradingDashboard() {
   }, [liveData?.ticks]);
 
   useEffect(() => {
-    const merged = [...(agentData?.agent_events || []), ...(liveData?.agent_events || [])]
-      .filter(e => e?.timestamp && e?.message);
+    const merged = [...(agentData?.agent_events || []), ...(liveData?.agent_events || [])].filter(e => e?.timestamp && e?.message);
     const seen = new Set();
     setEventTape(merged.filter(e => { const k = `${e.timestamp}-${e.message}`; return !seen.has(k) && seen.add(k); }).slice(-25));
   }, [liveData?.agent_events, agentData?.agent_events]);
+
+  useEffect(() => {
+    if (brokerPreferenceData?.ui_primary_broker) setUiPrimarySelection(brokerPreferenceData.ui_primary_broker);
+  }, [brokerPreferenceData?.ui_primary_broker]);
+
+  useEffect(() => {
+    if (liveData?.ui_primary_broker) setUiPrimarySelection(liveData.ui_primary_broker);
+  }, [liveData?.ui_primary_broker]);
 
   const pnl = liveData?.pnl || {};
   const risk = liveData?.risk || {};
@@ -1046,89 +1030,26 @@ export default function TradingDashboard() {
   const orders = ordersData?.orders || [];
   const killSwitch = risk.kill_switch;
   const latestDecision = agentDecisions[agentDecisions.length - 1];
-  const latestSignals = (latestDecision?.signals || latestDecision?.signals_raw || []).slice(0, 5);
-  const reasoningSignals = latestSignals;
-  const progressPct = Number(agentStatus?.progress_pct || 0);
-  const pnlColor = (pnl.total || 0) >= 0 ? C.green : C.red;
-
-  const replicationEnabled = Boolean(liveData?.replication_enabled);
-  const replicationStatus = liveData?.replication_status || "disabled";
-  const replicationError = liveData?.last_replication_error || "";
+  const latestSignals = (latestDecision?.signals || []).slice(0, 5);
+  const pnlColor = (pnl.total || 0) >= 0 ? T.green : T.red;
   const executionPrimaryBroker = (liveData?.primary_broker || "dhan").toUpperCase();
-  const uiPrimaryBroker = (liveData?.ui_primary_broker || liveData?.primary_broker || "dhan").toUpperCase();
-  const effectivePrimaryBroker = (liveData?.effective_primary_broker || liveData?.primary_broker || "dhan").toUpperCase();
-  const primaryOverrideActive = Boolean(liveData?.primary_override_active);
-  const primaryOverrideReason = liveData?.primary_override_reason || "";
   const replicaBroker = (liveData?.replica_broker || "zerodha").toUpperCase();
+  const replicationStatus = liveData?.replication_status || "disabled";
+  const replicationEnabled = Boolean(liveData?.replication_enabled);
+  const replicationError = liveData?.last_replication_error || "";
+  const primaryOverrideActive = Boolean(liveData?.primary_override_active);
+  const effectivePrimaryBroker = (liveData?.effective_primary_broker || liveData?.primary_broker || "dhan").toUpperCase();
+  const uiPrimaryBroker = (liveData?.ui_primary_broker || liveData?.primary_broker || "dhan").toUpperCase();
   const connectedBrokers = brokerPreferenceData?.connected_brokers || [];
-  const optionsSourceBroker = liveData?.options_chain?.NIFTY?.source_broker || liveData?.effective_primary_broker || "";
-  const watchlistSourceBroker = liveData?.watchlist?.[0]?.source_broker || liveData?.effective_primary_broker || "";
-
-
-  useEffect(() => {
-    const loadPreference = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/settings/broker-preference`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data?.ui_primary_broker) setUiPrimarySelection(data.ui_primary_broker);
-      } catch {}
-    };
-    loadPreference();
-  }, []);
-
-  useEffect(() => {
-    if (liveData?.ui_primary_broker) setUiPrimarySelection(liveData.ui_primary_broker);
-  }, [liveData?.ui_primary_broker]);
-
-  useEffect(() => {
-    if (!liveData?.timestamp) return;
-    if (!liveData?.primary_override_active) return;
-    setBrokerFallbackEvents(prev => {
-      const event = {
-        timestamp: liveData.timestamp,
-        selected: (liveData?.ui_primary_broker || "").toUpperCase(),
-        effective: (liveData?.effective_primary_broker || "").toUpperCase(),
-        reason: liveData?.primary_override_reason || "Auto-fallback active",
-      };
-      const key = `${event.timestamp}-${event.selected}-${event.effective}-${event.reason}`;
-      const exists = prev.some(e => `${e.timestamp}-${e.selected}-${e.effective}-${e.reason}` === key);
-      if (exists) return prev;
-      return [...prev, event].slice(-20);
-    });
-  }, [liveData?.timestamp, liveData?.primary_override_active, liveData?.ui_primary_broker, liveData?.effective_primary_broker, liveData?.primary_override_reason]);
-
-  const saveUiPrimaryBroker = async () => {
-    setSavingBrokerPref(true);
-    setBrokerPrefMessage("");
-    try {
-      const res = await fetch(`${API_BASE}/api/settings/broker-preference`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ui_primary_broker: uiPrimarySelection }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail || "Failed to save broker preference");
-      if (data?.pending_connection || data?.fallback_active) {
-        setBrokerPrefMessage(`Selected ${uiPrimarySelection.toUpperCase()} but unavailable. Using ${String(data?.effective_primary_broker || "").toUpperCase()} until connected.`);
-      } else {
-        setBrokerPrefMessage(`UI primary set to ${uiPrimarySelection.toUpperCase()} ✅`);
-      }
-      refetchBrokerPreference();
-    } catch (e) {
-      setBrokerPrefMessage(`Error: ${e.message}`);
-    } finally {
-      setSavingBrokerPref(false);
-    }
-  };
+  const progressPct = Number(agentStatus?.progress_pct || 0);
 
   const handleStartEngine = async () => {
     setStartingEngine(true);
     try {
       const res = await fetch(`${API_BASE}/api/engine/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "paper" }) });
       const d = await res.json();
-      if (d.status === "starting") { setEngineRunning(true); }
-    } catch (e) { alert("❌ Failed to start engine: " + e.message); }
+      if (d.status === "starting") setEngineRunning(true);
+    } catch (e) { alert("Failed to start engine: " + e.message); }
     finally { setTimeout(() => setStartingEngine(false), 3000); }
   };
 
@@ -1146,21 +1067,34 @@ export default function TradingDashboard() {
     } catch (e) { alert("Error: " + e.message); }
   };
 
+  const saveUiPrimaryBroker = async () => {
+    setSavingBrokerPref(true);
+    setBrokerPrefMessage("");
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/broker-preference`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ui_primary_broker: uiPrimarySelection }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || "Failed");
+      setBrokerPrefMessage(data?.fallback_active ? `Selected ${uiPrimarySelection.toUpperCase()} unavailable, using ${String(data?.effective_primary_broker || "").toUpperCase()}` : `UI primary set to ${uiPrimarySelection.toUpperCase()} ✅`);
+      refetchBrokerPreference();
+    } catch (e) { setBrokerPrefMessage(`Error: ${e.message}`); }
+    finally { setSavingBrokerPref(false); }
+  };
+
   const loadSimulation = useCallback(async () => {
     setSimState(prev => ({ ...prev, loading: true, error: "" }));
     try {
       const payload = { ...simConfig, symbols: simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) };
       const startRes = await fetch(`${API_BASE}/api/replay/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const started = await startRes.json();
-      if (!startRes.ok) throw new Error(started?.detail || "Unable to start replay run");
+      if (!startRes.ok) throw new Error(started?.detail || "Unable to start replay");
       const runId = started.run_id;
       for (let i = 0; i < 120; i++) {
         const statusRes = await fetch(`${API_BASE}/api/replay/runs/${runId}`);
         const status = await statusRes.json();
-        if (!statusRes.ok) throw new Error(status?.detail || "Replay status failed");
+        if (!statusRes.ok) throw new Error(status?.detail || "Status failed");
         if (status.status === "completed") {
-          const resRes = await fetch(`${API_BASE}/api/replay/runs/${runId}/results`);
-          const result = await resRes.json();
+          const r = await fetch(`${API_BASE}/api/replay/runs/${runId}/results`);
+          const result = await r.json();
           setSimState({ loading: false, error: "", data: { ...result, status }, runId });
           return;
         }
@@ -1168,47 +1102,25 @@ export default function TradingDashboard() {
         await new Promise(r => setTimeout(r, 1500));
       }
       throw new Error("Replay timed out");
-    } catch (e) {
-      setSimState(prev => ({ ...prev, loading: false, error: e.message || "Failed to run simulation", data: null }));
-    }
+    } catch (e) { setSimState(prev => ({ ...prev, loading: false, error: e.message, data: null })); }
   }, [simConfig]);
 
-  const backfillAndRunSimulation = useCallback(async () => {
+  const backfillAndRun = useCallback(async () => {
     const symbols = simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
-    if (!symbols.length) {
-      setSimState(prev => ({ ...prev, error: "Please add at least one symbol before backfill." }));
-      return;
-    }
-
+    if (!symbols.length) { setSimState(prev => ({ ...prev, error: "Add at least one symbol." })); return; }
     setSimBackfilling(true);
     setSimState(prev => ({ ...prev, error: "" }));
     try {
-      const payload = {
-        symbols,
-        exchange: simConfig.exchange,
-        timeframe: simConfig.timeframe,
-        start_date: simConfig.start_date ? `${simConfig.start_date}T00:00:00` : null,
-        end_date: simConfig.end_date ? `${simConfig.end_date}T23:59:59` : null,
-      };
-      const res = await fetch(`${API_BASE}/api/historical/backfill`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const payload = { symbols, exchange: simConfig.exchange, timeframe: simConfig.timeframe, start_date: simConfig.start_date ? `${simConfig.start_date}T00:00:00` : null, end_date: simConfig.end_date ? `${simConfig.end_date}T23:59:59` : null };
+      const res = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const out = await res.json();
-      if (!res.ok) throw new Error(out?.detail || "Historical backfill failed");
-      if (Array.isArray(out?.failures) && out.failures.length) {
-        const firstFailure = out.failures[0]?.error || "some symbols failed";
-        throw new Error(`Backfill failed: ${firstFailure}`);
-      }
+      if (!res.ok) throw new Error(out?.detail || "Backfill failed");
+      if (Array.isArray(out?.failures) && out.failures.length) throw new Error(`Backfill: ${out.failures[0]?.error || "some symbols failed"}`);
       await loadSimulation();
-    } catch (e) {
-      setSimState(prev => ({ ...prev, error: e.message || "Backfill failed", data: null }));
-    } finally {
-      setSimBackfilling(false);
-    }
+    } catch (e) { setSimState(prev => ({ ...prev, error: e.message, data: null })); }
+    finally { setSimBackfilling(false); }
   }, [loadSimulation, simConfig]);
-  
+
   const TABS = [
     { id: "overview", label: "Overview", icon: Activity },
     { id: "positions", label: "Positions", icon: Target },
@@ -1217,281 +1129,294 @@ export default function TradingDashboard() {
     { id: "ai", label: "AI Brain", icon: Cpu },
     { id: "orders", label: "Orders", icon: List },
     { id: "system", label: "System", icon: Shield },
-    { id: "simulator", label: "Paper Sim", icon: Database },  
+    { id: "simulator", label: "Simulator", icon: Database },
     { id: "analytics", label: "Analytics", icon: BarChart2 },
   ];
 
-  const kpiCols = isMobile ? "repeat(2,1fr)" : isTablet ? "repeat(3,1fr)" : "repeat(6,1fr)";
-  const twoCol = isMobile ? "1fr" : "1fr 1fr";
-  const pnlChartCols = isMobile ? "1fr" : "2fr 1fr";
+  const gridKpi = isMobile ? "repeat(2,1fr)" : isTablet ? "repeat(3,1fr)" : "repeat(6,1fr)";
+  const col2 = isMobile ? "1fr" : "1fr 1fr";
+
+  const inputStyle = {
+    background: T.bg, border: `1px solid ${T.border}`, color: T.text,
+    borderRadius: 6, padding: "9px 12px", fontSize: 11,
+    fontFamily: "'IBM Plex Mono', monospace", outline: "none",
+    transition: "border-color 0.15s",
+  };
+
+  const btnPrimary = (color) => ({
+    background: `${color}15`, border: `1px solid ${color}40`, borderRadius: 6,
+    padding: "7px 14px", cursor: "pointer", fontSize: 10, fontWeight: 700,
+    color, letterSpacing: 0.5, transition: "all 0.15s",
+  });
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'JetBrains Mono', 'Fira Code', monospace", paddingBottom: isMobile ? 70 : 0 }}>
-      <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-
+    <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'IBM Plex Sans', system-ui, sans-serif", paddingBottom: isMobile ? 68 : 0 }}>
+      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: ${C.bg}; }
         ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-track { background: ${C.bg}; }
-        ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 2px; }
-        button:hover { opacity: 0.85; }
-        @keyframes shimmer { 0%,100%{opacity:1} 50%{opacity:.4} }
-        @keyframes pulseDot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.8)} }
-        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
-        .tab-scroll::-webkit-scrollbar { display: none; }
-        input[type="date"] { color-scheme: dark; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: ${T.border}; border-radius: 2px; }
+        button { font-family: inherit; }
+        input { font-family: inherit; }
+        @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
+        @keyframes shimmer { 0%,100%{opacity:0.4} 50%{opacity:0.8} }
+        @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+        .tab-content { animation: fadeIn 0.2s ease; }
+        input[type="date"] { color-scheme: ${isDark ? "dark" : "light"}; }
+        input:focus { border-color: ${T.accent} !important; }
       `}</style>
 
-      {/* HEADER */}
-      <header style={{ borderBottom: `1px solid ${C.border}`, background: "rgba(6,11,20,0.97)", backdropFilter: "blur(20px)", position: "sticky", top: 0, zIndex: 100 }}>
-        <div style={{ maxWidth: 1800, margin: "0 auto", padding: "0 12px", height: isMobile ? "auto" : 52, minHeight: 52, display: "flex", alignItems: "center", gap: isMobile ? 6 : 20, flexWrap: isMobile ? "wrap" : "nowrap", paddingTop: isMobile ? 8 : 0, paddingBottom: isMobile ? 8 : 0 }}>
-
-          {/* Logo */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            <div style={{ background: "linear-gradient(135deg,#00d4a0,#00b4d8)", borderRadius: 7, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-              <Zap size={14} color="#060b14" fill="#060b14" />
-            </div>
-            {!isMobile && (
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 12, letterSpacing: 1 }}>AGENTTRADER</div>
-                <div style={{ fontSize: 8, color: C.textMuted, letterSpacing: 2 }}>NSE · F&O · GEMINI AI</div>
+      {/* ── TOP HEADER ── */}
+      <header style={{
+        background: T.card, borderBottom: `1px solid ${T.border}`,
+        position: "sticky", top: 0, zIndex: 100, boxShadow: T.shadow,
+      }}>
+        <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "0 12px" : "0 16px" }}>
+          {/* Row 1: brand + indices + controls */}
+          <div style={{ height: 52, display: "flex", alignItems: "center", gap: isMobile ? 8 : 16 }}>
+            {/* Logo */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+              <div style={{ width: 30, height: 30, borderRadius: 7, background: `linear-gradient(135deg, ${T.accent}, ${T.blue})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Zap size={13} color="#fff" fill="#fff" />
               </div>
-            )}
-          </div>
-
-          {/* Index pills - scroll on mobile */}
-          <div style={{ display: "flex", gap: 6, flex: isMobile ? "1 1 auto" : 1, overflowX: "auto", scrollbarWidth: "none", minWidth: 0 }}>
-            {[
-              { label: "NIFTY", val: indices.nifty, prev: 22000 },
-              { label: "BNIFTY", val: indices.banknifty, prev: 47000 },
-              { label: "VIX", val: indices.vix, prev: 14, warn: (indices.vix || 0) > 18 },
-            ].map(item => {
-              const chg = item.prev ? (((item.val || item.prev) - item.prev) / item.prev * 100) : 0;
-              return (
-                <div key={item.label} style={{ display: "flex", gap: 4, alignItems: "center", padding: "3px 7px", background: C.surface, borderRadius: 5, border: `1px solid ${C.border}`, flexShrink: 0 }}>
-                  <span style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1 }}>{item.label}</span>
-                  <span style={{ fontSize: isMobile ? 10 : 11, fontWeight: 700, color: item.warn ? C.amber : C.text }}>{item.val?.toFixed(2) || "—"}</span>
-                  {item.val && <span style={{ fontSize: 9, color: chg >= 0 ? C.green : C.red }}>{chg >= 0 ? "▲" : "▼"}{Math.abs(chg).toFixed(2)}%</span>}
+              {!isMobile && (
+                <div>
+                  <div style={{ fontWeight: 800, fontSize: 13, letterSpacing: 0.5, color: T.text }}>AgentTrader</div>
+                  <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 2, textTransform: "uppercase" }}>NSE · F&O · Gemini AI</div>
                 </div>
-              );
-            })}
-          </div>
-
-          {/* Status bar */}
-          <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 6 : 12, flexShrink: 0, flexWrap: isMobile ? "wrap" : "nowrap", width: isMobile ? "100%" : "auto" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <Dot active={connected} color={C.green} />
-              {!isMobile && <span style={{ fontSize: 9, color: connected ? C.green : C.textMuted, letterSpacing: 1 }}>{connected ? "LIVE" : "OFFLINE"}</span>}
+              )}
             </div>
 
-            {!isMobile && <span style={{ fontSize: 9, color: C.textDim }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>}
+            {/* Divider */}
+            {!isMobile && <div style={{ width: 1, height: 24, background: T.border }} />}
 
-            {/* Broker status — hidden on mobile to save space */}
-            {!isMobile && (
-              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 5, background: C.surface, border: `1px solid ${C.border}` }}>
-                <span style={{ fontSize: 9, color: C.textMuted, letterSpacing: 0.4 }}>Exec: {executionPrimaryBroker} | UI Primary: {uiPrimaryBroker}{primaryOverrideActive ? ` → ${effectivePrimaryBroker}` : ""} | Replica: {replicaBroker}</span>
-                <Badge text={replicationStatus} />
-                {primaryOverrideActive && <Badge text="ui fallback" />}
-              </div>
-            )}
+            {/* Index pills */}
+            <div style={{ display: "flex", gap: 6, flex: 1, overflowX: "auto", scrollbarWidth: "none" }}>
+              {[
+                { label: "NIFTY", val: indices.nifty, base: 22000 },
+                { label: "BNIFTY", val: indices.banknifty, base: 47000 },
+                { label: "VIX", val: indices.vix, base: 14, warn: (indices.vix || 0) > 18 },
+              ].map(idx => {
+                const chg = idx.base ? (((idx.val || idx.base) - idx.base) / idx.base * 100) : 0;
+                return (
+                  <div key={idx.label} style={{ display: "flex", gap: 6, alignItems: "center", padding: "4px 10px", background: T.bg, borderRadius: 5, border: `1px solid ${T.border}`, flexShrink: 0 }}>
+                    <span style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: 0.5 }}>{idx.label}</span>
+                    <Mono size={11} color={idx.warn ? T.amber : T.text} weight={700}>{idx.val?.toFixed(2) || "—"}</Mono>
+                    {idx.val && <span style={{ fontSize: 9, color: chg >= 0 ? T.green : T.red, fontFamily: "'IBM Plex Mono'" }}>{chg >= 0 ? "▲" : "▼"}{Math.abs(chg).toFixed(2)}%</span>}
+                  </div>
+                );
+              })}
+            </div>
 
-            {/* Mobile: compact broker pill */}
-            {isMobile && (
-              <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 7px", borderRadius: 5, background: C.surface, border: `1px solid ${C.border}` }}>
-                <span style={{ fontSize: 9, color: C.textMuted }}>{executionPrimaryBroker}</span>
-                <Badge text={replicationStatus} />
-              </div>
-            )}
-  
-            {killSwitch && (
-              <button onClick={handleResetKillSwitch} style={{ background: `${C.red}15`, border: `1px solid ${C.red}40`, borderRadius: 5, padding: "4px 8px", cursor: "pointer", fontSize: 9, color: C.red, letterSpacing: 0.5 }}>
-                ⚠ RESET
-              </button>
-            )}
+            {/* Right controls */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+              {!isMobile && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: T.textMuted }}>
+                  <StatusDot active={connected} color={T.green} />
+                  <span style={{ fontFamily: "monospace" }}>{connected ? "LIVE" : "OFFLINE"}</span>
+                  <span style={{ color: T.textDim }}>·</span>
+                  <span style={{ fontFamily: "monospace" }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>
+                </div>
+              )}
 
-            {!isMobile && (
-              <button onClick={() => setShowAlerts(p => !p)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 5, padding: "5px 9px", cursor: "pointer", color: C.textMuted }}>
-                <Bell size={12} />
-              </button>
-            )}
-
-            <button
-              onClick={engineRunning ? handleStopEngine : handleStartEngine}
-              disabled={startingEngine}
-              style={{ background: engineRunning ? `${C.green}15` : `${C.blue}15`, border: `1px solid ${engineRunning ? C.green : C.blue}40`, borderRadius: 5, padding: "5px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 9, fontWeight: 800, letterSpacing: 1, color: engineRunning ? C.green : C.blue, whiteSpace: "nowrap" }}
-            >
-              <Power size={10} />
-              {isMobile ? (startingEngine ? "..." : engineRunning ? "ON" : "START") : (startingEngine ? "STARTING..." : engineRunning ? "RUNNING" : "START ENGINE")}
-            </button>
-          </div>
-        </div>
-
-        {/* NAV TABS — desktop only (mobile uses bottom bar) */}
-        {!isMobile && (
-          <div style={{ maxWidth: 1800, margin: "0 auto", padding: "0 12px", display: "flex", gap: 2, borderTop: `1px solid ${C.border}`, overflowX: "auto" }}>
-            {TABS.map(tab => {
-              const Icon = tab.icon;
-              return (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
-                  background: "none", border: "none", cursor: "pointer", padding: "9px 14px",
-                  fontSize: 10, fontWeight: 700, letterSpacing: 0.8,
-                  color: activeTab === tab.id ? C.cyan : C.textMuted,
-                  borderBottom: `2px solid ${activeTab === tab.id ? C.cyan : "transparent"}`,
-                  display: "flex", alignItems: "center", gap: 5, transition: "all .15s",
-                  whiteSpace: "nowrap", flexShrink: 0,
-                }}>
-                  <Icon size={11} />
-                  {tab.label.toUpperCase()}
+              {killSwitch && (
+                <button onClick={handleResetKillSwitch} style={{ ...btnPrimary(T.red), padding: "5px 10px", fontSize: 9 }}>
+                  ⚠ KILL SWITCH
                 </button>
-              );
-            })}
+              )}
+
+              {/* Theme toggle */}
+              <button onClick={() => setIsDark(p => !p)} style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 6, padding: 7, cursor: "pointer", color: T.textSub, display: "flex", alignItems: "center" }}>
+                {isDark ? <Sun size={13} /> : <Moon size={13} />}
+              </button>
+
+              {/* Engine button */}
+              <button
+                onClick={engineRunning ? handleStopEngine : handleStartEngine}
+                disabled={startingEngine}
+                style={{
+                  background: engineRunning ? T.greenDim : T.blueDim,
+                  border: `1px solid ${engineRunning ? T.green : T.blue}40`,
+                  borderRadius: 6, padding: "6px 12px", cursor: "pointer",
+                  fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                  color: engineRunning ? T.green : T.blue,
+                  display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
+                  transition: "all 0.15s",
+                }}
+              >
+                <Power size={10} />
+                {isMobile ? (startingEngine ? "…" : engineRunning ? "ON" : "GO") : (startingEngine ? "STARTING…" : engineRunning ? "RUNNING" : "START")}
+              </button>
+            </div>
           </div>
-        )}
+
+          {/* Row 2: desktop nav tabs */}
+          {!isMobile && (
+            <div style={{ display: "flex", gap: 0, borderTop: `1px solid ${T.border}`, overflowX: "auto", scrollbarWidth: "none" }}>
+              {TABS.map(tab => {
+                const Icon = tab.icon;
+                const isActive = activeTab === tab.id;
+                return (
+                  <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
+                    background: "none", border: "none", cursor: "pointer",
+                    padding: "9px 16px", fontSize: 10, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase",
+                    color: isActive ? T.accent : T.textMuted,
+                    borderBottom: `2px solid ${isActive ? T.accent : "transparent"}`,
+                    display: "flex", alignItems: "center", gap: 6,
+                    transition: "all 0.15s", whiteSpace: "nowrap", flexShrink: 0,
+                  }}>
+                    <Icon size={10} />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </header>
 
-      <main style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 10px" : "18px 20px" }}>
-
-        {/* ENGINE STATUS BANNER */}
+      {/* ── ALERT BANNERS ── */}
+      <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px 0" : "12px 16px 0" }}>
         {replicationEnabled && replicationStatus === "partial_failure" && (
-          <div style={{ background: `${C.amber}08`, border: `1px solid ${C.amber}35`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <AlertTriangle size={13} color={C.amber} />
-            <span style={{ fontSize: 11, color: C.amber, fontWeight: 700 }}>Replica warning: Zerodha copy partially failing</span>
-            {replicationError && <span style={{ fontSize: 10, color: C.textMuted }}>· {replicationError}</span>}
+          <div style={{ background: T.amberDim, border: `1px solid ${T.amber}35`, borderRadius: 7, padding: "9px 14px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <AlertTriangle size={12} color={T.amber} />
+            <span style={{ fontSize: 11, color: T.amber, fontWeight: 600 }}>Replica warning: Zerodha copy partially failing</span>
+            {replicationError && <span style={{ fontSize: 10, color: T.textMuted }}>· {replicationError}</span>}
           </div>
         )}
-  
         {!engineRunning && (
-          <div style={{ background: `${C.blue}08`, border: `1px solid ${C.blue}25`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <Power size={13} color={C.blue} />
-            <span style={{ fontSize: 11, color: C.blue, fontWeight: 700 }}>Engine not running</span>
-            <span style={{ fontSize: 11, color: C.textMuted }}>· Live data will appear after starting</span>
-            <button onClick={handleStartEngine} style={{ marginLeft: "auto", background: `${C.blue}15`, border: `1px solid ${C.blue}40`, borderRadius: 5, padding: "5px 14px", cursor: "pointer", fontSize: 10, fontWeight: 700, color: C.blue }}>
+          <div style={{ background: T.blueDim, border: `1px solid ${T.blue}25`, borderRadius: 7, padding: "9px 14px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Power size={12} color={T.blue} />
+            <span style={{ fontSize: 11, color: T.blue, fontWeight: 600 }}>Engine stopped</span>
+            <span style={{ fontSize: 11, color: T.textMuted }}>· Live data streams when engine is running</span>
+            <button onClick={handleStartEngine} style={{ ...btnPrimary(T.blue), marginLeft: "auto", padding: "5px 14px" }}>
               START ENGINE →
             </button>
           </div>
         )}
+      </div>
 
-        {/* ── OVERVIEW TAB ── */}
+      {/* ── MAIN CONTENT ── */}
+      <main style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px" : "14px 16px" }}>
+
+        {/* OVERVIEW */}
         {activeTab === "overview" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-
-            {/* KPI Row */}
-            <div style={{ display: "grid", gridTemplateColumns: kpiCols, gap: 10 }}>
-              <StatCard label="Today P&L" value={<Num v={pnl.total || 0} size={isMobile ? 16 : 20} />} sub={`${(pnl.pct || 0) >= 0 ? "+" : ""}${(pnl.pct || 0).toFixed(2)}%`} color={pnlColor} icon={pnl.total >= 0 ? TrendingUp : TrendingDown} />
-              <StatCard label="Realized" value={<Num v={pnl.realized || 0} size={isMobile ? 16 : 20} />} sub="Booked P&L" color={C.green} icon={Target} />
-              <StatCard label="Available" value={`₹${((funds.available || 0) / 1000).toFixed(1)}K`} sub={`₹${((funds.used_margin || 0) / 1000).toFixed(1)}K margin`} color={C.blue} icon={DollarSign} />
-              <StatCard label="Positions" value={positions.length} sub={`${10 - positions.length} slots free`} color={C.purple} icon={Activity} />
-              <StatCard label="Win Rate" value={`${(risk.win_rate || 0).toFixed(1)}%`} sub={`${risk.trades_today || 0} trades`} color={C.amber} icon={Shield} />
-              <StatCard label="Drawdown" value={`${(risk.drawdown_pct || 0).toFixed(2)}%`} sub={(risk.drawdown_pct || 0) < 2 ? "Safe" : "⚠ Near limit"} color={(risk.drawdown_pct || 0) < 2 ? C.green : C.red} icon={AlertTriangle} />
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: gridKpi, gap: 10 }}>
+              <StatTile T={T} label="Today P&L" value={<span style={{ color: pnlColor, fontFamily: "'IBM Plex Mono'", fontWeight: 800, fontSize: 20 }}>{(pnl.total || 0) >= 0 ? "+" : ""}₹{Math.abs(pnl.total || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>} sub={`${(pnl.pct || 0) >= 0 ? "+" : ""}${(pnl.pct || 0).toFixed(2)}% day`} color={pnlColor} icon={(pnl.total || 0) >= 0 ? TrendingUp : TrendingDown} />
+              <StatTile T={T} label="Realized P&L" value={<span style={{ color: (pnl.realized||0)>=0?T.green:T.red, fontFamily: "'IBM Plex Mono'", fontWeight: 800, fontSize: 20 }}>{(pnl.realized||0)>=0?"+":""}₹{Math.abs(pnl.realized||0).toLocaleString("en-IN",{maximumFractionDigits:0})}</span>} sub="Booked today" color={T.green} icon={Target} />
+              <StatTile T={T} label="Available" value={`₹${((funds.available || 0) / 1000).toFixed(1)}K`} sub={`₹${((funds.used_margin || 0) / 1000).toFixed(1)}K margin used`} color={T.blue} icon={DollarSign} />
+              <StatTile T={T} label="Positions" value={positions.length} sub={`${10 - positions.length} slots free`} color={T.purple} icon={Activity} />
+              <StatTile T={T} label="Win Rate" value={`${(risk.win_rate || 0).toFixed(1)}%`} sub={`${risk.trades_today || 0} trades`} color={T.amber} icon={Shield} />
+              <StatTile T={T} label="Max Drawdown" value={`${(risk.drawdown_pct || 0).toFixed(2)}%`} sub={(risk.drawdown_pct || 0) < 2 ? "Within limits" : "⚠ Near limit"} color={(risk.drawdown_pct || 0) < 2 ? T.green : T.red} icon={AlertTriangle} />
             </div>
 
-            {/* Charts row */}
-            <div style={{ display: "grid", gridTemplateColumns: pnlChartCols, gap: 14 }}>
-              <Card>
-                <SectionHeader title="Intraday P&L" sub="Real-time equity curve" right={<Num v={pnl.total || 0} size={14} />} />
-                <div style={{ padding: "14px 18px" }}>
-                  <ResponsiveContainer width="100%" height={isMobile ? 140 : 180}>
-                    <AreaChart data={pnlHistory} margin={{ left: isMobile ? -10 : 0, right: isMobile ? 0 : 5 }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "2fr 1fr", gap: 14 }}>
+              <Card T={T}>
+                <CardHeader T={T} title="Intraday P&L" subtitle="Real-time equity curve"
+                  right={<span style={{ fontFamily: "monospace", fontSize: 13, fontWeight: 800, color: pnlColor }}>{(pnl.total || 0) >= 0 ? "+" : ""}₹{Math.abs(pnl.total || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>}
+                />
+                <div style={{ padding: "14px 16px" }}>
+                  <ResponsiveContainer width="100%" height={isMobile ? 130 : 170}>
+                    <AreaChart data={pnlHistory} margin={{ left: isMobile ? -8 : 0, right: 5 }}>
                       <defs>
-                        <linearGradient id="pnlG" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={pnlColor} stopOpacity={0.2} />
-                          <stop offset="95%" stopColor={pnlColor} stopOpacity={0} />
+                        <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor={pnlColor} stopOpacity="0.25" />
+                          <stop offset="100%" stopColor={pnlColor} stopOpacity="0" />
                         </linearGradient>
                       </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                      <XAxis dataKey="time" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} interval={15} />
-                      <YAxis tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 42 : 50} />
-                      <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }} formatter={v => [`₹${v.toLocaleString("en-IN")}`, "P&L"]} />
-                      <ReferenceLine y={0} stroke={C.border} strokeDasharray="4 2" />
-                      <Area type="monotone" dataKey="pnl" stroke={pnlColor} fill="url(#pnlG)" strokeWidth={2} dot={false} />
+                      <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
+                      <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} interval={14} />
+                      <YAxis tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 40 : 50} />
+                      <Tooltip {...tooltipStyle(T)} formatter={v => [`₹${v.toLocaleString("en-IN")}`, "P&L"]} />
+                      <ReferenceLine y={0} stroke={T.border} strokeDasharray="3 3" />
+                      <Area type="monotone" dataKey="pnl" stroke={pnlColor} fill="url(#pnlGrad)" strokeWidth={2} dot={false} />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
               </Card>
 
-              <Card>
-                <SectionHeader title="Risk Gauges" sub="Live limit consumption" />
-                <div style={{ padding: "14px 18px" }}>
+              <Card T={T}>
+                <CardHeader T={T} title="Risk Gauges" subtitle="Limit consumption" />
+                <div style={{ padding: "14px 16px" }}>
                   {[
-                    { label: "Daily Loss Limit", used: Math.abs(Math.min(0, risk.daily_pnl_pct || 0)), max: 2.0, color: C.red },
-                    { label: "Max Drawdown", used: risk.drawdown_pct || 0, max: 8.0, color: C.amber },
-                    { label: "Positions / 10", used: positions.length, max: 10, color: C.purple },
-                    { label: "Margin Used", used: ((funds.used_margin || 0) / (funds.total || 1)) * 100, max: 80, color: C.blue },
+                    { label: "Daily Loss Limit", used: Math.abs(Math.min(0, risk.daily_pnl_pct || 0)), max: 2.0, color: T.red },
+                    { label: "Max Drawdown", used: risk.drawdown_pct || 0, max: 8.0, color: T.amber },
+                    { label: "Positions", used: positions.length, max: 10, color: T.purple, noPercent: true },
+                    { label: "Margin Used", used: ((funds.used_margin || 0) / (funds.total || 1)) * 100, max: 80, color: T.blue },
                   ].map(r => {
                     const pct = Math.min((r.used / r.max) * 100, 100);
+                    const dangerColor = pct > 75 ? T.red : r.color;
                     return (
-                      <div key={r.label} style={{ marginBottom: 14 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                          <span style={{ fontSize: 10, color: C.textMuted }}>{r.label}</span>
-                          <span style={{ fontSize: 10, fontFamily: "monospace", color: pct > 75 ? C.red : C.text }}>
-                            {r.label.includes("Pos") ? `${Math.round(r.used)}/${r.max}` : `${r.used.toFixed(1)}%`}
-                          </span>
+                      <div key={r.label} style={{ marginBottom: 16 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                          <span style={{ fontSize: 10, color: T.textMuted }}>{r.label}</span>
+                          <Mono size={10} color={pct > 75 ? T.red : T.text}>{r.noPercent ? `${Math.round(r.used)}/${r.max}` : `${r.used.toFixed(1)}%`}</Mono>
                         </div>
-                        <MiniBar value={r.used} max={r.max} color={pct > 75 ? C.red : r.color} />
+                        <ProgressBar value={r.used} max={r.max} color={dangerColor} height={4} />
                       </div>
                     );
                   })}
-                  <div style={{ paddingTop: 10, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontSize: 10, color: C.textMuted }}>Kill Switch</span>
-                    <span style={{ fontSize: 10, fontWeight: 700, color: killSwitch ? C.red : C.green }}>{killSwitch ? "⚠ TRIGGERED" : "✓ SAFE"}</span>
+                  <div style={{ paddingTop: 10, borderTop: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 10, color: T.textMuted }}>Kill Switch</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: killSwitch ? T.red : T.green }}>{killSwitch ? "⚠ TRIGGERED" : "✓ SAFE"}</span>
                   </div>
                 </div>
               </Card>
             </div>
 
-            {/* AI Summary + Live Ticks */}
-            <div style={{ display: "grid", gridTemplateColumns: twoCol, gap: 14 }}>
-              <Card>
-                <SectionHeader title="AI Cycle Status" sub="Latest decision cycle" right={
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {latestDecision?.market_regime && <Badge text={latestDecision.market_regime} />}
-                  </div>
-                } />
-                <div style={{ padding: "14px 18px" }}>
-                  <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+            <div style={{ display: "grid", gridTemplateColumns: col2, gap: 14 }}>
+              <Card T={T}>
+                <CardHeader T={T} title="AI Cycle" subtitle="Current decision pipeline"
+                  right={latestDecision?.market_regime ? <Pill label={latestDecision.market_regime} color={T.accent} T={T} /> : null}
+                />
+                <div style={{ padding: "14px 16px" }}>
+                  <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap" }}>
                     {["collecting_context", "calling_model", "risk_checks", "placing_orders", "decision_complete"].map(s => {
-                      const isCurrent = agentStatus?.stage === s;
+                      const active = agentStatus?.stage === s;
                       return (
-                        <span key={s} style={{ fontSize: 9, padding: "3px 7px", borderRadius: 3, border: `1px solid ${isCurrent ? C.cyan : C.border}`, color: isCurrent ? C.cyan : C.textMuted, background: isCurrent ? `${C.cyan}10` : "transparent" }}>
+                        <span key={s} style={{ fontSize: 9, padding: "3px 7px", borderRadius: 3, border: `1px solid ${active ? T.accent : T.border}`, color: active ? T.accent : T.textMuted, background: active ? T.accentDim : "transparent", transition: "all 0.2s" }}>
                           {s.replace(/_/g, " ")}
                         </span>
                       );
                     })}
                   </div>
-                  <div style={{ height: 6, background: C.border, borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
-                    <div style={{ width: `${Math.max(4, progressPct)}%`, height: "100%", background: `linear-gradient(90deg,${C.cyan},${C.purple})`, transition: "width .25s" }} />
+                  <div style={{ height: 5, background: T.bg, borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
+                    <div style={{ width: `${Math.max(3, progressPct)}%`, height: "100%", background: `linear-gradient(90deg, ${T.accent}, ${T.blue})`, transition: "width 0.3s" }} />
                   </div>
-                  <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 12 }}>{progressPct}% · {agentStatus?.last_cycle_duration_ms || "—"}ms</div>
-                  {eventTape.slice(-4).reverse().map((e, i) => (
-                    <div key={i} style={{ fontSize: 10, color: e.level === "error" ? C.red : e.level === "success" ? C.green : C.textMuted, marginBottom: 3, display: "flex", gap: 8 }}>
-                      <span style={{ color: C.textDim, minWidth: 48 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
-                      {e.message}
+                  <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 12 }}>
+                    {progressPct}% complete · {agentStatus?.last_cycle_duration_ms ? `${agentStatus.last_cycle_duration_ms}ms` : "—"}
+                  </div>
+                  {eventTape.slice(-5).reverse().map((e, i) => (
+                    <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 4 }}>
+                      <span style={{ fontSize: 9, color: T.textDim, minWidth: 42, fontFamily: "monospace", flexShrink: 0, paddingTop: 1 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
+                      <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber, marginTop: 5, flexShrink: 0 }} />
+                      <span style={{ fontSize: 10, color: e.level === "error" ? T.red : e.level === "success" ? T.green : T.textSub }}>{e.message}</span>
                     </div>
                   ))}
+                  {!eventTape.length && <span style={{ fontSize: 11, color: T.textMuted }}>Waiting for AI events…</span>}
                 </div>
               </Card>
 
-              <Card>
-                <SectionHeader title="Live Ticks" sub="Real-time price feed" right={<Dot active={connected} />} />
-                <div style={{ padding: "8px 18px 14px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-                  {Object.entries(ticks).slice(0, isMobile ? 6 : 9).map(([sym, ltp]) => {
-                    const curr = tickPrice(ltp);
-                    const prev = Number(prevTicks[sym] || curr);
+              <Card T={T}>
+                <CardHeader T={T} title="Live Ticks" subtitle="Real-time price feed" right={<StatusDot active={connected} color={T.green} />} />
+                <div style={{ padding: "10px 16px 14px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                  {Object.entries(ticks).slice(0, isMobile ? 6 : 9).map(([sym, val]) => {
+                    const curr = tickPrice(val);
+                    const prev = tickPrice(prevTicks[sym] || curr);
                     const delta = curr - prev;
                     const series = tickHistory[sym] || [];
                     return (
-                      <div key={sym} style={{ background: C.bg, borderRadius: 6, padding: "8px 10px" }}>
-                        <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sym}</div>
-                        <div style={{ fontSize: isMobile ? 10 : 11, fontWeight: 700, fontFamily: "monospace", color: delta > 0 ? C.green : delta < 0 ? C.red : C.text }}>
-                          ₹{curr ? curr.toLocaleString("en-IN") : "—"}
-                        </div>
-                        <Sparkline data={series.slice(-15)} color={delta >= 0 ? C.green : C.red} height={22} />
+                      <div key={sym} style={{ background: T.bg, borderRadius: 6, padding: "8px 10px" }}>
+                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{sym}</div>
+                        <Mono size={10.5} color={delta > 0 ? T.green : delta < 0 ? T.red : T.text} weight={700}>₹{curr ? curr.toLocaleString("en-IN") : "—"}</Mono>
+                        <Sparkline data={series.slice(-15)} color={delta >= 0 ? T.green : T.red} height={24} />
                       </div>
                     );
                   })}
                   {!Object.keys(ticks).length && (
-                    <div style={{ gridColumn: "1/-1", textAlign: "center", padding: "20px 0", fontSize: 11, color: C.textMuted }}>Waiting for tick data...</div>
+                    <div style={{ gridColumn: "1/-1", textAlign: "center", padding: "24px 0", fontSize: 11, color: T.textMuted }}>Waiting for tick data…</div>
                   )}
                 </div>
               </Card>
@@ -1499,151 +1424,133 @@ export default function TradingDashboard() {
           </div>
         )}
 
-        {/* ── POSITIONS & SL TAB ── */}
+        {/* POSITIONS */}
         {activeTab === "positions" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <PositionSparklinePanel positions={positions} tickHistory={tickHistory} prevTicks={prevTicks} />
-            <SLOrderStatusPanel positions={positions} ticks={ticks} />
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <PositionsPanel positions={positions} tickHistory={tickHistory} T={T} />
+            <SLTrackerPanel positions={positions} ticks={ticks} T={T} />
           </div>
         )}
 
-        {/* ── OPTIONS FLOW TAB ── */}
+        {/* OPTIONS */}
         {activeTab === "options" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 4 }}>Source: {String(optionsSourceBroker || "unknown").toUpperCase()}</div>
-            <OptionsChainPanel data={liveData?.options_chain || null} />
-            <IntradayChartPanel ticks={ticks} tickHistory={tickHistory} />
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <OptionsChainPanel data={liveData?.options_chain || null} T={T} />
+            <IntradayChartPanel ticks={ticks} tickHistory={tickHistory} T={T} />
           </div>
         )}
 
-        {/* ── WATCHLIST TAB ── */}
+        {/* WATCHLIST */}
         {activeTab === "watchlist" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 4 }}>Source: {String(watchlistSourceBroker || "unknown").toUpperCase()}</div>  
-            <WatchlistIndicatorsPanel watchlistData={liveData?.watchlist || null} />
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <WatchlistPanel data={liveData?.watchlist || null} T={T} />
           </div>
         )}
 
-        {/* ── AI BRAIN TAB ── */}
+        {/* AI BRAIN */}
         {activeTab === "ai" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <ConfidenceTimelinePanel decisions={agentDecisions} />
-            <StrategyReviewPanel reviewData={null} />
-            <ModelFallbackPanel decisions={agentDecisions} />
-
-            {/* Signal cards */}
-            <Card>
-              <SectionHeader title="Latest AI Signals" sub={`${reasoningSignals.length} signals · ${latestDecision?.timestamp ? new Date(latestDecision.timestamp).toLocaleTimeString("en-IN") : "No live decisions yet"}`} />
-              <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill,minmax(300px,1fr))", gap: 12 }}>
-                {reasoningSignals.map((s, i) => {
-                  const conf = Math.round((Number(s.confidence || 0) || 0) * 100);
-                  const confColor = conf >= 70 ? C.green : conf >= 50 ? C.amber : C.red;
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <AITimelinePanel decisions={agentDecisions} T={T} />
+            <StrategyReviewPanel reviewData={null} T={T} />
+            <ModelPerformancePanel decisions={agentDecisions} T={T} />
+            <Card T={T}>
+              <CardHeader T={T} title="Latest AI Signals"
+                subtitle={`${latestSignals.length} signals · ${latestDecision?.timestamp ? new Date(latestDecision.timestamp).toLocaleTimeString("en-IN") : "—"}`}
+              />
+              <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+                {latestSignals.map((s, i) => {
+                  const conf = Math.round((Number(s.confidence || 0)) * 100);
+                  const confColor = conf >= 70 ? T.green : conf >= 50 ? T.amber : T.red;
                   return (
-                    <div key={i} style={{ background: C.bg, borderRadius: 8, padding: "14px", border: `1px solid ${C.border}` }}>
+                    <div key={i} style={{ background: T.bg, borderRadius: 8, padding: "14px", border: `1px solid ${T.border}` }}>
                       <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontWeight: 800, fontSize: 13 }}>{s.symbol}</span>
-                        <Badge text={s.action} />
-                        <span style={{ marginLeft: "auto" }}><Badge text={s.strategy} /></span>
+                        <span style={{ fontWeight: 800, fontSize: 13, color: T.text }}>{s.symbol}</span>
+                        <Pill label={s.action} color={ACTION_COLORS_FN(T)[s.action] || T.textMuted} T={T} />
+                        <span style={{ marginLeft: "auto" }}><Pill label={s.strategy || "—"} color={STRATEGY_COLORS_FN(T)[s.strategy] || T.textMuted} T={T} /></span>
                       </div>
-                      <div style={{ marginBottom: 8 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <span style={{ fontSize: 9, color: C.textMuted }}>CONFIDENCE</span>
-                          <span style={{ fontSize: 10, fontFamily: "monospace", color: confColor }}>{conf}%</span>
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                          <span style={{ fontSize: 9, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.8 }}>Confidence</span>
+                          <Mono size={10} color={confColor}>{conf}%</Mono>
                         </div>
-                        <MiniBar value={conf} max={100} color={confColor} />
+                        <ProgressBar value={conf} max={100} color={confColor} height={4} />
                       </div>
-                      <div style={{ fontFamily: "monospace", fontSize: 10, color: C.textMuted, lineHeight: 1.7 }}>
+                      <div style={{ fontSize: 10, color: T.textMuted, lineHeight: 1.7, fontFamily: "'IBM Plex Mono'" }}>
                         Entry: {s.entry_price ? `₹${Number(s.entry_price).toFixed(0)}` : "—"} · SL: {s.stop_loss ? `₹${Number(s.stop_loss).toFixed(0)}` : "—"} · Tgt: {s.target ? `₹${Number(s.target).toFixed(0)}` : "—"}
                         {s.risk_reward ? ` · R/R: ${Number(s.risk_reward).toFixed(1)}` : ""}
                       </div>
-                      <div style={{ fontSize: 10, color: C.text, marginTop: 8, lineHeight: 1.6 }}>{s.rationale}</div>
-                      <div style={{ marginTop: 10 }}><Badge text={s.risk_status === "approved" ? "risk_passed" : "risk_rejected"} /></div>
+                      <p style={{ fontSize: 10.5, color: T.textSub, marginTop: 8, lineHeight: 1.6 }}>{s.rationale}</p>
+                      <div style={{ marginTop: 10 }}>
+                        <Pill label={s.risk_status === "approved" ? "risk passed" : "risk rejected"} color={s.risk_status === "approved" ? T.green : T.red} T={T} />
+                      </div>
                     </div>
                   );
                 })}
-                {reasoningSignals.length === 0 && (
-                  <div style={{ fontSize: 11, color: C.textMuted }}>No live AI signals yet</div>
-                )}
+                {!latestSignals.length && <div style={{ fontSize: 11, color: T.textMuted }}>No live AI signals yet</div>}
               </div>
             </Card>
           </div>
         )}
 
-        {/* ── ORDERS TAB ── */}
+        {/* ORDERS */}
         {activeTab === "orders" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <ExecutionQueuePanel orders={orders} />
-            <Card>
-              <SectionHeader title="Order History" sub="All orders today" right={
-                <button onClick={refetchOrders} style={{ background: "none", border: "none", cursor: "pointer", color: C.textMuted }}><RefreshCw size={12} /></button>
-              } />
-              <div style={{ padding: "0 18px 14px", overflowX: "auto" }}>
-                {orders.length === 0 ? (
-                  <div style={{ textAlign: "center", padding: "40px 0", color: C.textMuted, fontSize: 12 }}>No orders today</div>
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <ExecutionQueuePanel orders={orders} T={T} />
+            <Card T={T}>
+              <CardHeader T={T} title="Order History" subtitle="All orders today"
+                right={<button onClick={refetchOrders} style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4 }}><RefreshCw size={12} /></button>}
+              />
+              <div style={{ padding: "0 16px 14px", overflowX: "auto" }}>
+                {!orders.length ? (
+                  <div style={{ textAlign: "center", padding: "40px 0", color: T.textMuted, fontSize: 12 }}>No orders today</div>
                 ) : isMobile ? (
-                  // Mobile: card layout for orders
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
                     {orders.slice(0, 30).map((o, i) => {
                       const slip = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
                       return (
-                        <div key={i} style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", border: `1px solid ${C.border}` }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                              <span style={{ fontWeight: 800, fontSize: 12 }}>{o.symbol}</span>
-                              <Badge text={o.side} />
+                        <div key={i} style={{ background: T.bg, borderRadius: 7, padding: "12px 14px", border: `1px solid ${T.border}` }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <span style={{ fontWeight: 800, fontSize: 12, color: T.text }}>{o.symbol}</span>
+                              <Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} />
                             </div>
-                            <Badge text={o.status} />
+                            <Pill label={o.status} color={{ COMPLETE: T.green, FILLED: T.green, PENDING: T.amber, REJECTED: T.red }[(o.status || "").toUpperCase()] || T.textMuted} T={T} />
                           </div>
                           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                            <div>
-                              <div style={{ fontSize: 9, color: C.textMuted }}>Qty</div>
-                              <div style={{ fontFamily: "monospace", fontSize: 11 }}>{o.quantity}</div>
-                            </div>
-                            <div>
-                              <div style={{ fontSize: 9, color: C.textMuted }}>Price</div>
-                              <div style={{ fontFamily: "monospace", fontSize: 11 }}>{o.price ? `₹${o.price}` : "MKT"}</div>
-                            </div>
-                            <div>
-                              <div style={{ fontSize: 9, color: C.textMuted }}>Avg Fill</div>
-                              <div style={{ fontFamily: "monospace", fontSize: 11, color: C.textMuted }}>{o.average_price ? `₹${o.average_price}` : "—"}</div>
-                            </div>
-                            <div>
-                              <div style={{ fontSize: 9, color: C.textMuted }}>Slippage</div>
-                              <div style={{ fontFamily: "monospace", fontSize: 11, color: slip !== null && Math.abs(slip) > 0.1 ? C.amber : C.textMuted }}>{slip !== null ? `${slip.toFixed(3)}%` : "—"}</div>
-                            </div>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
-                            <span style={{ fontSize: 9, color: C.textMuted }}>{o.tag || "—"}</span>
-                            <span style={{ fontSize: 9, color: C.textMuted }}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</span>
+                            {[{ l: "Qty", v: o.quantity }, { l: "Price", v: o.price ? `₹${o.price}` : "MKT" }, { l: "Avg Fill", v: o.average_price ? `₹${o.average_price}` : "—" }, { l: "Slippage", v: slip !== null ? `${slip.toFixed(3)}%` : "—" }].map(it => (
+                              <div key={it.l}>
+                                <div style={{ fontSize: 9, color: T.textMuted }}>{it.l}</div>
+                                <Mono size={11} color={T.text}>{it.v}</Mono>
+                              </div>
+                            ))}
                           </div>
                         </div>
                       );
                     })}
                   </div>
                 ) : (
-                  // Desktop: table
-                  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10, minWidth: 600 }}>
                     <thead>
-                      <tr>{["Time", "Symbol", "Side", "Qty", "Price", "Avg Fill", "Status", "Tag", "Slippage"].map(h =>
-                        <th key={h} style={{ padding: "8px 6px", textAlign: "left", fontSize: 9, color: C.textMuted, letterSpacing: 1.2, borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
-                      )}</tr>
+                      <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                        {["Time", "Symbol", "Side", "Qty", "Price", "Avg Fill", "Status", "Tag", "Slippage"].map(h =>
+                          <th key={h} style={{ padding: "7px 8px", textAlign: "left", fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: 0.8, textTransform: "uppercase" }}>{h}</th>
+                        )}
+                      </tr>
                     </thead>
                     <tbody>
                       {orders.slice(0, 30).map((o, i) => {
                         const slip = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
                         return (
-                          <tr key={i} style={{ borderBottom: `1px solid ${C.bg}` }}>
-                            <td style={{ padding: "9px 6px", fontSize: 10, color: C.textMuted, whiteSpace: "nowrap" }}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</td>
-                            <td style={{ padding: "9px 6px", fontWeight: 800, fontSize: 11 }}>{o.symbol}</td>
-                            <td style={{ padding: "9px 6px" }}><Badge text={o.side} /></td>
-                            <td style={{ padding: "9px 6px", fontFamily: "monospace", fontSize: 11 }}>{o.quantity}</td>
-                            <td style={{ padding: "9px 6px", fontFamily: "monospace", fontSize: 11 }}>{o.price ? `₹${o.price}` : "MKT"}</td>
-                            <td style={{ padding: "9px 6px", fontFamily: "monospace", fontSize: 11, color: C.textMuted }}>{o.average_price ? `₹${o.average_price}` : "—"}</td>
-                            <td style={{ padding: "9px 6px" }}><Badge text={o.status} /></td>
-                            <td style={{ padding: "9px 6px", fontSize: 10, color: C.textMuted }}>{o.tag || "—"}</td>
-                            <td style={{ padding: "9px 6px", fontSize: 10, fontFamily: "monospace", color: slip !== null && Math.abs(slip) > 0.1 ? C.amber : C.textMuted }}>
-                              {slip !== null ? `${slip.toFixed(3)}%` : "—"}
-                            </td>
+                          <tr key={i} style={{ borderBottom: `1px solid ${T.border}20`, background: i % 2 ? T.bg + "60" : "transparent" }}>
+                            <td style={{ padding: "9px 8px" }}><Mono size={10} color={T.textMuted}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</Mono></td>
+                            <td style={{ padding: "9px 8px", fontWeight: 800, fontSize: 11, color: T.text }}>{o.symbol}</td>
+                            <td style={{ padding: "9px 8px" }}><Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} /></td>
+                            <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.text}>{o.quantity}</Mono></td>
+                            <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.text}>{o.price ? `₹${o.price}` : "MKT"}</Mono></td>
+                            <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.textSub}>{o.average_price ? `₹${o.average_price}` : "—"}</Mono></td>
+                            <td style={{ padding: "9px 8px" }}><Pill label={o.status} color={{ COMPLETE: T.green, FILLED: T.green, PENDING: T.amber, REJECTED: T.red }[(o.status || "").toUpperCase()] || T.textMuted} T={T} /></td>
+                            <td style={{ padding: "9px 8px", fontSize: 10, color: T.textMuted }}>{o.tag || "—"}</td>
+                            <td style={{ padding: "9px 8px" }}><Mono size={10} color={slip !== null && Math.abs(slip) > 0.1 ? T.amber : T.textMuted}>{slip !== null ? `${slip.toFixed(3)}%` : "—"}</Mono></td>
                           </tr>
                         );
                       })}
@@ -1655,82 +1562,67 @@ export default function TradingDashboard() {
           </div>
         )}
 
-        {/* ── SYSTEM TAB ── */}
+        {/* SYSTEM */}
         {activeTab === "system" && (
-          <div style={{ display: "grid", gridTemplateColumns: twoCol, gap: 14 }}>
-            <KillSwitchHistoryPanel risk={risk} riskEvents={riskEvents} />
-            <ModelFallbackPanel decisions={agentDecisions} />
-            <Card>
-              <SectionHeader title="UI Primary Broker" sub="Dashboard data source selection" />
-              <div style={{ padding: "12px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {["dhan", "zerodha"].map((b) => (
+          <div className="tab-content" style={{ display: "grid", gridTemplateColumns: col2, gap: 14 }}>
+            <KillSwitchPanel risk={risk} riskEvents={riskEvents} T={T} onReset={handleResetKillSwitch} />
+            <ModelPerformancePanel decisions={agentDecisions} T={T} />
+
+            {/* Broker UI Primary */}
+            <Card T={T}>
+              <CardHeader T={T} title="UI Primary Broker" subtitle="Dashboard data source" />
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {["dhan", "zerodha"].map(b => (
                     <button key={b} onClick={() => setUiPrimarySelection(b)} style={{
-                      background: uiPrimarySelection === b ? `${C.cyan}20` : "transparent",
-                      border: `1px solid ${uiPrimarySelection === b ? C.cyan : C.border}`,
-                      color: uiPrimarySelection === b ? C.cyan : C.textMuted,
-                      borderRadius: 6,
-                      padding: "6px 10px",
-                      fontSize: 10,
-                      fontWeight: 700,
-                      cursor: "pointer",
-                    }}>{b.toUpperCase()}</button>
+                      background: uiPrimarySelection === b ? T.accentDim : "transparent",
+                      border: `1px solid ${uiPrimarySelection === b ? T.accent : T.border}`,
+                      color: uiPrimarySelection === b ? T.accent : T.textMuted,
+                      borderRadius: 6, padding: "7px 14px", fontSize: 10, fontWeight: 700, cursor: "pointer", textTransform: "uppercase", transition: "all 0.15s",
+                    }}>{b}</button>
                   ))}
                 </div>
-                <div style={{ fontSize: 10, color: C.textMuted }}>
-                  Current mode: Selected {uiPrimaryBroker} · Effective {effectivePrimaryBroker}
+                <div style={{ fontSize: 10, color: T.textMuted }}>
+                  Selected: <Mono size={10} color={T.text}>{uiPrimaryBroker}</Mono> · Effective: <Mono size={10} color={T.text}>{effectivePrimaryBroker}</Mono>
                 </div>
-                {primaryOverrideActive && (
-                  <div style={{ fontSize: 10, color: C.amber }}>⚠ Selected broker unavailable. {primaryOverrideReason || "Auto-fallback active."}</div>
-                )}
-                {brokerPrefMessage && <div style={{ fontSize: 10, color: brokerPrefMessage.startsWith("Error") ? C.red : C.textMuted }}>{brokerPrefMessage}</div>}
-                <div>
-                  <button onClick={saveUiPrimaryBroker} disabled={savingBrokerPref} style={{
-                    background: `${C.blue}15`, border: `1px solid ${C.blue}40`, borderRadius: 5,
-                    padding: "6px 12px", cursor: "pointer", fontSize: 10, fontWeight: 700, color: C.blue,
-                  }}>{savingBrokerPref ? "SAVING..." : "SAVE UI PRIMARY"}</button>
-                </div>
+                {primaryOverrideActive && <div style={{ fontSize: 10, color: T.amber }}>⚠ Fallback active. {liveData?.primary_override_reason || ""}</div>}
+                {brokerPrefMessage && <div style={{ fontSize: 10, color: brokerPrefMessage.startsWith("Error") ? T.red : T.green }}>{brokerPrefMessage}</div>}
+                <button onClick={saveUiPrimaryBroker} disabled={savingBrokerPref} style={btnPrimary(T.blue)}>{savingBrokerPref ? "Saving…" : "Save Preference"}</button>
               </div>
             </Card>
-            <Card>
-              <SectionHeader title="Broker Health" sub="Live broker connectivity" />
-              <div style={{ padding: "12px 18px", display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 10, color: C.textMuted }}>Connected: {connectedBrokers.length ? connectedBrokers.map(b => b.toUpperCase()).join(" · ") : "None"}</div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {["dhan", "zerodha"].map((b) => {
-                    const isConnected = connectedBrokers.includes(b);
-                    return <span key={b}>{tag(`${b} ${isConnected ? "healthy" : "down"}`, isConnected ? C.green : C.red)}</span>;
-                  })}
-                </div>
-                <div style={{ fontSize: 10, color: C.textMuted }}>
-                  Selected: {uiPrimaryBroker} · Effective: {effectivePrimaryBroker} · Last check: {new Date().toLocaleTimeString("en-IN")}
-                </div>
+
+            {/* Broker Health */}
+            <Card T={T}>
+              <CardHeader T={T} title="Broker Health" subtitle="Connectivity status" />
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                {["dhan", "zerodha"].map(b => {
+                  const isConn = connectedBrokers.includes(b);
+                  return (
+                    <div key={b} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: T.bg, borderRadius: 6 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <StatusDot active={isConn} color={isConn ? T.green : T.red} />
+                        <span style={{ fontSize: 12, fontWeight: 700, color: T.text, textTransform: "uppercase" }}>{b}</span>
+                      </div>
+                      <Pill label={isConn ? "healthy" : "down"} color={isConn ? T.green : T.red} T={T} />
+                    </div>
+                  );
+                })}
+                <div style={{ fontSize: 10, color: T.textMuted, paddingTop: 4 }}>Last checked: {lastUpdate.toLocaleTimeString("en-IN")}</div>
               </div>
             </Card>
-            <Card>
-              <SectionHeader title="Fallback Timeline" sub="Recent UI broker auto-fallback events" />
-              <div style={{ padding: "10px 18px", maxHeight: 170, overflowY: "auto" }}>
-                {brokerFallbackEvents.length === 0 ? (
-                  <div style={{ fontSize: 10, color: C.textMuted }}>No fallback events recorded in this session</div>
-                ) : brokerFallbackEvents.slice().reverse().map((e, i) => (
-                  <div key={i} style={{ fontSize: 10, color: C.textMuted, padding: "4px 0", borderBottom: `1px dashed ${C.border}` }}>
-                    <span style={{ color: C.textDim, marginRight: 8 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN")}</span>
-                    {e.selected || "UNKNOWN"} → {e.effective || "NONE"} · {e.reason}
-                  </div>
-                ))}
-              </div>
-            </Card>  
-            <Card style={{ gridColumn: isMobile ? "1" : "1/-1" }}>
-              <SectionHeader title="Event Log" sub="Full AI agent pipeline events" />
-              <div style={{ padding: "10px 18px 14px", maxHeight: 320, overflowY: "auto" }}>
-                {eventTape.length === 0 ? (
-                  <div style={{ fontSize: 11, color: C.textMuted, padding: "20px 0" }}>No events yet</div>
+
+            {/* Event Log */}
+            <Card T={T} style={{ gridColumn: isMobile ? "1" : "1/-1" }}>
+              <CardHeader T={T} title="Event Log" subtitle="Full AI agent pipeline events" />
+              <div style={{ padding: "10px 16px 14px", maxHeight: 320, overflowY: "auto" }}>
+                {!eventTape.length ? (
+                  <div style={{ fontSize: 11, color: T.textMuted, padding: "20px 0" }}>No events yet</div>
                 ) : eventTape.slice().reverse().map((e, i) => (
-                  <div key={i} style={{ display: "flex", gap: 8, padding: "6px 8px", borderRadius: 4, marginBottom: 2, background: i % 2 === 0 ? C.bg : "transparent", alignItems: "flex-start", flexWrap: isMobile ? "wrap" : "nowrap" }}>
-                    <span style={{ fontSize: 9, color: C.textDim, minWidth: 52, fontFamily: "monospace", flexShrink: 0 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN")}</span>
-                    <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? C.red : e.level === "success" ? C.green : C.amber, marginTop: 5, flexShrink: 0 }} />
-                    <span style={{ fontSize: 10, color: e.level === "error" ? C.red : e.level === "success" ? C.green : C.textMuted, flex: 1, wordBreak: "break-word" }}>{e.message}</span>
-                    <span style={{ fontSize: 9, color: C.textDim, flexShrink: 0 }}>{e.stage || ""}</span>
+                  <div key={i} style={{ display: "flex", gap: 8, padding: "6px 8px", borderRadius: 4, marginBottom: 2, background: i % 2 === 0 ? T.bg : "transparent", alignItems: "flex-start" }}>
+                    <Mono size={9} color={T.textDim}>{new Date(e.timestamp).toLocaleTimeString("en-IN")}</Mono>
+                    <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber, marginTop: 5, flexShrink: 0 }} />
+                    <span style={{ fontSize: 10.5, color: e.level === "error" ? T.red : e.level === "success" ? T.green : T.textSub, flex: 1 }}>{e.message}</span>
+                    {e.stage && <Mono size={9} color={T.textDim}>{e.stage}</Mono>}
                   </div>
                 ))}
               </div>
@@ -1738,101 +1630,86 @@ export default function TradingDashboard() {
           </div>
         )}
 
-        {/* ── PAPER SIMULATOR TAB ── */}
+        {/* SIMULATOR */}
         {activeTab === "simulator" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 10 }}>
-              <StatCard label="Mode" value="Historical Replay" sub="Fake money · no live order" color={C.cyan} icon={Shield} />
-              <StatCard label="Pipeline" value="AI + Risk + Execution" sub="Shared with live engine" color={C.purple} icon={Cpu} />
-              <StatCard label="Data Source" value="NSE/BSE Historical" sub="Stored in DB candles" color={C.amber} icon={Database} />
-              <StatCard label="Run ID" value={simState.runId || "—"} sub="Latest replay job" color={C.blue} icon={Activity} />
+              <StatTile T={T} label="Mode" value="Historical Replay" sub="Simulated · no live orders" color={T.accent} icon={Shield} />
+              <StatTile T={T} label="Pipeline" value="AI + Risk" sub="Shared with live engine" color={T.purple} icon={Cpu} />
+              <StatTile T={T} label="Data Source" value="NSE/BSE" sub="Stored candles" color={T.amber} icon={Database} />
+              <StatTile T={T} label="Run ID" value={simState.runId || "—"} sub="Latest job" color={T.blue} icon={Activity} />
             </div>
-
-            <Card>
-              <SectionHeader
-                title="Paper Sim (Historical AI Replay)"
-                sub={SIM_SOURCE}
-                right={(
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button
-                      onClick={backfillAndRunSimulation}
-                      disabled={simState.loading || simBackfilling}
-                      style={{
-                        background: `${C.cyan}15`,
-                        border: `1px solid ${C.cyan}40`,
-                        borderRadius: 5,
-                        padding: "5px 10px",
-                        cursor: simState.loading || simBackfilling ? "not-allowed" : "pointer",
-                        color: C.cyan,
-                        fontSize: 10,
-                        fontWeight: 700,
-                        opacity: simState.loading || simBackfilling ? 0.65 : 1,
-                      }}
-                    >
-                      {simBackfilling ? "BACKFILLING..." : "BACKFILL & RERUN"}
+            <Card T={T}>
+              <CardHeader T={T} title="Paper Simulator" subtitle={SIM_SOURCE}
+                right={
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={backfillAndRun} disabled={simState.loading || simBackfilling} style={{ ...btnPrimary(T.accent), opacity: simState.loading || simBackfilling ? 0.5 : 1 }}>
+                      {simBackfilling ? "Backfilling…" : "Backfill & Run"}
                     </button>
-                    <button
-                      onClick={loadSimulation}
-                      disabled={simState.loading || simBackfilling}
-                      style={{
-                        background: `${C.blue}15`,
-                        border: `1px solid ${C.blue}40`,
-                        borderRadius: 5,
-                        padding: "5px 10px",
-                        cursor: simState.loading || simBackfilling ? "not-allowed" : "pointer",
-                        color: C.blue,
-                        fontSize: 10,
-                        fontWeight: 700,
-                        opacity: simState.loading || simBackfilling ? 0.65 : 1,
-                      }}
-                    >
-                      RERUN
+                    <button onClick={loadSimulation} disabled={simState.loading || simBackfilling} style={{ ...btnPrimary(T.blue), opacity: simState.loading || simBackfilling ? 0.5 : 1 }}>
+                      Rerun
                     </button>
                   </div>
-                )}
+                }
               />
-              <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)", gap: 10 }}>
-                <input value={simConfig.symbols} onChange={e => setSimConfig(prev => ({ ...prev, symbols: e.target.value }))} placeholder="Symbols (comma separated)" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "inherit" }} />
-                <input value={simConfig.start_date} onChange={e => setSimConfig(prev => ({ ...prev, start_date: e.target.value }))} type="date" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "inherit" }} />
-                <input value={simConfig.end_date} onChange={e => setSimConfig(prev => ({ ...prev, end_date: e.target.value }))} type="date" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "inherit" }} />
-                <input value={simConfig.initial_capital} onChange={e => setSimConfig(prev => ({ ...prev, initial_capital: Number(e.target.value || 0) }))} type="number" placeholder="Initial capital" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "inherit" }} />
-                <input value={simConfig.fee_pct} onChange={e => setSimConfig(prev => ({ ...prev, fee_pct: Number(e.target.value || 0) }))} type="number" step="0.0001" placeholder="Fees" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "inherit" }} />
-                <input value={simConfig.slippage_pct} onChange={e => setSimConfig(prev => ({ ...prev, slippage_pct: Number(e.target.value || 0) }))} type="number" step="0.0001" placeholder="Slippage" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "inherit" }} />
-              </div>
-              <div style={{ padding: "0 18px 14px", display: "flex", flexDirection: "column", gap: 12 }}>
-                {simBackfilling && <div style={{ fontSize: 11, color: C.textMuted }}>Backfilling historical candles…</div>}
-                {simState.loading && <div style={{ fontSize: 11, color: C.textMuted }}>Running replay in backend…</div>}
+              <div style={{ padding: "14px 16px" }}>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: 10, marginBottom: 14 }}>
+                  {[
+                    { placeholder: "Symbols (comma-separated)", key: "symbols", type: "text" },
+                    { placeholder: "Start date", key: "start_date", type: "date" },
+                    { placeholder: "End date", key: "end_date", type: "date" },
+                    { placeholder: "Initial capital", key: "initial_capital", type: "number" },
+                    { placeholder: "Fee %", key: "fee_pct", type: "number", step: "0.0001" },
+                    { placeholder: "Slippage %", key: "slippage_pct", type: "number", step: "0.0001" },
+                  ].map(f => (
+                    <input key={f.key} type={f.type} step={f.step} placeholder={f.placeholder} value={simConfig[f.key]}
+                      onChange={e => setSimConfig(p => ({ ...p, [f.key]: f.type === "number" ? Number(e.target.value || 0) : e.target.value }))}
+                      style={inputStyle}
+                    />
+                  ))}
+                </div>
+
+                {simBackfilling && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Backfilling historical candles…</div>}
+                {simState.loading && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Running replay…</div>}
                 {simState.error && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <div style={{ fontSize: 11, color: C.red }}>Replay error: {simState.error}</div>
-                    <div style={{ fontSize: 10, color: C.textMuted }}>
-                      Tip: backfill candles for the same symbols/date window, then click RERUN.
-                    </div>
+                  <div style={{ background: T.redDim, border: `1px solid ${T.red}30`, borderRadius: 6, padding: "10px 14px", marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, color: T.red, marginBottom: 4 }}>Error: {simState.error}</div>
+                    <div style={{ fontSize: 10, color: T.textMuted }}>Tip: backfill candles for same symbols/date window, then click Rerun.</div>
                   </div>
                 )}
-                {!simState.loading && !simState.error && !simState.data && <div style={{ fontSize: 11, color: C.textMuted }}>No historical data/run yet. Backfill candles then click RERUN.</div>}
+                {!simState.loading && !simState.error && !simState.data && (
+                  <div style={{ fontSize: 11, color: T.textMuted }}>No data yet. Backfill candles then click Rerun.</div>
+                )}
 
-                {!!simState.data?.equity_curve?.length && (
+                {simState.data?.equity_curve?.length > 0 && (
                   <>
-                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(5,1fr)", gap: 10 }}>
-                      <StatCard label="Final Value" value={`₹${Math.round(simState.data.summary.final_value || 0).toLocaleString("en-IN")}`} color={C.cyan} />
-                      <StatCard label="Net P&L" value={<Num v={simState.data.summary.net_pnl || 0} size={16} />} color={(simState.data.summary.net_pnl || 0) >= 0 ? C.green : C.red} />
-                      <StatCard label="Drawdown" value={`${(simState.data.summary.drawdown_pct || 0).toFixed(2)}%`} color={C.red} />
-                      <StatCard label="Win Rate" value={`${(simState.data.summary.win_rate || 0).toFixed(1)}%`} color={C.amber} />
-                      <StatCard label="Trades" value={simState.data.summary.trade_count || 0} color={C.purple} />
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(5,1fr)", gap: 10, marginBottom: 14 }}>
+                      <StatTile T={T} label="Final Value" value={`₹${Math.round(simState.data.summary.final_value || 0).toLocaleString("en-IN")}`} color={T.accent} />
+                      <StatTile T={T} label="Net P&L" value={<span style={{ color: (simState.data.summary.net_pnl || 0) >= 0 ? T.green : T.red, fontFamily: "'IBM Plex Mono'", fontSize: 18, fontWeight: 800 }}>{(simState.data.summary.net_pnl || 0) >= 0 ? "+" : ""}₹{Math.abs(simState.data.summary.net_pnl || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>} color={T.green} />
+                      <StatTile T={T} label="Drawdown" value={`${(simState.data.summary.drawdown_pct || 0).toFixed(2)}%`} color={T.red} />
+                      <StatTile T={T} label="Win Rate" value={`${(simState.data.summary.win_rate || 0).toFixed(1)}%`} color={T.amber} />
+                      <StatTile T={T} label="Total Trades" value={simState.data.summary.trade_count || 0} color={T.purple} />
                     </div>
-                    <ResponsiveContainer width="100%" height={isMobile ? 200 : 280}>
-                      <LineChart data={(simState.data.equity_curve || []).map(x => ({ ...x, date: x.timestamp?.slice(0, 10) }))} margin={{ left: isMobile ? -10 : 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                        <XAxis dataKey="date" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} minTickGap={20} />
-                        <YAxis tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(0)}K`} width={isMobile ? 42 : 50} />
-                        <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }} formatter={v => [`₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`, "Equity"]} />
-                        <Line type="monotone" dataKey="equity" stroke={C.green} dot={false} strokeWidth={2} />
+                    <ResponsiveContainer width="100%" height={isMobile ? 180 : 240}>
+                      <LineChart data={(simState.data.equity_curve || []).map(x => ({ ...x, date: x.timestamp?.slice(0, 10) }))} margin={{ left: isMobile ? -8 : 0 }}>
+                        <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
+                        <XAxis dataKey="date" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} minTickGap={20} />
+                        <YAxis tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(0)}K`} width={isMobile ? 40 : 50} />
+                        <Tooltip {...tooltipStyle(T)} formatter={v => [`₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`, "Equity"]} />
+                        <Line type="monotone" dataKey="equity" stroke={T.accent} dot={false} strokeWidth={2} />
                       </LineChart>
                     </ResponsiveContainer>
-                    <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px", maxHeight: 180, overflowY: "auto" }}>
-                      <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 8 }}>Trade log (latest first)</div>
-                      {(simState.data.trades || []).length === 0 ? <div style={{ fontSize: 10, color: C.textMuted }}>No trades for selected period.</div> : simState.data.trades.map((t, i) => <div key={`${t.timestamp}-${i}`} style={{ fontSize: 10, color: C.textMuted, padding: "4px 0", borderBottom: `1px dashed ${C.border}` }}><span style={{ color: t.action === "BUY" ? C.green : C.red, fontWeight: 700, marginRight: 8 }}>{t.action}</span>{t.timestamp?.slice(0, 10)} {t.symbol} @ ₹{Math.round(t.price).toLocaleString("en-IN")}</div>)}
+                    <div style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 6, padding: "10px 14px", maxHeight: 180, overflowY: "auto", marginTop: 14 }}>
+                      <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Trade log (latest first)</div>
+                      {(simState.data.trades || []).length === 0 ? (
+                        <div style={{ fontSize: 10, color: T.textMuted }}>No trades in selected period.</div>
+                      ) : simState.data.trades.map((t, i) => (
+                        <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "4px 0", borderBottom: `1px dashed ${T.border}` }}>
+                          <span style={{ color: t.action === "BUY" ? T.green : T.red, fontWeight: 700, marginRight: 8 }}>{t.action}</span>
+                          <Mono size={10} color={T.textMuted}>{t.timestamp?.slice(0, 10)}</Mono>
+                          <span style={{ marginLeft: 8 }}>{t.symbol} @ ₹{Math.round(t.price).toLocaleString("en-IN")}</span>
+                        </div>
+                      ))}
                     </div>
                   </>
                 )}
@@ -1840,52 +1717,52 @@ export default function TradingDashboard() {
             </Card>
           </div>
         )}
-  
-        {/* ── ANALYTICS TAB ── */}
+
+        {/* ANALYTICS */}
         {activeTab === "analytics" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : isTablet ? "repeat(3,1fr)" : "repeat(6,1fr)", gap: 10 }}>
               {[
-                { label: "30D P&L", value: `₹${((analyticsData?.total_pnl || 0) / 1000).toFixed(1)}K` },
-                { label: "Total Trades", value: analyticsData?.total_trades || 0 },
-                { label: "Win Rate", value: `${(analyticsData?.win_rate || 0).toFixed(1)}%` },
-                { label: "Avg Win", value: `₹${(analyticsData?.avg_win || 0).toFixed(0)}` },
-                { label: "Avg Loss", value: `₹${(analyticsData?.avg_loss || 0).toFixed(0)}` },
-                { label: "Profit Factor", value: (analyticsData?.profit_factor || 0).toFixed(2) },
-              ].map(s => <StatCard key={s.label} label={s.label} value={s.value} color={C.cyan} />)}
+                { label: "30D P&L", value: `₹${((analyticsData?.total_pnl || 0) / 1000).toFixed(1)}K`, color: T.accent },
+                { label: "Total Trades", value: analyticsData?.total_trades || 0, color: T.blue },
+                { label: "Win Rate", value: `${(analyticsData?.win_rate || 0).toFixed(1)}%`, color: T.green },
+                { label: "Avg Win", value: `₹${(analyticsData?.avg_win || 0).toFixed(0)}`, color: T.green },
+                { label: "Avg Loss", value: `₹${(analyticsData?.avg_loss || 0).toFixed(0)}`, color: T.red },
+                { label: "Profit Factor", value: (analyticsData?.profit_factor || 0).toFixed(2), color: T.amber },
+              ].map(s => <StatTile key={s.label} T={T} label={s.label} value={s.value} color={s.color} />)}
             </div>
 
-            <Card>
-              <SectionHeader title="14-Day P&L History" />
-              <div style={{ padding: "14px 18px" }}>
+            <Card T={T}>
+              <CardHeader T={T} title="14-Day P&L History" subtitle="Net daily returns" />
+              <div style={{ padding: "14px 16px" }}>
                 {dailyHistory?.history?.length ? (
-                  <ResponsiveContainer width="100%" height={isMobile ? 160 : 200}>
-                    <BarChart data={dailyHistory.history.slice().reverse()} margin={{ left: isMobile ? -10 : 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                      <XAxis dataKey="date" tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
-                      <YAxis tick={{ fill: C.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 42 : 50} />
-                      <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 10 }} formatter={v => [`₹${v.toLocaleString("en-IN")}`, "Net P&L"]} />
-                      <ReferenceLine y={0} stroke={C.border} />
+                  <ResponsiveContainer width="100%" height={isMobile ? 150 : 200}>
+                    <BarChart data={dailyHistory.history.slice().reverse()} margin={{ left: isMobile ? -8 : 0 }}>
+                      <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
+                      <XAxis dataKey="date" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
+                      <YAxis tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 40 : 50} />
+                      <Tooltip {...tooltipStyle(T)} formatter={v => [`₹${v.toLocaleString("en-IN")}`, "Net P&L"]} />
+                      <ReferenceLine y={0} stroke={T.border} />
                       <Bar dataKey="net_pnl" radius={[3, 3, 0, 0]}>
                         {(dailyHistory.history || []).map((entry, i) => (
-                          <Cell key={i} fill={(entry.net_pnl || 0) >= 0 ? C.green : C.red} opacity={0.75} />
+                          <Cell key={i} fill={(entry.net_pnl || 0) >= 0 ? T.green : T.red} opacity={0.75} />
                         ))}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
                 ) : (
-                  <div style={{ textAlign: "center", padding: "40px", color: C.textMuted, fontSize: 12 }}>No history yet</div>
+                  <div style={{ textAlign: "center", padding: "40px", color: T.textMuted, fontSize: 12 }}>No history yet</div>
                 )}
               </div>
             </Card>
 
-            <ConfidenceTimelinePanel decisions={agentDecisions} />
+            <AITimelinePanel decisions={agentDecisions} T={T} />
           </div>
         )}
       </main>
 
-      {/* MOBILE BOTTOM TAB BAR */}
-      {isMobile && <MobileTabBar tabs={TABS} activeTab={activeTab} setActiveTab={setActiveTab} />}
+      {/* MOBILE BOTTOM NAV */}
+      {isMobile && <BottomNav tabs={TABS} active={activeTab} onChange={setActiveTab} T={T} />}
     </div>
   );
 }
