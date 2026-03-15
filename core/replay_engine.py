@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ class ReplayConfig:
     fee_pct: float = 0.0003
     slippage_pct: float = 0.0005
     ai_every_n_candles: int = 1
+    confidence_threshold: float | None = None
     
 
 class ReplayEngine:
@@ -41,71 +43,120 @@ class ReplayEngine:
 
         from database.repository import HistoricalCandleRepository, ReplayRunRepository
 
-        await ReplayRunRepository.mark_running(run_id)
-        candles = await HistoricalCandleRepository.fetch_window(cfg.symbols, cfg.exchange, cfg.timeframe, cfg.start_date, cfg.end_date)
-        if not candles:
-            symbols = ", ".join(cfg.symbols) if cfg.symbols else "(none)"
-            start = cfg.start_date.date().isoformat() if cfg.start_date else "(open)"
-            end = cfg.end_date.date().isoformat() if cfg.end_date else "(open)"
-            error_msg = (
-                "No historical candles available for the selected window. "
-                f"symbols={symbols}, exchange={cfg.exchange}, timeframe={cfg.timeframe}, "
-                f"start={start}, end={end}. Backfill candles first and rerun."
-            )
-            await ReplayRunRepository.mark_failed(run_id, error_msg)
-            return {"status": "failed", "error": "No historical candles available"}
-
-        by_ts: dict[datetime, dict[str, dict]] = {}
-        for c in candles:
-            by_ts.setdefault(c["timestamp"], {})[c["symbol"]] = c
-
-        cash = Decimal(str(cfg.initial_capital))
-        positions: dict[str, dict] = {}
-        trades: list[dict] = []
-        equity_curve: list[dict] = []
-        price_history: dict[str, list[float]] = {symbol: [] for symbol in cfg.symbols}
-
-        await self.risk.initialize(Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash))
-
-        sorted_ts = sorted(by_ts)
-        total_points = len(sorted_ts)
-
-        for idx, ts in enumerate(sorted_ts, start=1):
-            snap = by_ts[ts]
-            for symbol in cfg.symbols:
-                candle_data = snap.get(symbol)
-                if candle_data:
-                    price_history.setdefault(symbol, []).append(float(candle_data["close"]))
-                    if len(price_history[symbol]) > 240:
-                        price_history[symbol] = price_history[symbol][-240:]
-            watch = []
-            for symbol, candle in snap.items():
-                watch.append({"symbol": symbol, "ltp": candle["close"], "change_pct": 0.0, "indicators": {"overall_signal": "neutral"}, "levels": {}})
-
-            open_positions = []
-            for symbol, p in positions.items():
-                ltp = Decimal(str(snap.get(symbol, {"close": float(p["entry_price"])})["close"]))
-                qty = p["qty"]
-                pnl = (ltp - p["entry_price"]) * qty
-                side = OrderSide.BUY if qty > 0 else OrderSide.SELL
-                open_positions.append(
-                    Position(
-                        instrument=Instrument(symbol=symbol, exchange=Exchange[cfg.exchange], instrument_type=InstrumentType.EQ),
-                        side=side,
-                        quantity=abs(int(qty)),
-                        average_price=p["entry_price"],
-                        ltp=ltp,
-                        pnl=pnl,
-                        pnl_pct=float((pnl / (p["entry_price"] * abs(qty))) * 100) if qty else 0.0,
-                        product=ProductType.CNC,
-                        broker="replay",
-                    )
+        try:
+            await ReplayRunRepository.mark_running(run_id)
+            candles = await HistoricalCandleRepository.fetch_window(cfg.symbols, cfg.exchange, cfg.timeframe, cfg.start_date, cfg.end_date)
+            if not candles:
+                symbols = ", ".join(cfg.symbols) if cfg.symbols else "(none)"
+                start = cfg.start_date.date().isoformat() if cfg.start_date else "(open)"
+                end = cfg.end_date.date().isoformat() if cfg.end_date else "(open)"
+                error_msg = (
+                    "No historical candles available for the selected window. "
+                    f"symbols={symbols}, exchange={cfg.exchange}, timeframe={cfg.timeframe}, "
+                    f"start={start}, end={end}. Backfill candles first and rerun."
                 )
+                await ReplayRunRepository.mark_failed(run_id, error_msg)
+                return {"status": "failed", "error": "No historical candles available"}
 
-            context = MarketContext(
-                timestamp=ts,
-                nifty50_ltp=float(snap.get("NIFTY 50", next(iter(snap.values()))["close"])),
-                banknifty_ltp=float(snap.get("NIFTY BANK", next(iter(snap.values()))["close"])),
+            by_ts: dict[datetime, dict[str, dict]] = {}
+            for c in candles:
+                by_ts.setdefault(c["timestamp"], {})[c["symbol"]] = c
+
+            cash = Decimal(str(cfg.initial_capital))
+            positions: dict[str, dict] = {}
+            trades: list[dict] = []
+            equity_curve: list[dict] = []
+            price_history: dict[str, list[float]] = {symbol: [] for symbol in cfg.symbols}
+            volume_history: dict[str, list[float]] = {symbol: [] for symbol in cfg.symbols}
+            last_seen: dict[str, dict] = {}
+            last_index_prices = {"NIFTY 50": None, "NIFTY BANK": None}
+
+            if cfg.confidence_threshold is not None:
+                self.agent.confidence_threshold = max(0.30, min(0.95, float(cfg.confidence_threshold)))
+
+            await self.risk.initialize(Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash))
+
+            sorted_ts = sorted(by_ts)
+            total_points = len(sorted_ts)
+
+            for idx, ts in enumerate(sorted_ts, start=1):
+                snap = by_ts[ts]
+                for symbol in cfg.symbols:
+                    candle_data = snap.get(symbol)
+                    if candle_data:
+                        last_seen[symbol] = candle_data
+                        price_history.setdefault(symbol, []).append(float(candle_data["close"]))
+                        volume_history.setdefault(symbol, []).append(float(candle_data.get("volume") or 0))
+                        if len(price_history[symbol]) > 240:
+                            price_history[symbol] = price_history[symbol][-240:]
+                        if len(volume_history[symbol]) > 240:
+                            volume_history[symbol] = volume_history[symbol][-240:]
+
+                for idx_symbol in ("NIFTY 50", "NIFTY BANK"):
+                    idx_candle = snap.get(idx_symbol)
+                    if idx_candle:
+                        last_index_prices[idx_symbol] = float(idx_candle["close"])
+
+                watch = []
+                for symbol in cfg.symbols:
+                    candle = snap.get(symbol) or last_seen.get(symbol)
+                    if not candle:
+                        continue
+                    closes = price_history.get(symbol, [])
+                    change_pct = 0.0
+                    if len(closes) >= 2 and closes[-2] > 0:
+                        change_pct = (closes[-1] - closes[-2]) / closes[-2] * 100
+                    rsi = _compute_rsi(closes, period=14)
+                    macd, macd_signal = _compute_macd(closes)
+                    bb_signal = _compute_bb_signal(closes)
+                    volume_ratio = _compute_volume_ratio(volume_history.get(symbol, []))
+                    overall_signal = _derive_overall_signal(rsi, macd, macd_signal, bb_signal)
+                    levels = _build_levels(candle)
+                    watch.append(
+                        {
+                            "symbol": symbol,
+                            "ltp": float(candle["close"]),
+                            "change_pct": float(change_pct),
+                            "indicators": {
+                                "rsi": round(rsi, 2) if rsi is not None else "N/A",
+                                "macd_signal": round(macd - macd_signal, 4) if macd is not None and macd_signal is not None else "N/A",
+                                "bb_signal": bb_signal,
+                                "supertrend": "bullish" if (rsi or 50.0) >= 50 else "bearish",
+                                "volume_ratio": round(volume_ratio, 2),
+                                "overall_signal": overall_signal,
+                            },
+                            "levels": levels,
+                            "is_stale": symbol not in snap,
+                        }
+                    )
+
+                open_positions = []
+                for symbol, p in positions.items():
+                    source_candle = snap.get(symbol) or last_seen.get(symbol) or {"close": float(p["entry_price"])}
+                    ltp = Decimal(str(source_candle["close"]))
+                    qty = p["qty"]
+                    pnl = (ltp - p["entry_price"]) * qty
+                    side = OrderSide.BUY if qty > 0 else OrderSide.SELL
+                    open_positions.append(
+                        Position(
+                            instrument=Instrument(symbol=symbol, exchange=Exchange[cfg.exchange], instrument_type=InstrumentType.EQ),
+                            side=side,
+                            quantity=abs(int(qty)),
+                            average_price=p["entry_price"],
+                            ltp=ltp,
+                            pnl=pnl,
+                            pnl_pct=float((pnl / (p["entry_price"] * abs(qty))) * 100) if qty else 0.0,
+                            product=ProductType.CNC,
+                            broker="replay",
+                        )
+                    )
+
+                nifty50_ltp = _resolve_index_ltp(last_index_prices["NIFTY 50"], fallback=24000.0)
+                banknifty_ltp = _resolve_index_ltp(last_index_prices["NIFTY BANK"], fallback=50000.0)
+                context = MarketContext(
+                    timestamp=ts,
+                    nifty50_ltp=nifty50_ltp,
+                    banknifty_ltp=banknifty_ltp,
                 india_vix=14.0,
                 market_trend="sideways",
                 session="mid_session",
@@ -119,62 +170,109 @@ class ReplayEngine:
                 pcr=1.0,
             )
 
-            should_run_ai = max(int(cfg.ai_every_n_candles or 1), 1)
-            if idx % should_run_ai == 0:
-                try:
-                    signals = await self.agent.analyze_and_decide(context)
-                except Exception as exc:
-                    logger.warning("AI analyze failed in replay, skipping candle: %s", exc)
+                should_run_ai = max(int(cfg.ai_every_n_candles or 1), 1)
+                if idx % should_run_ai == 0:
+                    try:
+                        signals = await self.agent.analyze_and_decide(context)
+                    except Exception as exc:
+                        logger.warning("AI analyze failed in replay, skipping candle: %s", exc)
+                        signals = []
+                else:
                     signals = []
-            else:
-                signals = []
 
-            for s in signals:
-                if not s.is_actionable or s.symbol not in snap:
-                    continue
-                price = Decimal(str(snap[s.symbol]["close"]))
-                exec_price = price * (Decimal("1") + Decimal(str(cfg.slippage_pct if s.action in (SignalAction.BUY, SignalAction.COVER) else -cfg.slippage_pct)))
-                funds = Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash)
-                check = await self.risk.check_pre_trade(s.symbol, s.action.value, s.quantity, exec_price, s.stop_loss, open_positions, funds)
-                if not check.approved:
-                    continue
-                qty = Decimal(str(check.adjusted_quantity or s.quantity or 1))
-                fee = exec_price * qty * Decimal(str(cfg.fee_pct))
-                action = s.action.value
-
-                if action in ("BUY", "COVER"):
-                    cash -= exec_price * qty + fee
-                    pos = positions.get(s.symbol)
-                    if pos:
-                        pos["qty"], pos["entry_price"] = _merge_position(pos["qty"], pos["entry_price"], qty, exec_price)
-                    else:
-                        positions[s.symbol] = {"qty": qty, "entry_price": exec_price}
-                    trade_pnl = Decimal("0")
-                elif action in ("SELL", "SHORT"):
-                    if s.symbol in positions:
-                        pos = positions[s.symbol]
-                        close_qty = min(pos["qty"], qty)
-                        pnl = (exec_price - pos["entry_price"]) * close_qty - fee
-                        cash += exec_price * close_qty - fee
-                        pos["qty"] -= close_qty
-                        if pos["qty"] <= 0:
-                            positions.pop(s.symbol, None)
-                        await self.risk.record_trade(order=None, pnl=pnl)
-                        trade_pnl = pnl
-                    else:
+                for s in signals:
+                    signal_candle = snap.get(s.symbol) or last_seen.get(s.symbol)
+                    if not s.is_actionable or not signal_candle:
                         continue
+                    price = Decimal(str(signal_candle["close"]))
+                    exec_price = price * (Decimal("1") + Decimal(str(cfg.slippage_pct if s.action in (SignalAction.BUY, SignalAction.COVER) else -cfg.slippage_pct)))
+                    funds = Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash)
+                    check = await self.risk.check_pre_trade(s.symbol, s.action.value, s.quantity, exec_price, s.stop_loss, open_positions, funds)
+                    if not check.approved:
+                        continue
+                    qty = Decimal(str(check.adjusted_quantity or s.quantity or 1))
+                    fee = exec_price * qty * Decimal(str(cfg.fee_pct))
+                    action = s.action.value
+                    fee_remaining = fee
+                    qty_remaining = qty
+                    trade_pnl = Decimal("0")
+                    realized = False
 
-                trades.append({"run_id": run_id, "timestamp": ts, "symbol": s.symbol, "exchange": cfg.exchange, "action": action, "quantity": int(qty), "price": float(exec_price), "fees": float(fee), "slippage_pct": cfg.slippage_pct, "pnl": float(trade_pnl), "rationale": s.rationale})
+                    if action in ("BUY", "COVER"):
+                        # Close short first.
+                        pos = positions.get(s.symbol)
+                        if pos and pos["qty"] < 0 and qty_remaining > 0:
+                            short_qty_abs = abs(pos["qty"])
+                            close_qty = min(short_qty_abs, qty_remaining)
+                            fee_alloc = fee * (close_qty / qty) if qty > 0 else Decimal("0")
+                            entry_fee_alloc = _entry_fee_allocation(pos, close_qty)
+                            pnl = (pos["entry_price"] - exec_price) * close_qty - fee_alloc - entry_fee_alloc
+                            cash -= exec_price * close_qty + fee_alloc
+                            pos["qty"] += close_qty
+                            pos["entry_fees"] = max(Decimal("0"), pos.get("entry_fees", Decimal("0")) - entry_fee_alloc)
+                            qty_remaining -= close_qty
+                            fee_remaining -= fee_alloc
+                            trade_pnl += pnl
+                            realized = True
+                            if pos["qty"] == 0:
+                                positions.pop(s.symbol, None)
+                            await self.risk.record_trade(order=None, pnl=pnl)
 
-            equity = cash
-            for symbol, p in positions.items():
-                equity += Decimal(str(snap.get(symbol, {"close": float(p["entry_price"])})["close"])) * p["qty"]
-            equity_curve.append({"timestamp": ts.isoformat(), "equity": float(equity)})
+                        if qty_remaining > 0:
+                            cash -= exec_price * qty_remaining + fee_remaining
+                            pos = positions.get(s.symbol)
+                            if pos and pos["qty"] > 0:
+                                pos["qty"], pos["entry_price"] = _merge_position(pos["qty"], pos["entry_price"], qty_remaining, exec_price)
+                                pos["entry_fees"] = pos.get("entry_fees", Decimal("0")) + fee_remaining
+                            else:
+                                positions[s.symbol] = {"qty": qty_remaining, "entry_price": exec_price, "entry_fees": fee_remaining}
 
-            realized = [t for t in trades if t.get("action") in ("SELL", "SHORT")]
-            live_wins = sum(1 for t in realized if (t.get("pnl") or 0) > 0)
-            live_losses = sum(1 for t in realized if (t.get("pnl") or 0) < 0)
-            live_snapshot = {
+                    elif action in ("SELL", "SHORT"):
+                        # Close long first.
+                        pos = positions.get(s.symbol)
+                        if pos and pos["qty"] > 0 and qty_remaining > 0:
+                            close_qty = min(pos["qty"], qty_remaining)
+                            fee_alloc = fee * (close_qty / qty) if qty > 0 else Decimal("0")
+                            entry_fee_alloc = _entry_fee_allocation(pos, close_qty)
+                            pnl = (exec_price - pos["entry_price"]) * close_qty - fee_alloc - entry_fee_alloc
+                            cash += exec_price * close_qty - fee_alloc
+                            pos["qty"] -= close_qty
+                            pos["entry_fees"] = max(Decimal("0"), pos.get("entry_fees", Decimal("0")) - entry_fee_alloc)
+                            qty_remaining -= close_qty
+                            fee_remaining -= fee_alloc
+                            trade_pnl += pnl
+                            realized = True
+                            if pos["qty"] == 0:
+                                positions.pop(s.symbol, None)
+                            await self.risk.record_trade(order=None, pnl=pnl)
+
+                        if action == "SHORT" and qty_remaining > 0:
+                            cash += exec_price * qty_remaining - fee_remaining
+                            pos = positions.get(s.symbol)
+                            if pos and pos["qty"] < 0:
+                                existing_abs = abs(pos["qty"])
+                                new_abs = existing_abs + qty_remaining
+                                pos["entry_price"] = ((pos["entry_price"] * existing_abs) + (exec_price * qty_remaining)) / new_abs
+                                pos["qty"] = -new_abs
+                                pos["entry_fees"] = pos.get("entry_fees", Decimal("0")) + fee_remaining
+                            else:
+                                positions[s.symbol] = {"qty": -qty_remaining, "entry_price": exec_price, "entry_fees": fee_remaining}
+                        elif action == "SELL" and qty_remaining > 0:
+                            # SELL without long inventory does nothing.
+                            continue
+
+                    trades.append({"run_id": run_id, "timestamp": ts, "symbol": s.symbol, "exchange": cfg.exchange, "action": action, "quantity": int(qty), "price": float(exec_price), "fees": float(fee), "slippage_pct": cfg.slippage_pct, "pnl": float(trade_pnl), "realized": realized, "rationale": s.rationale})
+
+                equity = cash
+                for symbol, p in positions.items():
+                    source_candle = snap.get(symbol) or last_seen.get(symbol) or {"close": float(p["entry_price"])}
+                    equity += Decimal(str(source_candle["close"])) * p["qty"]
+                equity_curve.append({"timestamp": ts.isoformat(), "equity": float(equity)})
+
+                realized_trades = [t for t in trades if bool(t.get("realized"))]
+                live_wins = sum(1 for t in realized_trades if (t.get("pnl") or 0) > 0)
+                live_losses = sum(1 for t in realized_trades if (t.get("pnl") or 0) < 0)
+                live_snapshot = {
                 "candle": idx,
                 "totalCandles": total_points,
                 "equity": float(equity),
@@ -192,7 +290,7 @@ class ReplayEngine:
                     for t in trades[-60:]
                 ][::-1],
                 "positions": {
-                    symbol: {"side": "BUY", "entry": float(pos["entry_price"]), "qty": int(pos["qty"])}
+                    symbol: {"side": "BUY" if pos["qty"] > 0 else "SELL", "entry": float(pos["entry_price"]), "qty": int(pos["qty"])}
                     for symbol, pos in positions.items()
                 },
                 "openSignals": [],
@@ -218,37 +316,153 @@ class ReplayEngine:
                 "priceData": price_history,
             }
 
-            await ReplayRunRepository.mark_progress(
-                run_id,
-                metrics={
-                    "progress": {
-                        "processed": idx,
-                        "total": total_points,
-                        "pct": round((idx / total_points) * 100, 2) if total_points else 0,
-                        "current_timestamp": ts.isoformat(),
+                await ReplayRunRepository.mark_progress(
+                    run_id,
+                    metrics={
+                        "progress": {
+                            "processed": idx,
+                            "total": total_points,
+                            "pct": round((idx / total_points) * 100, 2) if total_points else 0,
+                            "current_timestamp": ts.isoformat(),
+                        },
+                        "live": live_snapshot,
                     },
-                    "live": live_snapshot,
-                },
-            )
+                )
     
-        final_value = equity_curve[-1]["equity"] if equity_curve else float(cfg.initial_capital)
-        total_return = ((final_value - cfg.initial_capital) / cfg.initial_capital * 100) if cfg.initial_capital else 0.0
-        summary = _summarize_trades(trades)
-        metrics = {
-            "final_value": final_value,
-            "net_pnl": final_value - cfg.initial_capital,
-            "return_pct": total_return,
-            "trade_count": summary["completed_trades"],
-            "order_count": summary["order_count"],
-            "completed_trades": summary["completed_trades"],
-            "open_positions_count": len(positions),
-            "win_rate": summary["win_rate"],
-            "drawdown_pct": _max_drawdown(equity_curve),
-            "profit_factor": summary["profit_factor"],
-        }
+            final_value = equity_curve[-1]["equity"] if equity_curve else float(cfg.initial_capital)
+            total_return = ((final_value - cfg.initial_capital) / cfg.initial_capital * 100) if cfg.initial_capital else 0.0
+            summary = _summarize_trades(trades)
+            metrics = {
+                "final_value": final_value,
+                "net_pnl": final_value - cfg.initial_capital,
+                "return_pct": total_return,
+                "trade_count": summary["order_count"],
+                "order_count": summary["order_count"],
+                "completed_trades": summary["completed_trades"],
+                "open_positions_count": len(positions),
+                "win_rate": summary["win_rate"],
+                "drawdown_pct": _max_drawdown(equity_curve),
+                "profit_factor": summary["profit_factor"],
+            }
 
-        await ReplayRunRepository.save_results(run_id, metrics=metrics, equity_curve=equity_curve, trades=trades)
-        return {"status": "completed", "metrics": metrics, "equity_curve": equity_curve, "trades": trades}
+            await ReplayRunRepository.save_results(run_id, metrics=metrics, equity_curve=equity_curve, trades=trades)
+            return {"status": "completed", "metrics": metrics, "equity_curve": equity_curve, "trades": trades}
+        except Exception as exc:
+            logger.exception("Replay run %s failed unexpectedly", run_id)
+            await ReplayRunRepository.mark_failed(run_id, str(exc))
+            return {"status": "failed", "error": str(exc)}
+
+
+def _entry_fee_allocation(position: dict, close_qty: Decimal) -> Decimal:
+    qty = abs(position.get("qty", Decimal("0")))
+    entry_fees = position.get("entry_fees", Decimal("0"))
+    if qty <= 0 or entry_fees <= 0:
+        return Decimal("0")
+    ratio = min(Decimal("1"), close_qty / qty)
+    return entry_fees * ratio
+
+
+def _ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    alpha = 2 / (period + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(alpha * v + (1 - alpha) * out[-1])
+    return out
+
+
+def _compute_rsi(values: list[float], period: int = 14) -> float | None:
+    if len(values) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(-period, 0):
+        delta = values[i] - values[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(abs(min(delta, 0.0)))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _compute_macd(values: list[float]) -> tuple[float | None, float | None]:
+    if len(values) < 26:
+        return None, None
+    ema12 = _ema(values, 12)
+    ema26 = _ema(values, 26)
+    macd_line = [a - b for a, b in zip(ema12, ema26)]
+    signal = _ema(macd_line, 9)
+    return macd_line[-1], signal[-1] if signal else None
+
+
+def _compute_bb_signal(values: list[float], period: int = 20) -> str:
+    if len(values) < period:
+        return "neutral"
+    window = values[-period:]
+    mean = sum(window) / period
+    variance = sum((x - mean) ** 2 for x in window) / period
+    std = math.sqrt(variance)
+    upper = mean + 2 * std
+    lower = mean - 2 * std
+    last = values[-1]
+    if last > upper:
+        return "above_upper"
+    if last < lower:
+        return "below_lower"
+    return "inside_bands"
+
+
+def _compute_volume_ratio(volumes: list[float], period: int = 20) -> float:
+    if not volumes:
+        return 1.0
+    recent = volumes[-period:]
+    avg = sum(recent) / len(recent)
+    if avg <= 0:
+        return 1.0
+    return volumes[-1] / avg
+
+
+def _derive_overall_signal(rsi: float | None, macd: float | None, macd_signal: float | None, bb_signal: str) -> str:
+    score = 0
+    if rsi is not None:
+        if rsi <= 35:
+            score += 1
+        elif rsi >= 65:
+            score -= 1
+    if macd is not None and macd_signal is not None:
+        score += 1 if macd >= macd_signal else -1
+    if bb_signal == "below_lower":
+        score += 1
+    elif bb_signal == "above_upper":
+        score -= 1
+    if score >= 2:
+        return "bullish"
+    if score <= -2:
+        return "bearish"
+    return "neutral"
+
+
+def _build_levels(candle: dict) -> dict:
+    high = float(candle.get("high") or candle.get("close") or 0)
+    low = float(candle.get("low") or candle.get("close") or 0)
+    close = float(candle.get("close") or 0)
+    pivot = (high + low + close) / 3 if close else 0.0
+    return {
+        "pivot": round(pivot, 2),
+        "r1": round((2 * pivot) - low, 2),
+        "s1": round((2 * pivot) - high, 2),
+    }
+
+
+def _resolve_index_ltp(last_value: float | None, fallback: float) -> float:
+    """Use only real index history; never proxy from watchlist stocks."""
+    if last_value is None:
+        return float(fallback)
+    return float(last_value)
 
 
 def _max_drawdown(equity_curve: list[dict]) -> float:
@@ -273,7 +487,9 @@ def _merge_position(old_qty: Decimal, old_entry: Decimal, add_qty: Decimal, add_
 
 
 def _summarize_trades(trades: list[dict]) -> dict:
-    realized_trades = [t for t in trades if t.get("action") in ("SELL", "SHORT")]
+    realized_trades = [t for t in trades if t.get("realized") is True]
+    if not realized_trades:
+        realized_trades = [t for t in trades if t.get("action") in ("SELL", "SHORT", "COVER")]
     wins = [t for t in realized_trades if (t.get("pnl") or 0) > 0]
     losses = [t for t in realized_trades if (t.get("pnl") or 0) < 0]
     profit_factor = (sum((t.get("pnl") or 0) for t in wins) / abs(sum((t.get("pnl") or 0) for t in losses))) if losses else None
@@ -290,5 +506,8 @@ async def create_and_start_replay(app_config: dict, payload: dict) -> dict:
     run_id = str(uuid.uuid4())
     await ReplayRunRepository.create(run_id, payload)
     engine = ReplayEngine(app_config)
-    asyncio.create_task(engine.run(run_id, ReplayConfig(**payload)))
+    async def _safe_replay_task() -> None:
+        await engine.run(run_id, ReplayConfig(**payload))
+
+    asyncio.create_task(_safe_replay_task())
     return {"run_id": run_id, "status": "queued"}
