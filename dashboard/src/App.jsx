@@ -49,6 +49,13 @@ const toUiError = (err, fallback = "Unexpected error") => {
   return msg && msg.trim() ? msg : fallback;
 };
 
+const toIsoDateOrNull = (value) => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+};
+
 // ─── THEME ───────────────────────────────────────────────────────────────────
 const DARK = {
   bg: "#03060d", bgAlt: "#060b14", surface: "#08111e", card: "#0a1525",
@@ -397,7 +404,7 @@ function ThoughtStream({ thoughts, isThinking, T }) {
       })}
       {!thoughts?.length && (
         <div style={{ fontSize: 11, color: T.textMuted, padding: "12px 0", fontFamily: "'Share Tech Mono', monospace" }}>
-          Waiting for simulation to start…
+          Waiting for replay data…
         </div>
       )}
     </div>
@@ -1215,6 +1222,80 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
     priceData: null,
   });
 
+  const hasReplayData = Array.isArray(simState.data?.equity_curve) && simState.data.equity_curve.length > 0;
+  const hasLiveReplay = Boolean(simState.liveReplay?.equityHistory?.length);
+  const replayActive = simState.loading || hasReplayData || hasLiveReplay;
+
+  const replayDerived = useMemo(() => {
+    if (simState.loading && simState.liveReplay) {
+      const snapshot = simState.liveReplay;
+      return {
+        ...snapshot,
+        date: snapshot?.date ? new Date(snapshot.date) : new Date(),
+        tradeLog: (snapshot?.tradeLog || []).map(t => ({
+          ...t,
+          time: t?.time ? new Date(t.time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—",
+        })),
+      };
+    }
+    if (!hasReplayData) return null;
+    const equityCurve = simState.data?.equity_curve || [];
+    const trades = [...(simState.data?.trades || [])].sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+    const lastPoint = equityCurve[equityCurve.length - 1] || {};
+    const lastDate = lastPoint.timestamp ? new Date(lastPoint.timestamp) : new Date();
+    const wins = trades.filter(t => Number(t.pnl || 0) > 0).length;
+    const losses = trades.filter(t => Number(t.pnl || 0) < 0).length;
+    const positions = {};
+    for (const t of trades) {
+      const action = String(t.action || "").toUpperCase();
+      if (action === "BUY") positions[t.symbol] = { side: "BUY", entry: Number(t.price || 0), qty: Number(t.quantity || 0) };
+      if (action === "SELL") delete positions[t.symbol];
+    }
+    const thoughts = trades.slice(-25).map(t => ({
+      timestamp: t.timestamp,
+      level: String(t.action || "").toUpperCase() === "BUY" ? "success" : "info",
+      message: `${String(t.action || "").toUpperCase()} <strong>${t.symbol || ""}</strong> @ ₹${Math.round(Number(t.price || 0)).toLocaleString("en-IN")} · Qty ${Number(t.quantity || 0)}`,
+    }));
+    return {
+      candle: equityCurve.length,
+      totalCandles: equityCurve.length,
+      equity: Number(lastPoint.equity || simConfig.initial_capital || 100000),
+      equityHistory: equityCurve.map(p => Number(p.equity || 0)),
+      date: lastDate,
+      tradeLog: [...(simState.data?.trades || [])].sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || ""))).map(t => ({
+        symbol: t.symbol,
+        action: String(t.action || "").toUpperCase(),
+        price: Number(t.price || 0),
+        quantity: Number(t.quantity || 0),
+        pnl: t.pnl == null ? null : Number(t.pnl),
+        time: t.timestamp ? new Date(t.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—",
+      })),
+      positions,
+      openSignals: [],
+      decisions: Number(simState.data?.summary?.order_count || 0),
+      signalCount: Number(simState.data?.summary?.order_count || 0),
+      wins,
+      losses,
+      maxEquity: Math.max(...equityCurve.map(p => Number(p.equity || 0))),
+      maxDrawdown: Number(simState.data?.summary?.drawdown_pct || 0),
+      stage: simState.loading ? "placing_orders" : "decision_complete",
+      progressPct: Number(simState.progress?.pct || 100),
+      regime: "replay_backtest",
+      commentary: `Replay window: ${simConfig.start_date || "(open)"} → ${simConfig.end_date || "(open)"}`,
+      thoughts,
+      strategyWeights: { momentum: 0.25, mean_reversion: 0.25, options_selling: 0.2, breakout: 0.2, scalping: 0.1 },
+      priceData: simState.liveReplay?.priceData || null,
+    };
+  }, [hasReplayData, simConfig.end_date, simConfig.initial_capital, simConfig.start_date, simState.data, simState.liveReplay, simState.loading, simState.progress?.pct]);
+
+  useEffect(() => {
+    if (!replayDerived) return;
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    setLiveSimRunning(false);
+    setLiveSimPaused(false);
+    setSimLive(prev => ({ ...prev, ...replayDerived }));
+  }, [replayDerived]);
+
   const intervalRef = useRef(null);
   const priceDataRef = useRef(null);
 
@@ -1485,12 +1566,12 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
       <div style={{
         display: "flex", alignItems: "center", gap: 12,
         padding: "10px 16px", background: T.card, border: `1px solid ${T.border}`,
-        borderTop: `2px solid ${liveSimRunning ? T.green : T.textMuted}`, flexWrap: "wrap",
+        borderTop: `2px solid ${replayActive ? T.green : T.textMuted}`, flexWrap: "wrap",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <StatusDot active={liveSimRunning && !liveSimPaused} color={T.green} />
+          <StatusDot active={replayActive && !simBackfilling} color={T.green} />
           <span style={{ fontSize: 9, letterSpacing: 2, textTransform: "uppercase", color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>
-            {liveSimRunning ? (liveSimPaused ? "PAUSED" : "RUNNING") : "IDLE"}
+            {simBackfilling ? "BACKFILLING" : simState.loading ? "RUNNING" : hasReplayData ? "COMPLETED" : "IDLE"}
           </span>
         </div>
         {[
@@ -1504,21 +1585,10 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
             <span style={{ fontSize: 13, fontWeight: 700, color: item.color, fontFamily: "'Share Tech Mono', monospace" }}>{item.value}</span>
           </div>
         ))}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          {!liveSimRunning ? (
-            <button onClick={startLiveSim} style={{ ...btn(T.green), display: "flex", alignItems: "center", gap: 6 }}>
-              <Play size={10} /> Run Live Demo
-            </button>
-          ) : (
-            <>
-              <button onClick={togglePause} style={btn(T.amber)}>
-                {liveSimPaused ? "▶ Resume" : "⏸ Pause"}
-              </button>
-              <button onClick={stopLiveSim} style={{ ...btn(T.red), display: "flex", alignItems: "center", gap: 6 }}>
-                <Square size={9} fill={T.red} /> Stop
-              </button>
-            </>
-          )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, fontFamily: "'Share Tech Mono', monospace" }}>
+            Replay-driven view (Backfill & Run / Rerun)
+          </span>
         </div>
       </div>
 
@@ -1614,7 +1684,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
           <Card T={T} accent={T.accent}>
             <CardHeader T={T} title="AI Reasoning Stream" subtitle="Live thought-by-thought decision log" accent={T.accent}
               right={
-                liveSimRunning && !liveSimPaused ? (
+                simState.loading ? (
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                     {[0, 1, 2].map(i => (
                       <span key={i} style={{
@@ -1638,7 +1708,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
                 <span style={{ fontSize: 8, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>Candle {simLive.candle} · {simLive.stage?.replace(/_/g, " ") || "idle"}</span>
                 <span style={{ fontSize: 8, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{simLive.decisions} decisions · {simLive.signalCount} signals</span>
               </div>
-              <ThoughtStream thoughts={simLive.thoughts} isThinking={liveSimRunning && !liveSimPaused} T={T} />
+              <ThoughtStream thoughts={simLive.thoughts} isThinking={simState.loading} T={T} />
             </div>
           </Card>
 
@@ -1879,7 +1949,7 @@ export default function TradingDashboard() {
   const [uiPrimarySelection, setUiPrimarySelection] = useState("dhan");
   const [brokerPrefMessage, setBrokerPrefMessage] = useState("");
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
-  const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null });
+  const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null, liveReplay: null });
   const [simBackfilling, setSimBackfilling] = useState(false);
   const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 100000, fee_pct: 0.0003, slippage_pct: 0.0005 });
 
@@ -1984,11 +2054,11 @@ export default function TradingDashboard() {
       const statusRes = await fetch(`${API_BASE}/api/replay/runs/${runId}`);
       const status = await statusRes.json();
       if (!statusRes.ok) throw new Error(extractErrorMessage(status?.detail) || "Status failed");
-      setSimState(prev => ({ ...prev, runStatus: status.status || prev.runStatus, progress: status?.metrics?.progress || null }));
+      setSimState(prev => ({ ...prev, runStatus: status.status || prev.runStatus, progress: status?.metrics?.progress || null, liveReplay: status?.metrics?.live || prev.liveReplay }));
       if (status.status === "completed") {
         const r = await fetch(`${API_BASE}/api/replay/runs/${runId}/results`);
         const result = await r.json();
-        setSimState(prev => ({ ...prev, loading: false, error: "", data: { ...result, status }, runId, runStatus: "completed", progress: status?.metrics?.progress || null }));
+        setSimState(prev => ({ ...prev, loading: false, error: "", data: { ...result, status }, runId, runStatus: "completed", progress: status?.metrics?.progress || null, liveReplay: status?.metrics?.live || prev.liveReplay }));
         return;
       }
       if (status.status === "failed") throw new Error(extractErrorMessage(status.error) || "Replay failed");
@@ -2001,7 +2071,7 @@ export default function TradingDashboard() {
   }, []);
 
   const loadSimulation = useCallback(async () => {
-    setSimState(prev => ({ ...prev, loading: true, error: "" }));
+    setSimState(prev => ({ ...prev, loading: true, error: "", data: prev.data, liveReplay: prev.liveReplay }));
     try {
       if (simState.runId) {
         const existingRes = await fetch(`${API_BASE}/api/replay/runs/${simState.runId}`);
@@ -2010,13 +2080,20 @@ export default function TradingDashboard() {
           if (["queued", "running"].includes(existing.status)) { await pollReplayRun(simState.runId); return; }
         }
       }
-      const payload = { ...simConfig, symbols: simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) };
+      const normalizedStartDate = toIsoDateOrNull(simConfig.start_date);
+      const normalizedEndDate = toIsoDateOrNull(simConfig.end_date);
+      const payload = {
+        ...simConfig,
+        symbols: simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean),
+        start_date: normalizedStartDate,
+        end_date: normalizedEndDate,
+      };
       const startRes = await fetch(`${API_BASE}/api/replay/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const started = await startRes.json();
       if (!startRes.ok) throw new Error(extractErrorMessage(started?.detail) || "Unable to start replay");
       await pollReplayRun(started.run_id);
     } catch (e) {
-      setSimState(prev => ({ ...prev, loading: false, error: toUiError(e, "Replay failed"), data: null, runStatus: "failed" }));
+      setSimState(prev => ({ ...prev, loading: false, error: toUiError(e, "Replay failed"), data: null, liveReplay: null, runStatus: "failed" }));
     }
   }, [pollReplayRun, simConfig, simState.runId]);
 
@@ -2024,15 +2101,23 @@ export default function TradingDashboard() {
     const symbols = simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
     if (!symbols.length) { setSimState(prev => ({ ...prev, error: "Add at least one symbol." })); return; }
     setSimBackfilling(true);
-    setSimState(prev => ({ ...prev, error: "" }));
+    setSimState(prev => ({ ...prev, error: "", liveReplay: null, data: null, progress: null }));
     try {
-      const payload = { symbols, exchange: simConfig.exchange, timeframe: simConfig.timeframe, start_date: simConfig.start_date ? `${simConfig.start_date}T00:00:00` : null, end_date: simConfig.end_date ? `${simConfig.end_date}T23:59:59` : null };
+      const normalizedStartDate = toIsoDateOrNull(simConfig.start_date);
+      const normalizedEndDate = toIsoDateOrNull(simConfig.end_date);
+      const payload = {
+        symbols,
+        exchange: simConfig.exchange,
+        timeframe: simConfig.timeframe,
+        start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
+        end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
+      };
       const res = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const out = await res.json();
       if (!res.ok) throw new Error(extractErrorMessage(out?.detail) || "Backfill failed");
       if (Array.isArray(out?.failures) && out.failures.length) throw new Error(`Backfill: ${extractErrorMessage(out.failures[0]?.error) || "some symbols failed"}`);
       await loadSimulation();
-    } catch (e) { setSimState(prev => ({ ...prev, error: toUiError(e, "Backfill failed"), data: null })); }
+    } catch (e) { setSimState(prev => ({ ...prev, error: toUiError(e, "Backfill failed"), data: null, liveReplay: null })); }
     finally { setSimBackfilling(false); }
   }, [loadSimulation, simConfig]);
 
