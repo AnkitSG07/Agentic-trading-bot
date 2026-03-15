@@ -34,30 +34,33 @@ class HistoricalFetcherTests(TestCase):
 
     def test_uses_fallback_when_enabled(self):
         fetcher = NSEHistoricalFetcher(allow_fallback=True)
-        yahoo_candles = [{"symbol": "TCS", "timestamp": 1}]
+         fallback_candles = [{"symbol": "TCS", "timestamp": 1}]
 
         with (
             patch.object(fetcher, "_fetch_nse_with_retries", side_effect=RuntimeError("nse blocked")),
-            patch.object(fetcher, "_fetch_from_yahoo", return_value=yahoo_candles) as fetch_yahoo,
+            patch.object(fetcher, "_fetch_from_yfinance", return_value=fallback_candles) as fetch_fallback,
         ):
             candles = fetcher.fetch_daily("TCS", date(2024, 1, 1), date(2024, 1, 31))
 
-        self.assertEqual(candles, yahoo_candles)
-        fetch_yahoo.assert_called_once()
+        self.assertEqual(candles, fallback_candles)
+        fetch_fallback.assert_called_once()
 
 
-    def test_raises_with_yahoo_provider_when_fallback_fails(self):
+    def test_raises_with_provider_when_all_fallbacks_fail(self):
         fetcher = NSEHistoricalFetcher(allow_fallback=True)
 
         with (
             patch.object(fetcher, "_fetch_nse_with_retries", side_effect=RuntimeError("nse blocked")),
-            patch.object(fetcher, "_fetch_from_yahoo", side_effect=RuntimeError("yahoo blocked")),
+            patch.object(fetcher, "_fetch_from_yfinance", side_effect=RuntimeError("yfinance blocked")),
+            patch.object(fetcher, "_fetch_from_yahoo_raw", side_effect=RuntimeError("yahoo raw blocked")),
+            patch.object(fetcher, "_fetch_from_stooq", side_effect=RuntimeError("stooq blocked")),
+            patch.object(fetcher, "_fetch_from_alphavantage", side_effect=RuntimeError("alpha blocked")),
         ):
             with self.assertRaises(RuntimeError) as exc:
                 fetcher.fetch_daily("SBIN", date(2024, 1, 1), date(2024, 1, 31))
 
-        self.assertIn("provider=yahoo", str(exc.exception))
-        self.assertIn("previous_provider=nse", str(exc.exception))
+        self.assertIn("nse=nse blocked", str(exc.exception))
+        self.assertIn("yfinance=yfinance blocked", str(exc.exception))
 
     def test_raises_when_fallback_disabled(self):
         fetcher = NSEHistoricalFetcher(allow_fallback=False)
