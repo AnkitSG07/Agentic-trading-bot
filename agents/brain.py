@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Optional
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -215,7 +216,7 @@ Generate 0-5 signals based on conviction. Quality over quantity. No signal is be
 class TradingAgent:
     """
     The AI brain that drives all trading decisions.
-    Wraps Gemini with trading-specific prompting and response parsing.
+    Wraps multiple LLM providers with trading-specific prompting and response parsing.
     """
 
     # ── Parameter adjustment schema ───────────────────────────────────────────
@@ -267,16 +268,36 @@ class TradingAgent:
     # Until populated, the check is skipped (no false positives during development).
     PARAM_CONSUMER_KEYS: frozenset[str] = frozenset()
 
+    DEFAULT_MODEL_TIERS: dict[str, list[str]] = {
+        # Tiered from throughput-first to quality-first so fallbacks degrade gracefully.
+        "ultra_fast": [
+            "groq/llama-3.1-8b-instant",
+            "groq/gemma2-9b-it",
+        ],
+        "fast": [
+            "groq/mixtral-8x7b-32768",
+            "openrouter/qwen/qwen-2.5-7b-instruct",
+            "openrouter/mistralai/mistral-7b-instruct",
+        ],
+        "balanced": [
+            "openrouter/qwen/qwen-2.5-14b-instruct",
+            "openrouter/mistralai/mistral-nemo",
+            "openrouter/deepseek/deepseek-chat",
+        ],
+        "quality": [
+            "openrouter/meta-llama/llama-3.1-70b-instruct",
+        ],
+    }
+
     def __init__(self, config: dict):
         self.config = config
-        self.api_key = os.getenv(config.get("api_key_env", "GEMINI_API_KEY"), "")
-        self.client = genai.Client(api_key=self.api_key) if self.api_key else None
-        self.model = config.get("model", "gemini-2.5-flash")
-        self.fallback_models: list[str] = config.get("fallback_models", [
-            "gemini-2.0-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash-lite",
-        ])
+        self.gemini_api_key = os.getenv(config.get("api_key_env", "GEMINI_API_KEY"), "")
+        self.groq_api_key = os.getenv(config.get("groq_api_key_env", "GROQ_API_KEY"), "")
+        self.openrouter_api_key = os.getenv(config.get("openrouter_api_key_env", "OPENROUTER_API_KEY"), "")
+        self.gemini_client = genai.Client(api_key=self.gemini_api_key) if self.gemini_api_key else None
+        self.model = config.get("model", "gemini/gemini-2.5-flash")
+        self.model_tiers = config.get("model_tiers", self.DEFAULT_MODEL_TIERS)
+        self.fallback_models = self._resolve_fallback_models(config)
         self.max_tokens = config.get("max_tokens", 4096)
         self.temperature = config.get("temperature", 0.1)
         # FIX 1: Clamp and validate confidence_threshold at boot, not just in review_strategy.
@@ -287,6 +308,59 @@ class TradingAgent:
             source="config",
         )
         self.decision_history: list[dict] = []
+        logger.info(
+            "AI model chain configured | primary=%s | fallbacks=%d | tiers=%s | order=%s",
+            self.model,
+            len(self.fallback_models),
+            list((self.model_tiers or {}).keys()),
+            [self.model, *self.fallback_models],
+        )
+
+    @staticmethod
+    def _parse_model_identifier(model_id: str) -> tuple[str, str]:
+        """Parse provider/model; keep backward compatibility for bare Gemini IDs."""
+        if "/" not in model_id:
+            return "gemini", model_id
+        provider, model = model_id.split("/", 1)
+        return provider.strip().lower(), model.strip()
+
+    def _ensure_provider_key(self, provider: str) -> None:
+        key_by_provider = {
+            "gemini": self.gemini_api_key,
+            "groq": self.groq_api_key,
+            "openrouter": self.openrouter_api_key,
+        }
+        if not key_by_provider.get(provider):
+            raise RuntimeError(f"Missing API key for provider '{provider}'.")
+
+    def _resolve_fallback_models(self, config: dict) -> list[str]:
+        """Build fallback model list from explicit list plus optional tier groups."""
+        seen: set[str] = {self.model}
+        resolved: list[str] = []
+
+        tiered = config.get("model_tiers", self.DEFAULT_MODEL_TIERS) or {}
+        for models in tiered.values():
+            if not isinstance(models, list):
+                continue
+            for model in models:
+                if isinstance(model, str) and model and model not in seen:
+                    seen.add(model)
+                    resolved.append(model)
+
+        for model in config.get("fallback_models", []):
+            if isinstance(model, str) and model and model not in seen:
+                seen.add(model)
+                resolved.append(model)
+
+        # Backward-compatible defaults when config provides neither tiered nor flat fallbacks.
+        if not resolved:
+            for models in self.DEFAULT_MODEL_TIERS.values():
+                for model in models:
+                    if model not in seen:
+                        seen.add(model)
+                        resolved.append(model)
+
+        return resolved
 
     @staticmethod
     def _validated_confidence_threshold(
@@ -395,7 +469,13 @@ class TradingAgent:
 
     def _is_rate_limited_error(self, err: Exception) -> bool:
         msg = str(err).lower()
-        return any(t in msg for t in ("429", "rate limit", "quota", "resource_exhausted"))
+        return any(t in msg for t in (
+            "429",
+            "rate limit",
+            "too many requests",
+            "quota",
+            "resource_exhausted",
+        ))
 
     def _is_unsupported_system_instruction_error(self, err: Exception) -> bool:
         return "developer instruction is not enabled" in str(err).lower()
@@ -408,6 +488,9 @@ class TradingAgent:
             "not supported for generatecontent",
             "unknown model",
             "403",                    # FIX: PERMISSION_DENIED for models not enabled
+            "401",
+            "unauthorized",
+            "invalid api key",
             "permission_denied",
             "not have permission",
         ))
@@ -443,6 +526,97 @@ class TradingAgent:
 
         return ""
 
+    def _generate_with_openai_compatible(
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        expect_json: bool,
+    ) -> str:
+        base_url = "https://api.groq.com/openai/v1/chat/completions" if provider == "groq" else "https://openrouter.ai/api/v1/chat/completions"
+        api_key = self.groq_api_key if provider == "groq" else self.openrouter_api_key
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        if provider == "openrouter":
+            headers["HTTP-Referer"] = "https://agentic-trading-bot.local"
+            headers["X-Title"] = "Agentic Trading Bot"
+
+        payload = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if expect_json:
+            payload["response_format"] = {"type": "json_object"}
+
+        with httpx.Client(timeout=45.0) as client:
+            response = client.post(base_url, headers=headers, json=payload)
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"{provider} HTTP {response.status_code}: {response.text[:300]}"
+                )
+            data = response.json()
+
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"{provider} returned empty choices for model {model}.")
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = [part.get("text", "") for part in content if isinstance(part, dict)]
+            return "".join(parts).strip()
+        return ""
+
+    def _generate_with_provider(
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        expect_json: bool,
+    ) -> str:
+        self._ensure_provider_key(provider)
+        if provider == "gemini":
+            if not self.gemini_client:
+                raise RuntimeError("Gemini API key missing. Set GEMINI_API_KEY in .env")
+            cfg = types.GenerateContentConfig(
+                system_instruction=AGENT_SYSTEM_PROMPT,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                response_mime_type="application/json" if expect_json else "text/plain",
+            )
+            response = self.gemini_client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=cfg,
+            )
+            return self._extract_response_text(response)
+
+        if provider in {"groq", "openrouter"}:
+            return self._generate_with_openai_compatible(
+                provider=provider,
+                model=model,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                expect_json=expect_json,
+            )
+
+        raise RuntimeError(f"Unsupported model provider '{provider}'.")
+
     # ── Core Generation (Sync, runs in thread) ───────────────────────────────
 
     def _generate_text_sync(
@@ -454,39 +628,36 @@ class TradingAgent:
         expect_json: bool,
     ) -> tuple[str, str]:
         """
-        Synchronous Gemini call. Always run via asyncio.to_thread — never call directly.
+        Synchronous multi-provider call. Always run via asyncio.to_thread — never call directly.
         Returns (response_text, model_actually_used) so callers can log the real model.
         FIX 2: Previously always returned self.model even when a fallback was used.
         """
-        if not self.client:
-            raise RuntimeError("Gemini API key missing. Set GEMINI_API_KEY in .env")
-
         all_models = [self.model] + [m for m in self.fallback_models if m != self.model]
         last_error: Exception | None = None
+        failure_reasons: list[str] = []
 
-        for idx, model in enumerate(all_models):
+        for idx, model_id in enumerate(all_models):
+            provider, provider_model = self._parse_model_identifier(model_id)
             try:
-                cfg = types.GenerateContentConfig(
-                    system_instruction=AGENT_SYSTEM_PROMPT,
+                response_text = self._generate_with_provider(
+                    provider=provider,
+                    model=provider_model,
+                    prompt=prompt,
                     temperature=temperature,
-                    max_output_tokens=max_tokens,
-                    response_mime_type="application/json" if expect_json else "text/plain",
+                    max_tokens=max_tokens,
+                    expect_json=expect_json,
                 )
-                response = self.client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=cfg,
-                )
-                if model != self.model:
-                    logger.warning("Using fallback model: %s", model)
-                # FIX 2: return the actual model name alongside the text
-                return self._extract_response_text(response), model
+                if model_id != self.model:
+                    logger.warning("Using fallback model: %s", model_id)
+                return response_text, model_id
 
             except Exception as e:
                 last_error = e
                 is_last = idx == len(all_models) - 1
+                reason = "unknown"
 
                 if is_last:
+                    failure_reasons.append(f"{model_id}=terminal_error")
                     break
 
                 if self._is_rate_limited_error(e):
@@ -499,22 +670,30 @@ class TradingAgent:
                     wait     = max(0.0, capped + jitter)
                     logger.warning(
                         "Model %s rate-limited; waiting %.1fs before fallback (idx=%d).",
-                        model, wait, idx,
+                        model_id, wait, idx,
                     )
+                    reason = "rate_limited"
+                    failure_reasons.append(f"{model_id}={reason}")
                     time.sleep(wait)
                     continue
 
                 if self._is_unsupported_system_instruction_error(e):
-                    logger.warning("Model %s does not support system instructions; trying fallback.", model)
+                    logger.warning("Model %s does not support system instructions; trying fallback.", model_id)
+                    reason = "unsupported_system_instruction"
+                    failure_reasons.append(f"{model_id}={reason}")
                     continue
 
                 if self._is_unavailable_model_error(e):
-                    logger.warning("Model %s unavailable/no permission; trying fallback.", model)
+                    logger.warning("Model %s unavailable/no permission; trying fallback.", model_id)
+                    reason = "unavailable_or_permission"
+                    failure_reasons.append(f"{model_id}={reason}")
                     continue
 
+                failure_reasons.append(f"{model_id}={reason}")
                 raise
 
-        raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+        logger.error("All configured models failed | attempts=%s", ", ".join(failure_reasons))
+        raise RuntimeError(f"All configured models failed. Last error: {last_error}")
 
     # ── Async wrapper ─────────────────────────────────────────────────────────
 
@@ -527,7 +706,7 @@ class TradingAgent:
         expect_json: bool,
     ) -> tuple[str, str]:
         """
-        Runs the synchronous Gemini call in a thread pool.
+        Runs the synchronous provider-routed call in a thread pool.
         Returns (response_text, model_actually_used).
         """
         return await asyncio.to_thread(
