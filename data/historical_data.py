@@ -59,7 +59,7 @@ class FetchMeta:
 class NSEHistoricalFetcher:
     """Fetch daily candles from NSE historical API with retries and optional fallback."""
 
-    def __init__(self, *, allow_fallback: bool = False, max_attempts: int = 5, base_delay_seconds: float = 1.0) -> None:
+    def __init__(self, *, allow_fallback: bool = True, max_attempts: int = 5, base_delay_seconds: float = 1.0) -> None:
         self._allow_fallback = allow_fallback
         self._max_attempts = max_attempts
         self._base_delay_seconds = base_delay_seconds
@@ -87,8 +87,14 @@ class NSEHistoricalFetcher:
 
     def _warmup(self) -> None:
         for url in NSE_WARMUP_URLS:
-            resp = self._session.get(url, timeout=20)
-            resp.raise_for_status()
+            try:
+                resp = self._session.get(url, timeout=20)
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                # Warmup is best-effort. NSE may intermittently block landing pages
+                # (403/429) even when API requests still work, so don't fail the
+                # entire backfill before attempting the historical endpoint.
+                logger.info("Historical warmup skipped url=%s cause=%s", url, exc)
 
     def _parse_nse_payload(self, symbol: str, payload: dict) -> list[dict]:
         rows = payload.get("data", []) or []
@@ -282,7 +288,7 @@ async def backfill_historical_data(requests: Iterable[BackfillRequest]) -> dict:
 
     cfg = load_config().get("historical", {})
     fetcher = NSEHistoricalFetcher(
-        allow_fallback=bool(cfg.get("allow_fallback", False)),
+        allow_fallback=bool(cfg.get("allow_fallback", True)),
         max_attempts=int(cfg.get("max_attempts", 5)),
         base_delay_seconds=float(cfg.get("base_delay_seconds", 1.0)),
     )
