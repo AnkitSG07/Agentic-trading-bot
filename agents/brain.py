@@ -299,6 +299,11 @@ class TradingAgent:
         self.fallback_models = self._resolve_fallback_models(config)
         self.max_tokens = config.get("max_tokens", 4096)
         self.temperature = config.get("temperature", 0.1)
+        self.max_capital_per_trade_pct: float = max(
+            0.1,
+            min(100.0, float(config.get("max_capital_per_trade_pct", 5.0))),
+        )
+        self.min_trade_quantity: int = max(1, int(config.get("min_trade_quantity", 1)))
         # FIX 1: Clamp and validate confidence_threshold at boot, not just in review_strategy.
         # Bad config values (0.01, 2, "high", None) are caught here before any trade runs.
         self.confidence_threshold: float = self._validated_confidence_threshold(
@@ -1117,10 +1122,25 @@ Position: {json.dumps(position, indent=2)}
 
             symbol = s.get("symbol", "UNKNOWN")
             try:
+                action = SignalAction(s.get("action", SignalAction.NO_ACTION.value))
                 qty = int(s.get("quantity", 0))
                 if qty <= 0:
-                    logger.warning("Skipping signal with quantity=%d for %s", qty, symbol)
-                    continue
+                    qty = self._fallback_quantity_for_signal(s, ctx)
+                    if qty <= 0:
+                        logger.warning(
+                            "Skipping signal with quantity=%d for %s | action=%s | capital=%.2f",
+                            qty,
+                            symbol,
+                            action.value,
+                            ctx.available_capital,
+                        )
+                        continue
+                    logger.info(
+                        "Applied fallback quantity=%d for %s | action=%s",
+                        qty,
+                        symbol,
+                        action.value,
+                    )
 
                 confidence = max(0.0, min(1.0, float(s.get("confidence", 0.5))))
 
@@ -1129,7 +1149,7 @@ Position: {json.dumps(position, indent=2)}
                 target      = self._to_decimal(s.get("target"),      "target",      symbol)
 
                 signals.append(TradingSignal(
-                    action=SignalAction(s["action"]),
+                    action=action,
                     symbol=symbol,
                     exchange=s.get("exchange", "NSE"),
                     strategy=s.get("strategy", "unknown"),
@@ -1155,3 +1175,42 @@ Position: {json.dumps(position, indent=2)}
         # Sort by priority ASC, then confidence DESC
         signals.sort(key=lambda x: (x.priority, -x.confidence))
         return signals
+
+    def _fallback_quantity_for_signal(self, raw_signal: dict, ctx: MarketContext) -> int:
+        """Derive a tradable quantity when model returns zero/non-positive quantity."""
+        symbol = str(raw_signal.get("symbol") or "").upper()
+        entry_price = raw_signal.get("entry_price")
+
+        resolved_price: Optional[Decimal] = None
+        if entry_price not in (None, ""):
+            try:
+                resolved_price = self._to_decimal(entry_price, "entry_price", symbol)
+            except ValueError:
+                resolved_price = None
+
+        if resolved_price is None:
+            for instrument in ctx.watchlist_data:
+                if str(instrument.get("symbol", "")).upper() == symbol:
+                    ltp = instrument.get("ltp")
+                    try:
+                        resolved_price = self._to_decimal(ltp, "ltp", symbol)
+                    except ValueError:
+                        resolved_price = None
+                    break
+
+        if resolved_price is None or resolved_price <= 0:
+            return 0
+
+        capital = Decimal(str(max(ctx.available_capital, 0.0)))
+        per_trade_budget = capital * Decimal(str(self.max_capital_per_trade_pct / 100.0))
+        if per_trade_budget <= 0:
+            return 0
+
+        raw_qty = int(per_trade_budget / resolved_price)
+        if raw_qty >= self.min_trade_quantity:
+            return raw_qty
+
+        min_ticket_value = resolved_price * Decimal(self.min_trade_quantity)
+        if capital >= min_ticket_value:
+            return self.min_trade_quantity
+        return 0
