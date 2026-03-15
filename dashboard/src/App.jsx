@@ -18,6 +18,7 @@ const isProduction = window.location.hostname !== "localhost";
 const API_BASE = import.meta.env.VITE_API_BASE ??
   (isProduction ? "https://agentic-trading-bot-188e.onrender.com" : "http://localhost:8000");
 const WS_URL = import.meta.env.VITE_WS_URL ?? API_BASE.replace(/^http/, "ws") + "/ws";
+const REPLAY_POLL_TIMEOUT_SECONDS = Number(import.meta.env.VITE_REPLAY_POLL_TIMEOUT_SECONDS ?? 1800);
 const SIM_SOURCE = "NSE historical candles + AI decision/risk pipeline";
 
 const tickPrice = (v) => {
@@ -969,6 +970,7 @@ export default function TradingDashboard() {
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
   const [brokerFallbackEvents, setBrokerFallbackEvents] = useState([]);
   const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "" });
+  const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null });  
   const [simBackfilling, setSimBackfilling] = useState(false);
   const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 100000, fee_pct: 0.0003, slippage_pct: 0.0005 });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -1080,30 +1082,66 @@ export default function TradingDashboard() {
     finally { setSavingBrokerPref(false); }
   };
 
+  const pollReplayRun = useCallback(async (runId) => {
+    const startedAt = Date.now();
+    setSimState(prev => ({ ...prev, loading: true, error: "", runId, runStatus: prev.runStatus === "idle" ? "queued" : prev.runStatus }));
+
+    while (true) {
+      const statusRes = await fetch(`${API_BASE}/api/replay/runs/${runId}`);
+      const status = await statusRes.json();
+      if (!statusRes.ok) throw new Error(status?.detail || "Status failed");
+
+      setSimState(prev => ({ ...prev, runStatus: status.status || prev.runStatus, progress: status?.metrics?.progress || null }));
+
+      if (status.status === "completed") {
+        const r = await fetch(`${API_BASE}/api/replay/runs/${runId}/results`);
+        const result = await r.json();
+        setSimState(prev => ({ ...prev, loading: false, error: "", data: { ...result, status }, runId, runStatus: "completed", progress: status?.metrics?.progress || null }));
+        return;
+      }
+      if (status.status === "failed") throw new Error(status.error || "Replay failed");
+
+      const elapsedSeconds = (Date.now() - startedAt) / 1000;
+      if (elapsedSeconds >= REPLAY_POLL_TIMEOUT_SECONDS) {
+        setSimState(prev => ({
+          ...prev,
+          loading: false,
+          runId,
+          runStatus: status.status || "running",
+          error: "Replay is still running in backend. Click Rerun to resume status polling.",
+        }));
+        return;
+      }
+
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }, []);
+
   const loadSimulation = useCallback(async () => {
     setSimState(prev => ({ ...prev, loading: true, error: "" }));
     try {
+      if (simState.runId) {
+        const existingRes = await fetch(`${API_BASE}/api/replay/runs/${simState.runId}`);
+        if (existingRes.ok) {
+          const existing = await existingRes.json();
+          if (["queued", "running"].includes(existing.status)) {
+            await pollReplayRun(simState.runId);
+            return;
+          }
+        }
+      }
+
       const payload = { ...simConfig, symbols: simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) };
       const startRes = await fetch(`${API_BASE}/api/replay/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const started = await startRes.json();
       if (!startRes.ok) throw new Error(started?.detail || "Unable to start replay");
       const runId = started.run_id;
-      for (let i = 0; i < 120; i++) {
-        const statusRes = await fetch(`${API_BASE}/api/replay/runs/${runId}`);
-        const status = await statusRes.json();
-        if (!statusRes.ok) throw new Error(status?.detail || "Status failed");
-        if (status.status === "completed") {
-          const r = await fetch(`${API_BASE}/api/replay/runs/${runId}/results`);
-          const result = await r.json();
-          setSimState({ loading: false, error: "", data: { ...result, status }, runId });
-          return;
-        }
-        if (status.status === "failed") throw new Error(status.error || "Replay failed");
-        await new Promise(r => setTimeout(r, 1500));
-      }
-      throw new Error("Replay timed out");
-    } catch (e) { setSimState(prev => ({ ...prev, loading: false, error: e.message, data: null })); }
-  }, [simConfig]);
+      setSimState(prev => ({ ...prev, runId, runStatus: started?.status || "queued", progress: null }));
+      await pollReplayRun(runId);
+    } catch (e) {
+      setSimState(prev => ({ ...prev, loading: false, error: e.message, data: null, runStatus: "failed" }));
+    }
+  }, [pollReplayRun, simConfig, simState.runId]);
 
   const backfillAndRun = useCallback(async () => {
     const symbols = simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
@@ -1637,7 +1675,7 @@ export default function TradingDashboard() {
               <StatTile T={T} label="Mode" value="Historical Replay" sub="Simulated · no live orders" color={T.accent} icon={Shield} />
               <StatTile T={T} label="Pipeline" value="AI + Risk" sub="Shared with live engine" color={T.purple} icon={Cpu} />
               <StatTile T={T} label="Data Source" value="NSE/BSE" sub="Stored candles" color={T.amber} icon={Database} />
-              <StatTile T={T} label="Run ID" value={simState.runId || "—"} sub="Latest job" color={T.blue} icon={Activity} />
+              <StatTile T={T} label="Run ID" value={simState.runId || "—"} sub={`Status: ${simState.runStatus || "idle"}`} color={T.blue} icon={Activity} />
             </div>
             <Card T={T}>
               <CardHeader T={T} title="Paper Simulator" subtitle={SIM_SOURCE}
@@ -1670,7 +1708,8 @@ export default function TradingDashboard() {
                 </div>
 
                 {simBackfilling && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Backfilling historical candles…</div>}
-                {simState.loading && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Running replay…</div>}
+                {simState.loading && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Running replay… ({simState.runStatus || "queued"})</div>}
+                {simState.progress && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Progress: {simState.progress.processed}/{simState.progress.total} ({simState.progress.pct}%)</div>}
                 {simState.error && (
                   <div style={{ background: T.redDim, border: `1px solid ${T.red}30`, borderRadius: 6, padding: "10px 14px", marginBottom: 10 }}>
                     <div style={{ fontSize: 11, color: T.red, marginBottom: 4 }}>Error: {simState.error}</div>
