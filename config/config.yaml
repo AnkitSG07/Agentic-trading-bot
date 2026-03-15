@@ -73,7 +73,7 @@ agent:
   decision_interval_seconds: 60       # How often agent evaluates market
   strategy_review_interval: 3600      # Full strategy review every hour
   max_concurrent_strategies: 5
-  confidence_threshold: 0.65          # Min confidence to place trade
+  confidence_threshold: 0.50          # Min confidence to place trade
 
 ## ─── RISK MANAGEMENT ────────────────────────────────────────
 risk:
