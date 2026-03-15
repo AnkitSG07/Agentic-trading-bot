@@ -1,7 +1,27 @@
-"""Historical NSE/BSE candle ingestion utilities."""
+"""Historical NSE/BSE candle ingestion utilities.
+
+Root cause of 403/429 errors:
+  - NSE blocks all non-browser requests from cloud/datacenter IPs (403)
+  - Yahoo Finance v8 API rate-limits cloud IPs heavily (429)
+
+Provider waterfall (cloud-safe order):
+  1. NSE historical API  — works from home/office IPs; fails on cloud
+  2. yfinance            — uses crumb auth; also blocked on datacenter IPs
+  3. Yahoo Finance raw   — direct HTTP; same block as yfinance
+  4. Stooq CSV           — free, no auth, works on most cloud IPs
+  5. Alpha Vantage       — most reliable on cloud (set ALPHAVANTAGE_API_KEY env var)
+
+For Render/Railway/cloud deployments the recommended path is:
+  Option A — Set ALPHAVANTAGE_API_KEY env var (free at alphavantage.co, 25 req/day)
+  Option B — Pre-seed DB by running backfill from your LOCAL machine first
+  Option C — Set HTTPS_PROXY env var pointing to a residential proxy
+"""
 
 import asyncio
+import csv
+import io
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -18,7 +38,7 @@ logger = logging.getLogger("data.historical")
 NSE_ROOT = "https://www.nseindia.com"
 NSE_HISTORY_API = NSE_ROOT + "/api/historical/cm/equity"
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nseindia.com/",
@@ -32,6 +52,8 @@ NSE_WARMUP_URLS = [
     "https://www.nseindia.com/market-data/live-equity-market",
 ]
 YAHOO_CHART_API = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS"
+STOOQ_API = "https://stooq.com/q/d/l/?s={symbol}.NS&d1={d1}&d2={d2}&i=d"
+ALPHAVANTAGE_API = "https://www.alphavantage.co/query"
 
 DEFAULT_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -45,8 +67,14 @@ class BackfillRequest:
     symbol: str
     exchange: str = "NSE"
     timeframe: str = "day"
-    start_date: date = date.today() - timedelta(days=365)
-    end_date: date = date.today()
+    start_date: date = None
+    end_date: date = None
+
+    def __post_init__(self):
+        if self.start_date is None:
+            self.start_date = date.today() - timedelta(days=365)
+        if self.end_date is None:
+            self.end_date = date.today()
 
 
 @dataclass
@@ -56,16 +84,38 @@ class FetchMeta:
     used_fallback: bool = False
 
 
-class NSEHistoricalFetcher:
-    """Fetch daily candles from NSE historical API with retries and optional fallback."""
+def _make_candle(symbol: str, ts: datetime, o, h, l, c, v: int) -> dict:
+    return {
+        "symbol": symbol.upper(),
+        "exchange": "NSE",
+        "timeframe": "day",
+        "timestamp": ts,
+        "open": float(o or 0),
+        "high": float(h or 0),
+        "low": float(l or 0),
+        "close": float(c or 0),
+        "volume": int(v or 0),
+    }
 
-    def __init__(self, *, allow_fallback: bool = True, max_attempts: int = 5, base_delay_seconds: float = 1.0) -> None:
+
+class NSEHistoricalFetcher:
+    """5-provider waterfall fetcher for NSE daily OHLCV candles."""
+
+    def __init__(
+        self,
+        *,
+        allow_fallback: bool = True,
+        max_attempts: int = 5,
+        base_delay_seconds: float = 1.0,
+    ) -> None:
         self._allow_fallback = allow_fallback
         self._max_attempts = max_attempts
         self._base_delay_seconds = base_delay_seconds
         self._user_agents = list(DEFAULT_USER_AGENTS)
         self._ua_index = 0
         self._session = self._new_session()
+
+    # ── Session helpers ───────────────────────────────────────────────────────
 
     def _new_session(self) -> requests.Session:
         session = requests.Session()
@@ -91,29 +141,23 @@ class NSEHistoricalFetcher:
                 resp = self._session.get(url, timeout=20)
                 resp.raise_for_status()
             except requests.RequestException as exc:
-                # Warmup is best-effort. NSE may intermittently block landing pages
-                # (403/429) even when API requests still work, so don't fail the
-                # entire backfill before attempting the historical endpoint.
                 logger.info("Historical warmup skipped url=%s cause=%s", url, exc)
+
+    # ── Provider 1: NSE ───────────────────────────────────────────────────────
 
     def _parse_nse_payload(self, symbol: str, payload: dict) -> list[dict]:
         rows = payload.get("data", []) or []
         candles: list[dict] = []
         for row in rows:
             ts = datetime.strptime(row["CH_TIMESTAMP"], "%d-%b-%Y").replace(tzinfo=timezone.utc)
-            candles.append(
-                {
-                    "symbol": symbol.upper(),
-                    "exchange": "NSE",
-                    "timeframe": "day",
-                    "timestamp": ts,
-                    "open": float(row.get("CH_OPENING_PRICE") or 0),
-                    "high": float(row.get("CH_TRADE_HIGH_PRICE") or 0),
-                    "low": float(row.get("CH_TRADE_LOW_PRICE") or 0),
-                    "close": float(row.get("CH_CLOSING_PRICE") or 0),
-                    "volume": int(float(row.get("CH_TOT_TRADED_QTY") or 0)),
-                }
-            )
+            candles.append(_make_candle(
+                symbol, ts,
+                row.get("CH_OPENING_PRICE") or 0,
+                row.get("CH_TRADE_HIGH_PRICE") or 0,
+                row.get("CH_TRADE_LOW_PRICE") or 0,
+                row.get("CH_CLOSING_PRICE") or 0,
+                int(float(row.get("CH_TOT_TRADED_QTY") or 0)),
+            ))
         return sorted(candles, key=lambda x: x["timestamp"])
 
     def _fetch_from_nse(self, symbol: str, start: date, end: date) -> list[dict]:
@@ -129,12 +173,9 @@ class NSEHistoricalFetcher:
 
     def _fetch_nse_with_retries(self, symbol: str, start: date, end: date) -> tuple[list[dict], int]:
         retryable = {
-            HTTPStatus.FORBIDDEN,
-            HTTPStatus.TOO_MANY_REQUESTS,
-            HTTPStatus.BAD_GATEWAY,
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            HTTPStatus.GATEWAY_TIMEOUT,
-            HTTPStatus.INTERNAL_SERVER_ERROR,
+            HTTPStatus.FORBIDDEN, HTTPStatus.TOO_MANY_REQUESTS,
+            HTTPStatus.BAD_GATEWAY, HTTPStatus.SERVICE_UNAVAILABLE,
+            HTTPStatus.GATEWAY_TIMEOUT, HTTPStatus.INTERNAL_SERVER_ERROR,
         }
         last_error: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
@@ -143,9 +184,7 @@ class NSEHistoricalFetcher:
                 candles = self._fetch_from_nse(symbol=symbol, start=start, end=end)
                 logger.info(
                     "Historical backfill succeeded symbol=%s provider=nse attempt=%s candles=%s",
-                    symbol.upper(),
-                    attempt,
-                    len(candles),
+                    symbol.upper(), attempt, len(candles),
                 )
                 return candles, attempt
             except requests.HTTPError as exc:
@@ -154,12 +193,7 @@ class NSEHistoricalFetcher:
                 should_retry = status_code in retryable and attempt < self._max_attempts
                 logger.warning(
                     "Historical fetch failed symbol=%s provider=nse attempt=%s/%s status=%s retry=%s cause=%s",
-                    symbol.upper(),
-                    attempt,
-                    self._max_attempts,
-                    status_code,
-                    should_retry,
-                    exc,
+                    symbol.upper(), attempt, self._max_attempts, status_code, should_retry, exc,
                 )
                 if not should_retry:
                     break
@@ -169,39 +203,64 @@ class NSEHistoricalFetcher:
                 delay = self._base_delay_seconds * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 logger.info(
                     "Historical retry scheduled symbol=%s provider=nse next_attempt=%s delay_seconds=%.2f ua_index=%s",
-                    symbol.upper(),
-                    attempt + 1,
-                    delay,
-                    self._ua_index,
+                    symbol.upper(), attempt + 1, delay, self._ua_index,
                 )
-                time_sleep = max(delay, 0)
-                if time_sleep:
-                    time.sleep(time_sleep)
+                time.sleep(max(delay, 0))
             except requests.RequestException as exc:
                 last_error = exc
                 should_retry = attempt < self._max_attempts
                 logger.warning(
                     "Historical fetch network error symbol=%s provider=nse attempt=%s/%s retry=%s cause=%s",
-                    symbol.upper(),
-                    attempt,
-                    self._max_attempts,
-                    should_retry,
-                    exc,
+                    symbol.upper(), attempt, self._max_attempts, should_retry, exc,
                 )
                 if not should_retry:
                     break
                 self._refresh_session()
                 delay = self._base_delay_seconds * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-                logger.info(
-                    "Historical retry scheduled symbol=%s provider=nse next_attempt=%s delay_seconds=%.2f session_refresh=true",
-                    symbol.upper(),
-                    attempt + 1,
-                    delay,
-                )
                 time.sleep(max(delay, 0))
         raise RuntimeError(f"nse fetch failed after {self._max_attempts} attempts: {last_error}")
 
-    def _fetch_from_yahoo(self, symbol: str, start: date, end: date) -> list[dict]:
+    # ── Provider 2: yfinance ──────────────────────────────────────────────────
+
+    def _fetch_from_yfinance(self, symbol: str, start: date, end: date) -> list[dict]:
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise RuntimeError("yfinance not installed — run: pip install yfinance") from exc
+
+        ticker_sym = f"{symbol.upper()}.NS"
+        end_exclusive = end + timedelta(days=1)
+        ticker = yf.Ticker(ticker_sym)
+        df = ticker.history(
+            start=start.strftime("%Y-%m-%d"),
+            end=end_exclusive.strftime("%Y-%m-%d"),
+            interval="1d",
+            auto_adjust=True,
+            actions=False,
+        )
+        if df is None or df.empty:
+            raise RuntimeError(f"yfinance returned empty data for {ticker_sym} ({start}–{end})")
+
+        candles: list[dict] = []
+        for ts, row in df.iterrows():
+            dt = ts.to_pydatetime()
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            candles.append(_make_candle(
+                symbol, dt,
+                row.get("Open") or 0, row.get("High") or 0,
+                row.get("Low") or 0, row.get("Close") or 0,
+                int(row.get("Volume") or 0),
+            ))
+
+        logger.info("Historical backfill succeeded symbol=%s provider=yfinance candles=%s", symbol.upper(), len(candles))
+        return sorted(candles, key=lambda x: x["timestamp"])
+
+    # ── Provider 3: Yahoo raw HTTP ────────────────────────────────────────────
+
+    def _fetch_from_yahoo_raw(self, symbol: str, start: date, end: date) -> list[dict]:
         params = {
             "period1": int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp()),
             "period2": int(datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp()),
@@ -210,7 +269,9 @@ class NSEHistoricalFetcher:
             "events": "div,splits",
         }
         url = YAHOO_CHART_API.format(symbol=symbol.upper())
-        response = self._session.get(url, params=params, timeout=30)
+        session = requests.Session()
+        session.headers["User-Agent"] = self._user_agents[self._ua_index]
+        response = session.get(url, params=params, timeout=30)
         response.raise_for_status()
         payload = response.json()
         chart = (payload.get("chart") or {}).get("result") or []
@@ -228,62 +289,202 @@ class NSEHistoricalFetcher:
         for i, ts in enumerate(timestamps):
             if i >= len(opens):
                 continue
-            o = opens[i]
-            h = highs[i] if i < len(highs) else None
-            l = lows[i] if i < len(lows) else None
-            c = closes[i] if i < len(closes) else None
+            o, h, l, c = opens[i], (highs[i] if i < len(highs) else None), (lows[i] if i < len(lows) else None), (closes[i] if i < len(closes) else None)
             v = volumes[i] if i < len(volumes) else 0
             if None in (o, h, l, c):
                 continue
-            candles.append(
-                {
-                    "symbol": symbol.upper(),
-                    "exchange": "NSE",
-                    "timeframe": "day",
-                    "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc),
-                    "open": float(o),
-                    "high": float(h),
-                    "low": float(l),
-                    "close": float(c),
-                    "volume": int(v or 0),
-                }
-            )
+            candles.append(_make_candle(symbol, datetime.fromtimestamp(ts, tz=timezone.utc), o, h, l, c, int(v or 0)))
         return sorted(candles, key=lambda x: x["timestamp"])
 
+    # ── Provider 4: Stooq CSV ─────────────────────────────────────────────────
+
+    def _fetch_from_stooq(self, symbol: str, start: date, end: date) -> list[dict]:
+        """Free CSV, no auth. Stooq format: Date,Open,High,Low,Close,Volume"""
+        url = STOOQ_API.format(
+            symbol=symbol.upper(),
+            d1=start.strftime("%Y%m%d"),
+            d2=end.strftime("%Y%m%d"),
+        )
+        session = requests.Session()
+        session.headers["User-Agent"] = self._user_agents[self._ua_index]
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+
+        text = resp.text.strip()
+        if not text or "No data" in text or len(text.splitlines()) < 2:
+            raise RuntimeError(f"Stooq returned no data for {symbol}.NS ({start}–{end})")
+
+        candles: list[dict] = []
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            try:
+                ts = datetime.strptime(row["Date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                candles.append(_make_candle(
+                    symbol, ts,
+                    row.get("Open") or 0, row.get("High") or 0,
+                    row.get("Low") or 0, row.get("Close") or 0,
+                    int(float(row.get("Volume") or 0)),
+                ))
+            except (KeyError, ValueError):
+                continue
+
+        if not candles:
+            raise RuntimeError(f"Stooq CSV parse yielded zero candles for {symbol}")
+
+        logger.info("Historical backfill succeeded symbol=%s provider=stooq candles=%s", symbol.upper(), len(candles))
+        return sorted(candles, key=lambda x: x["timestamp"])
+
+    # ── Provider 5: Alpha Vantage ─────────────────────────────────────────────
+
+    def _fetch_from_alphavantage(self, symbol: str, start: date, end: date) -> list[dict]:
+        """
+        Most reliable on cloud. Requires free API key.
+        Get yours at: https://www.alphavantage.co/support/#api-key
+        Set env var: ALPHAVANTAGE_API_KEY=your_key_here
+        Free tier: 25 calls/day, 500/month.
+        """
+        api_key = os.environ.get("ALPHAVANTAGE_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "ALPHAVANTAGE_API_KEY not set. "
+                "Get a FREE key at https://www.alphavantage.co/support/#api-key "
+                "and add it to your Render environment variables."
+            )
+
+        session = requests.Session()
+        session.headers["User-Agent"] = self._user_agents[self._ua_index]
+
+        # Try NSE suffix first, then BSE, then bare symbol
+        for suffix in [".NSE", ".BSE", ""]:
+            ticker = f"{symbol.upper()}{suffix}"
+            params = {
+                "function": "TIME_SERIES_DAILY",
+                "symbol": ticker,
+                "outputsize": "full",
+                "datatype": "json",
+                "apikey": api_key,
+            }
+            resp = session.get(ALPHAVANTAGE_API, params=params, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+
+            if "Error Message" in payload:
+                logger.debug("Alpha Vantage error for %s: %s", ticker, payload["Error Message"])
+                continue
+            if "Information" in payload or "Note" in payload:
+                msg = payload.get("Information") or payload.get("Note", "")
+                raise RuntimeError(f"Alpha Vantage rate limit: {msg}")
+
+            ts_data = payload.get("Time Series (Daily)", {})
+            if not ts_data:
+                continue
+
+            candles: list[dict] = []
+            for date_str, values in ts_data.items():
+                try:
+                    ts = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    if ts.date() < start or ts.date() > end:
+                        continue
+                    # AV uses "1. open" keys; handle both formats
+                    o = values.get("1. open") or values.get("open") or 0
+                    h = values.get("2. high") or values.get("high") or 0
+                    l = values.get("3. low") or values.get("low") or 0
+                    c = values.get("4. close") or values.get("close") or 0
+                    v = int(float(values.get("5. volume") or values.get("volume") or 0))
+                    candles.append(_make_candle(symbol, ts, o, h, l, c, v))
+                except (KeyError, ValueError):
+                    continue
+
+            if candles:
+                logger.info(
+                    "Historical backfill succeeded symbol=%s provider=alphavantage ticker=%s candles=%s",
+                    symbol.upper(), ticker, len(candles),
+                )
+                return sorted(candles, key=lambda x: x["timestamp"])
+
+        raise RuntimeError(
+            f"Alpha Vantage returned no data for {symbol} with .NSE/.BSE suffixes. "
+            "Indian equities may require Alpha Vantage premium. "
+            "Try running backfill from your local machine instead."
+        )
+
+    # ── Public interface: 5-provider waterfall ────────────────────────────────
+
     def fetch_daily_with_meta(self, symbol: str, start: date, end: date) -> tuple[list[dict], FetchMeta]:
+        errors: dict[str, str] = {}
+
+        # 1. NSE — best quality but blocked on cloud datacenter IPs
         try:
             candles, attempts = self._fetch_nse_with_retries(symbol=symbol, start=start, end=end)
             return candles, FetchMeta(provider="nse", attempts=attempts, used_fallback=False)
-        except Exception as nse_error:
-            logger.error("Historical fetch exhausted symbol=%s provider=nse cause=%s", symbol.upper(), nse_error)
-            if not self._allow_fallback:
-                raise RuntimeError(f"provider=nse error={nse_error}") from nse_error
-            try:
-                candles = self._fetch_from_yahoo(symbol=symbol, start=start, end=end)
-            except Exception as fallback_error:
-                logger.error(
-                    "Historical fallback failed symbol=%s provider=yahoo cause=%s prior_provider=nse prior_cause=%s",
-                    symbol.upper(),
-                    fallback_error,
-                    nse_error,
-                )
-                raise RuntimeError(
-                    f"provider=yahoo error={fallback_error}; previous_provider=nse previous_error={nse_error}"
-                ) from fallback_error
-            logger.warning(
-                "Historical fetch fallback symbol=%s provider=yahoo candles=%s cause=%s",
-                symbol.upper(),
-                len(candles),
-                nse_error,
+        except Exception as exc:
+            errors["nse"] = str(exc)
+            logger.error("Historical fetch exhausted symbol=%s provider=nse cause=%s", symbol.upper(), exc)
+
+        if not self._allow_fallback:
+            raise RuntimeError(f"provider=nse error={errors['nse']}")
+
+        # 2. yfinance — works locally; also blocked on datacenter IPs
+        try:
+            candles = self._fetch_from_yfinance(symbol=symbol, start=start, end=end)
+            logger.warning("Fallback to yfinance symbol=%s", symbol.upper())
+            return candles, FetchMeta(provider="yfinance", attempts=self._max_attempts, used_fallback=True)
+        except Exception as exc:
+            errors["yfinance"] = str(exc)
+            logger.warning("Historical fallback failed symbol=%s provider=yfinance cause=%s", symbol.upper(), exc)
+
+        # 3. Yahoo raw HTTP — same IP restrictions as yfinance
+        try:
+            candles = self._fetch_from_yahoo_raw(symbol=symbol, start=start, end=end)
+            if candles:
+                logger.warning("Fallback to yahoo_raw symbol=%s", symbol.upper())
+                return candles, FetchMeta(provider="yahoo_raw", attempts=self._max_attempts, used_fallback=True)
+            raise RuntimeError("yahoo_raw returned empty list")
+        except Exception as exc:
+            errors["yahoo_raw"] = str(exc)
+            logger.warning("Historical fallback failed symbol=%s provider=yahoo_raw cause=%s", symbol.upper(), exc)
+
+        # 4. Stooq — free CSV, no auth, usually passes cloud IP checks
+        try:
+            candles = self._fetch_from_stooq(symbol=symbol, start=start, end=end)
+            logger.warning("Fallback to stooq symbol=%s", symbol.upper())
+            return candles, FetchMeta(provider="stooq", attempts=self._max_attempts, used_fallback=True)
+        except Exception as exc:
+            errors["stooq"] = str(exc)
+            logger.warning("Historical fallback failed symbol=%s provider=stooq cause=%s", symbol.upper(), exc)
+
+        # 5. Alpha Vantage — reliable on cloud with free API key
+        try:
+            candles = self._fetch_from_alphavantage(symbol=symbol, start=start, end=end)
+            logger.warning("Fallback to alphavantage symbol=%s", symbol.upper())
+            return candles, FetchMeta(provider="alphavantage", attempts=self._max_attempts, used_fallback=True)
+        except Exception as exc:
+            errors["alphavantage"] = str(exc)
+            logger.error("Historical fallback failed symbol=%s provider=alphavantage cause=%s", symbol.upper(), exc)
+
+        has_av_key = bool(os.environ.get("ALPHAVANTAGE_API_KEY", "").strip())
+        hint = (
+            "All 5 data providers failed. "
+            + (
+                "ALPHAVANTAGE_API_KEY is set but returned no data — "
+                "verify the key is valid and you haven't exceeded 25 calls/day. "
+                if has_av_key
+                else
+                "ACTION REQUIRED: Set ALPHAVANTAGE_API_KEY in your Render env vars "
+                "(free key at https://www.alphavantage.co/support/#api-key). "
+                "OR run the backfill from your LOCAL machine where NSE/Yahoo are not blocked. "
             )
-            return candles, FetchMeta(provider="yahoo", attempts=self._max_attempts, used_fallback=True)
+        )
+        raise RuntimeError(
+            f"{hint} | " + " | ".join(f"{p}={e}" for p, e in errors.items())
+        )
 
     def fetch_daily(self, symbol: str, start: date, end: date) -> list[dict]:
         candles, _ = self.fetch_daily_with_meta(symbol=symbol, start=start, end=end)
         return candles
 
 
-async def backfill_historical_data(requests: Iterable[BackfillRequest]) -> dict:
+async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> dict:
     from database.repository import HistoricalCandleRepository
 
     cfg = load_config().get("historical", {})
@@ -295,30 +496,29 @@ async def backfill_historical_data(requests: Iterable[BackfillRequest]) -> dict:
     max_attempts = int(cfg.get("max_attempts", 5))
     total = 0
     failures: list[dict] = []
-    metrics = {
+    metrics: dict[str, int] = {
         "symbols_total": 0,
         "symbols_success": 0,
         "symbols_failed": 0,
-        "provider_nse_success": 0,
-        "provider_yahoo_success": 0,
         "symbols_retried": 0,
         "symbols_fallback_used": 0,
     }
-    for req in requests:
+
+    for req in requests_iter:
         metrics["symbols_total"] += 1
         if req.timeframe != "day":
             metrics["symbols_failed"] += 1
             failures.append({"symbol": req.symbol, "error": "only day timeframe currently supported"})
             continue
         try:
-            candles, meta = await asyncio.to_thread(fetcher.fetch_daily_with_meta, req.symbol, req.start_date, req.end_date)
+            candles, meta = await asyncio.to_thread(
+                fetcher.fetch_daily_with_meta, req.symbol, req.start_date, req.end_date
+            )
             await HistoricalCandleRepository.upsert_many(candles)
             total += len(candles)
             metrics["symbols_success"] += 1
-            if meta.provider == "yahoo":
-                metrics["provider_yahoo_success"] += 1
-            else:
-                metrics["provider_nse_success"] += 1
+            provider_key = f"provider_{meta.provider}_success"
+            metrics[provider_key] = metrics.get(provider_key, 0) + 1
             if meta.attempts > 1:
                 metrics["symbols_retried"] += 1
             if meta.used_fallback:
@@ -327,17 +527,14 @@ async def backfill_historical_data(requests: Iterable[BackfillRequest]) -> dict:
             logger.warning("Backfill failed symbol=%s error=%s", req.symbol, exc)
             metrics["symbols_failed"] += 1
             failures.append({"symbol": req.symbol, "error": str(exc)})
+
     logger.info(
-        "Historical backfill summary inserted=%s failures=%s symbols_total=%s symbols_success=%s symbols_failed=%s nse_success=%s yahoo_success=%s symbols_retried=%s symbols_fallback_used=%s max_attempts=%s",
-        total,
-        len(failures),
-        metrics["symbols_total"],
-        metrics["symbols_success"],
-        metrics["symbols_failed"],
-        metrics["provider_nse_success"],
-        metrics["provider_yahoo_success"],
-        metrics["symbols_retried"],
-        metrics["symbols_fallback_used"],
-        max_attempts,
+        "Historical backfill summary inserted=%s failures=%s "
+        "symbols_total=%s symbols_success=%s symbols_failed=%s "
+        "symbols_retried=%s symbols_fallback_used=%s max_attempts=%s providers=%s",
+        total, len(failures),
+        metrics["symbols_total"], metrics["symbols_success"], metrics["symbols_failed"],
+        metrics["symbols_retried"], metrics["symbols_fallback_used"], max_attempts,
+        {k: v for k, v in metrics.items() if k.startswith("provider_")},
     )
     return {"inserted": total, "failures": failures, "metrics": metrics}
