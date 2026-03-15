@@ -54,7 +54,6 @@ agent:
   model_tiers:
     ultra_fast:
       - "groq/llama-3.1-8b-instant"
-      - "groq/gemma2-9b-it"
     fast:
       - "groq/mixtral-8x7b-32768"
       - "openrouter/qwen/qwen-2.5-7b-instruct"
