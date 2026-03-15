@@ -159,4 +159,4 @@ backtest:
 historical:
   max_attempts: 5
   base_delay_seconds: 1.0
-  allow_fallback: false
+  allow_fallback: true
