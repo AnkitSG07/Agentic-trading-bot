@@ -139,9 +139,10 @@ class ReplayEngine:
                     cash -= exec_price * qty + fee
                     pos = positions.get(s.symbol)
                     if pos:
-                        pos["qty"] += qty
+                        pos["qty"], pos["entry_price"] = _merge_position(pos["qty"], pos["entry_price"], qty, exec_price)
                     else:
                         positions[s.symbol] = {"qty": qty, "entry_price": exec_price}
+                    trade_pnl = Decimal("0")
                 elif action in ("SELL", "SHORT"):
                     if s.symbol in positions:
                         pos = positions[s.symbol]
@@ -152,10 +153,11 @@ class ReplayEngine:
                         if pos["qty"] <= 0:
                             positions.pop(s.symbol, None)
                         await self.risk.record_trade(order=None, pnl=pnl)
+                        trade_pnl = pnl
                     else:
                         continue
 
-                trades.append({"run_id": run_id, "timestamp": ts, "symbol": s.symbol, "exchange": cfg.exchange, "action": action, "quantity": int(qty), "price": float(exec_price), "fees": float(fee), "slippage_pct": cfg.slippage_pct, "pnl": None, "rationale": s.rationale})
+                trades.append({"run_id": run_id, "timestamp": ts, "symbol": s.symbol, "exchange": cfg.exchange, "action": action, "quantity": int(qty), "price": float(exec_price), "fees": float(fee), "slippage_pct": cfg.slippage_pct, "pnl": float(trade_pnl), "rationale": s.rationale})
 
             equity = cash
             for symbol, p in positions.items():
@@ -177,16 +179,18 @@ class ReplayEngine:
     
         final_value = equity_curve[-1]["equity"] if equity_curve else float(cfg.initial_capital)
         total_return = ((final_value - cfg.initial_capital) / cfg.initial_capital * 100) if cfg.initial_capital else 0.0
-        wins = [t for t in trades if (t.get("pnl") or 0) > 0]
-        losses = [t for t in trades if (t.get("pnl") or 0) < 0]
+        summary = _summarize_trades(trades)
         metrics = {
             "final_value": final_value,
             "net_pnl": final_value - cfg.initial_capital,
             "return_pct": total_return,
-            "trade_count": len(trades),
-            "win_rate": (len(wins) / len(trades) * 100) if trades else 0.0,
+            "trade_count": summary["completed_trades"],
+            "order_count": summary["order_count"],
+            "completed_trades": summary["completed_trades"],
+            "open_positions_count": len(positions),
+            "win_rate": summary["win_rate"],
             "drawdown_pct": _max_drawdown(equity_curve),
-            "profit_factor": (sum((t.get("pnl") or 0) for t in wins) / abs(sum((t.get("pnl") or 0) for t in losses))) if losses else None,
+            "profit_factor": summary["profit_factor"],
         }
 
         await ReplayRunRepository.save_results(run_id, metrics=metrics, equity_curve=equity_curve, trades=trades)
@@ -205,6 +209,26 @@ def _max_drawdown(equity_curve: list[dict]) -> float:
             dd = max(dd, (peak - v) / peak * 100)
     return dd
 
+
+def _merge_position(old_qty: Decimal, old_entry: Decimal, add_qty: Decimal, add_entry: Decimal) -> tuple[Decimal, Decimal]:
+    total_qty = old_qty + add_qty
+    if total_qty <= 0:
+        return total_qty, add_entry
+    weighted_entry = ((old_entry * old_qty) + (add_entry * add_qty)) / total_qty
+    return total_qty, weighted_entry
+
+
+def _summarize_trades(trades: list[dict]) -> dict:
+    realized_trades = [t for t in trades if t.get("action") in ("SELL", "SHORT")]
+    wins = [t for t in realized_trades if (t.get("pnl") or 0) > 0]
+    losses = [t for t in realized_trades if (t.get("pnl") or 0) < 0]
+    profit_factor = (sum((t.get("pnl") or 0) for t in wins) / abs(sum((t.get("pnl") or 0) for t in losses))) if losses else None
+    return {
+        "order_count": len(trades),
+        "completed_trades": len(realized_trades),
+        "win_rate": (len(wins) / len(realized_trades) * 100) if realized_trades else 0.0,
+        "profit_factor": profit_factor,
+    }
 
 async def create_and_start_replay(app_config: dict, payload: dict) -> dict:
     from database.repository import ReplayRunRepository
