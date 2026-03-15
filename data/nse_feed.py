@@ -240,7 +240,7 @@ class NSEDataFeed:
                     result[key] = float(idx.get("last", 0))
             return result
         except Exception as e:
-            logger.warning(f"Index data fetch error: {e}")
+            logger.warning("Index data fetch error: type=%s detail=%r", type(e).__name__, e)
             return {"nifty": 22000.0, "banknifty": 47000.0, "vix": 14.0, "finnifty": 0.0}
 
     def _safe_json(self, response: httpx.Response) -> dict:
