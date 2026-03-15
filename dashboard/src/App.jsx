@@ -53,59 +53,65 @@ const toUiError = (err, fallback = "Unexpected error") => {
 
 // ─── THEME ───────────────────────────────────────────────────────────────────
 const DARK = {
-  bg: "#080c14",
-  bgAlt: "#0c1220",
-  surface: "#101828",
-  card: "#111927",
-  cardHover: "#141f30",
-  border: "#1e2d45",
-  borderLight: "#243454",
-  text: "#e8edf5",
-  textSub: "#8fa3be",
-  textMuted: "#4a607a",
-  textDim: "#263245",
-  accent: "#2dd4bf",
-  accentDim: "#2dd4bf18",
-  green: "#22c55e",
-  greenDim: "#22c55e14",
-  red: "#ef4444",
-  redDim: "#ef444414",
-  amber: "#f59e0b",
-  amberDim: "#f59e0b14",
-  blue: "#3b82f6",
-  blueDim: "#3b82f614",
-  purple: "#a855f7",
-  cyan: "#06b6d4",
-  shadow: "0 1px 3px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03)",
-  shadowHover: "0 4px 16px rgba(0,0,0,0.5)",
+  bg: "#03060d",
+  bgAlt: "#060b14",
+  surface: "#08111e",
+  card: "#0a1525",
+  cardHover: "#0d1a2e",
+  border: "#112238",
+  borderLight: "#163050",
+  text: "#d6e8ff",
+  textSub: "#7aa0c4",
+  textMuted: "#3d6080",
+  textDim: "#1a3050",
+  accent: "#00e5ff",
+  accentDim: "#00e5ff12",
+  accentGlow: "#00e5ff40",
+  green: "#00ff88",
+  greenDim: "#00ff8810",
+  red: "#ff3355",
+  redDim: "#ff335510",
+  amber: "#ffaa00",
+  amberDim: "#ffaa0010",
+  blue: "#4d9fff",
+  blueDim: "#4d9fff12",
+  purple: "#c77dff",
+  cyan: "#00e5ff",
+  shadow: "0 2px 8px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.03)",
+  shadowHover: "0 8px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,229,255,0.1)",
+  gridLine: "rgba(0,229,255,0.04)",
+  scanline: "rgba(0,229,255,0.015)",
 };
 
 const LIGHT = {
-  bg: "#f0f4f8",
-  bgAlt: "#e8eef5",
+  bg: "#f5f7fa",
+  bgAlt: "#edf0f5",
   surface: "#ffffff",
   card: "#ffffff",
   cardHover: "#f8fafc",
-  border: "#d1dce8",
-  borderLight: "#b8cad8",
-  text: "#0f1a26",
-  textSub: "#44607a",
-  textMuted: "#7a96ae",
-  textDim: "#b8cad8",
-  accent: "#0d9488",
-  accentDim: "#0d948814",
-  green: "#16a34a",
-  greenDim: "#16a34a12",
-  red: "#dc2626",
-  redDim: "#dc262612",
-  amber: "#d97706",
-  amberDim: "#d9770612",
-  blue: "#2563eb",
-  blueDim: "#2563eb12",
-  purple: "#9333ea",
-  cyan: "#0891b2",
-  shadow: "0 1px 3px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04)",
-  shadowHover: "0 4px 16px rgba(0,0,0,0.12)",
+  border: "#dce5f0",
+  borderLight: "#c8d8e8",
+  text: "#0a1628",
+  textSub: "#3a5a80",
+  textMuted: "#7a9ab8",
+  textDim: "#c0d4e8",
+  accent: "#006688",
+  accentDim: "#00668812",
+  accentGlow: "#00668830",
+  green: "#007744",
+  greenDim: "#00774410",
+  red: "#cc2244",
+  redDim: "#cc224410",
+  amber: "#cc7700",
+  amberDim: "#cc770010",
+  blue: "#1155cc",
+  blueDim: "#1155cc12",
+  purple: "#7722aa",
+  cyan: "#005577",
+  shadow: "0 1px 4px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04)",
+  shadowHover: "0 8px 24px rgba(0,0,0,0.12)",
+  gridLine: "rgba(0,0,0,0.04)",
+  scanline: "transparent",
 };
 
 // ─── HOOKS ───────────────────────────────────────────────────────────────────
@@ -162,7 +168,7 @@ const ACTION_COLORS_FN = (T) => ({
 });
 const STRATEGY_COLORS_FN = (T) => ({
   momentum: T.purple, mean_reversion: T.amber,
-  options_selling: "#ec4899", breakout: T.cyan, scalping: T.blue,
+  options_selling: "#ff6eb4", breakout: T.cyan, scalping: T.blue,
 });
 const SIGNAL_COLORS_FN = (T) => ({
   strong_buy: T.green, buy: T.green, neutral: T.amber,
@@ -172,19 +178,28 @@ const SIGNAL_COLORS_FN = (T) => ({
 // ─── PRIMITIVES ──────────────────────────────────────────────────────────────
 const Pill = ({ label, color, T }) => (
   <span style={{
-    background: `${color}16`, color, border: `1px solid ${color}30`,
-    borderRadius: 3, padding: "1px 6px", fontSize: 9.5, fontWeight: 700,
-    letterSpacing: 0.7, textTransform: "uppercase", whiteSpace: "nowrap",
-    fontFamily: "'IBM Plex Mono', monospace",
+    background: `${color}18`,
+    color,
+    border: `1px solid ${color}45`,
+    borderRadius: 2,
+    padding: "2px 7px",
+    fontSize: 9,
+    fontWeight: 800,
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+    whiteSpace: "nowrap",
+    fontFamily: "'Share Tech Mono', monospace",
+    boxShadow: `0 0 6px ${color}20`,
   }}>{(label || "").replace(/_/g, " ")}</span>
 );
 
 const StatusDot = ({ active, color }) => (
   <span style={{
-    display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+    display: "inline-block", width: 7, height: 7, borderRadius: "50%",
     background: active ? color : "currentColor",
-    boxShadow: active ? `0 0 0 2px ${color}30, 0 0 6px ${color}60` : "none",
-    opacity: active ? 1 : 0.3,
+    boxShadow: active ? `0 0 0 2px ${color}25, 0 0 10px ${color}80` : "none",
+    opacity: active ? 1 : 0.25,
+    animation: active ? "pulse-dot 2s ease-in-out infinite" : "none",
   }} />
 );
 
@@ -192,25 +207,34 @@ const Delta = ({ value, size = 12, showPrefix = true }) => {
   const up = value >= 0;
   return (
     <span style={{
-      color: up ? "#22c55e" : "#ef4444",
-      fontFamily: "'IBM Plex Mono', monospace",
-      fontWeight: 600, fontSize: size,
+      color: up ? "#00ff88" : "#ff3355",
+      fontFamily: "'Share Tech Mono', monospace",
+      fontWeight: 700,
+      fontSize: size,
+      textShadow: up ? "0 0 8px #00ff8860" : "0 0 8px #ff335560",
     }}>
-      {showPrefix && (up ? "+" : "")}{typeof value === "number" ? value.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : value}
+      {showPrefix && (up ? "▲" : "▼")}{typeof value === "number" ? value.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : value}
     </span>
   );
 };
 
 const Mono = ({ children, size = 12, color, weight = 600 }) => (
-  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: size, fontWeight: weight, color }}>{children}</span>
+  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: size, fontWeight: weight, color }}>{children}</span>
 );
 
 const ProgressBar = ({ value, max, color, height = 3 }) => (
-  <div style={{ width: "100%", height, background: "rgba(255,255,255,0.06)", borderRadius: height, overflow: "hidden" }}>
+  <div style={{ width: "100%", height, background: "rgba(255,255,255,0.04)", borderRadius: 0, overflow: "hidden", position: "relative" }}>
     <div style={{
-      width: `${Math.min((value / max) * 100, 100)}%`, height: "100%",
-      background: color, borderRadius: height, transition: "width 0.4s ease",
-    }} />
+      width: `${Math.min((value / max) * 100, 100)}%`,
+      height: "100%",
+      background: `linear-gradient(90deg, ${color}80, ${color})`,
+      borderRadius: 0,
+      transition: "width 0.5s cubic-bezier(0.4,0,0.2,1)",
+      boxShadow: `0 0 8px ${color}60`,
+      position: "relative",
+    }}>
+      <div style={{ position: "absolute", right: 0, top: 0, width: 2, height: "100%", background: color, boxShadow: `0 0 4px ${color}` }} />
+    </div>
   </div>
 );
 
@@ -222,34 +246,51 @@ const Sparkline = ({ data, color, height = 28 }) => {
   return (
     <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" width="100%" height={h}>
       <defs>
-        <linearGradient id={`sg-${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+        <linearGradient id={`sg-${color.replace("#", "")}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.4" />
           <stop offset="100%" stopColor={color} stopOpacity="0" />
         </linearGradient>
       </defs>
-      <polyline fill={`url(#sg-${color.replace("#","")})`} stroke="none" points={`0,${h} ${pts} ${w},${h}`} />
-      <polyline fill="none" stroke={color} strokeWidth="1.5" points={pts} strokeLinejoin="round" strokeLinecap="round" />
+      <polyline fill={`url(#sg-${color.replace("#", "")})`} stroke="none" points={`0,${h} ${pts} ${w},${h}`} />
+      <polyline fill="none" stroke={color} strokeWidth="1.5" points={pts} strokeLinejoin="round" strokeLinecap="round" style={{ filter: `drop-shadow(0 0 3px ${color})` }} />
     </svg>
   );
 };
 
 // Card component
-const Card = ({ children, T, style = {}, className }) => (
+const Card = ({ children, T, style = {}, className, accent }) => (
   <div className={className} style={{
-    background: T.card, border: `1px solid ${T.border}`,
-    borderRadius: 8, boxShadow: T.shadow, ...style,
-  }}>{children}</div>
+    background: T.card,
+    border: `1px solid ${T.border}`,
+    borderRadius: 4,
+    boxShadow: T.shadow,
+    position: "relative",
+    overflow: "hidden",
+    ...style,
+  }}>
+    {accent && (
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, transparent, ${accent}80, transparent)` }} />
+    )}
+    {children}
+  </div>
 );
 
-const CardHeader = ({ title, subtitle, right, T }) => (
+const CardHeader = ({ title, subtitle, right, T, accent }) => (
   <div style={{
-    display: "flex", alignItems: "center", justifyContent: "space-between",
-    padding: "12px 16px", borderBottom: `1px solid ${T.border}`,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "11px 16px",
+    borderBottom: `1px solid ${T.border}`,
     gap: 12,
+    background: `linear-gradient(90deg, ${T.bgAlt}cc, transparent)`,
   }}>
-    <div>
-      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: T.text, textTransform: "uppercase" }}>{title}</div>
-      {subtitle && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{subtitle}</div>}
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {accent && <div style={{ width: 2, height: 14, background: accent, boxShadow: `0 0 6px ${accent}`, borderRadius: 1 }} />}
+      <div>
+        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: T.textMuted, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace" }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 9, color: T.textDim, marginTop: 1, letterSpacing: 0.5 }}>{subtitle}</div>}
+      </div>
     </div>
     {right && <div style={{ flexShrink: 0 }}>{right}</div>}
   </div>
@@ -257,31 +298,39 @@ const CardHeader = ({ title, subtitle, right, T }) => (
 
 // KPI stat card
 const StatTile = ({ label, value, sub, delta, color, icon: Icon, T }) => (
-  <Card T={T} style={{ padding: "14px 16px", position: "relative", overflow: "hidden" }}>
-    <div style={{
-      position: "absolute", top: 0, left: 0, right: 0, height: 2,
-      background: `linear-gradient(90deg, ${color}60, transparent)`,
-    }} />
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+  <div style={{
+    background: T.card,
+    border: `1px solid ${T.border}`,
+    borderRadius: 4,
+    padding: "16px",
+    position: "relative",
+    overflow: "hidden",
+    boxShadow: T.shadow,
+    transition: "all 0.2s",
+  }}>
+    <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 24px, ${T.scanline} 24px, ${T.scanline} 25px)`, pointerEvents: "none" }} />
+    <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, transparent, ${color}80, transparent)` }} />
+    <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 60, background: `radial-gradient(circle, ${color}08 0%, transparent 70%)`, pointerEvents: "none" }} />
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", position: "relative" }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: T.textMuted, marginBottom: 8 }}>{label}</div>
-        <div style={{ fontSize: 20, fontWeight: 800, color: T.text, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: -0.5, lineHeight: 1 }}>{value}</div>
-        {sub && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6 }}>{sub}</div>}
+        <div style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", color: T.textMuted, marginBottom: 10, fontFamily: "'Share Tech Mono', monospace" }}>{label}</div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: T.text, fontFamily: "'Share Tech Mono', monospace", letterSpacing: -0.5, lineHeight: 1, textShadow: `0 0 20px ${color}30` }}>{value}</div>
+        {sub && <div style={{ fontSize: 9.5, color: T.textMuted, marginTop: 6, letterSpacing: 0.3 }}>{sub}</div>}
         {delta !== undefined && <div style={{ marginTop: 4 }}><Delta value={delta} size={10} /></div>}
       </div>
       {Icon && (
-        <div style={{ background: `${color}14`, border: `1px solid ${color}22`, borderRadius: 6, padding: 8, flexShrink: 0 }}>
-          <Icon size={14} color={color} />
+        <div style={{ background: `${color}10`, border: `1px solid ${color}25`, borderRadius: 3, padding: 9, flexShrink: 0, boxShadow: `0 0 12px ${color}15` }}>
+          <Icon size={15} color={color} style={{ filter: `drop-shadow(0 0 4px ${color})` }} />
         </div>
       )}
     </div>
-  </Card>
+  </div>
 );
 
 // ─── TOOLTIP STYLE ───────────────────────────────────────────────────────────
 const tooltipStyle = (T) => ({
-  contentStyle: { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 6, fontSize: 10, color: T.text, boxShadow: T.shadowHover },
-  labelStyle: { color: T.textMuted },
+  contentStyle: { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 4, fontSize: 10, color: T.text, boxShadow: T.shadowHover, fontFamily: "'Share Tech Mono', monospace" },
+  labelStyle: { color: T.textMuted, letterSpacing: 1 },
 });
 
 // ─── PANELS ──────────────────────────────────────────────────────────────────
@@ -301,35 +350,35 @@ function OptionsChainPanel({ data, T }) {
   const { isMobile } = useBreakpoint();
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="Options Chain" subtitle="PCR · Max Pain · OI Heatmap"
+    <Card T={T} accent={T.accent}>
+      <CardHeader T={T} title="Options Chain" subtitle="PCR · Max Pain · OI Heatmap" accent={T.accent}
         right={
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 10, color: T.textMuted, fontFamily: "monospace" }}>PCR</span>
-            <Mono size={15} color={hasPcr ? pcrColor : T.textMuted} weight={800}>{hasPcr ? pcr.toFixed(2) : "—"}</Mono>
+            <span style={{ fontSize: 9, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>PCR</span>
+            <Mono size={16} color={hasPcr ? pcrColor : T.textMuted} weight={700}>{hasPcr ? pcr.toFixed(2) : "—"}</Mono>
             {hasPcr && <Pill label={pcrLabel} color={pcrColor} T={T} />}
           </div>
         }
       />
       <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.5fr 1fr", gap: 16 }}>
         <div>
-          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.2, color: T.textMuted, textTransform: "uppercase", marginBottom: 10 }}>OI Concentration — NIFTY</div>
+          <div style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 1.5, color: T.textMuted, textTransform: "uppercase", marginBottom: 10, fontFamily: "'Share Tech Mono', monospace" }}>OI Concentration — NIFTY</div>
           {combined.length === 0 ? (
-            <div style={{ height: 150, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: T.textMuted, background: T.bg, borderRadius: 6 }}>No live OI data</div>
+            <div style={{ height: 150, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: T.textMuted, background: T.bg, borderRadius: 3, border: `1px dashed ${T.border}` }}>No live OI data</div>
           ) : (
             <ResponsiveContainer width="100%" height={150}>
               <BarChart data={combined} layout="vertical" margin={{ left: 55, right: 8 }}>
-                <XAxis type="number" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
-                <YAxis type="category" dataKey="label" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} width={50} />
+                <XAxis type="number" tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} />
+                <YAxis type="category" dataKey="label" tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} width={50} />
                 <Tooltip {...tooltipStyle(T)} formatter={(v, n, p) => [`${v.toFixed(1)}L`, p.payload.type === "CE" ? "Call OI" : "Put OI"]} />
-                <Bar dataKey="oi" radius={[0, 3, 3, 0]}>
-                  {combined.map((e, i) => <Cell key={i} fill={e.type === "CE" ? T.red : T.green} opacity={0.8} />)}
+                <Bar dataKey="oi" radius={[0, 2, 2, 0]}>
+                  {combined.map((e, i) => <Cell key={i} fill={e.type === "CE" ? T.red : T.green} opacity={0.85} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
           )}
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 4 }}>
           {[
             { label: "ATM Strike", v: nifty.atm_strike?.toLocaleString("en-IN") || "—", c: T.cyan },
             { label: "Straddle Price", v: Number.isFinite(Number(nifty.atm_straddle)) ? `₹${nifty.atm_straddle}` : "—", c: T.purple },
@@ -339,8 +388,8 @@ function OptionsChainPanel({ data, T }) {
             { label: "Key Support", v: nifty.key_support?.toLocaleString("en-IN") || "—", c: T.green },
             { label: "BANKNIFTY PCR", v: Number.isFinite(Number(bnk.pcr)) ? Number(bnk.pcr).toFixed(2) : "—", c: Number(bnk.pcr) > 1 ? T.green : T.red },
           ].map(r => (
-            <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: T.bg, borderRadius: 5 }}>
-              <span style={{ fontSize: 9.5, color: T.textMuted }}>{r.label}</span>
+            <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: T.bg, borderRadius: 2, borderLeft: `2px solid ${r.c}30` }}>
+              <span style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>{r.label}</span>
               <Mono size={10.5} color={r.c} weight={700}>{r.v}</Mono>
             </div>
           ))}
@@ -359,13 +408,13 @@ function WatchlistPanel({ data, T }) {
   const SC = SIGNAL_COLORS_FN(T);
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="Watchlist" subtitle="Indicator matrix · live signals"
+    <Card T={T} accent={T.blue}>
+      <CardHeader T={T} title="Watchlist" subtitle="Indicator matrix · live signals" accent={T.blue}
         right={<Pill label={`${items.length} symbols`} color={T.textMuted} T={T} />}
       />
       <div style={{ padding: "0 16px 12px", overflowX: "auto" }}>
         {isMobile ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
             {items.map(w => {
               const ind = w.indicators || {};
               const sig = ind.overall_signal || "neutral";
@@ -374,10 +423,10 @@ function WatchlistPanel({ data, T }) {
               return (
                 <div key={w.symbol}>
                   <div onClick={() => setSelected(isSel ? null : w.symbol)}
-                    style={{ background: isSel ? `${T.accent}08` : T.bg, border: `1px solid ${isSel ? T.accent + "40" : T.border}`, borderRadius: 6, padding: "10px 12px", cursor: "pointer" }}>
+                    style={{ background: isSel ? `${T.accent}08` : T.bg, border: `1px solid ${isSel ? T.accent + "50" : T.border}`, borderRadius: 3, padding: "10px 12px", cursor: "pointer", transition: "all 0.15s" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <span style={{ fontWeight: 800, fontSize: 12, color: T.text }}>{w.symbol}</span>
+                        <span style={{ fontWeight: 700, fontSize: 12, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{w.symbol}</span>
                         <Mono size={11} color={T.text}>₹{(w.ltp || 0).toFixed(0)}</Mono>
                         <Delta value={w.change_pct || 0} size={10} />
                       </div>
@@ -385,14 +434,14 @@ function WatchlistPanel({ data, T }) {
                     </div>
                   </div>
                   {isSel && (
-                    <div style={{ background: T.bgAlt, borderRadius: 6, padding: "10px 12px", marginTop: 3, display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8 }}>
+                    <div style={{ background: T.bgAlt, borderRadius: 3, padding: "10px 12px", marginTop: 2, display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8, border: `1px solid ${T.border}` }}>
                       {[{ label: "RSI", v: rsi, c: rsi > 70 ? T.red : rsi < 30 ? T.green : T.text },
                         { label: "MACD", v: ind.macd_signal || "—", c: ind.macd_signal === "bullish" ? T.green : T.red },
                         { label: "BB", v: ind.bb_signal || "—", c: T.textMuted },
                         { label: "Vol Ratio", v: `${(ind.volume_ratio || 1).toFixed(1)}x`, c: (ind.volume_ratio || 1) > 1.5 ? T.amber : T.textMuted },
                       ].map(it => (
-                        <div key={it.label} style={{ background: T.surface, borderRadius: 5, padding: "7px 10px" }}>
-                          <div style={{ fontSize: 9, color: T.textMuted }}>{it.label}</div>
+                        <div key={it.label} style={{ background: T.surface, borderRadius: 2, padding: "7px 10px" }}>
+                          <div style={{ fontSize: 9, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>{it.label}</div>
                           <Mono size={11} color={it.c} weight={700}>{it.v}</Mono>
                         </div>
                       ))}
@@ -401,14 +450,14 @@ function WatchlistPanel({ data, T }) {
                 </div>
               );
             })}
-            {!items.length && <div style={{ fontSize: 11, color: T.textMuted, padding: "20px 0" }}>No watchlist data</div>}
+            {!items.length && <div style={{ fontSize: 11, color: T.textMuted, padding: "20px 0", fontFamily: "'Share Tech Mono', monospace" }}>NO WATCHLIST DATA</div>}
           </div>
         ) : (
           <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10, minWidth: 560 }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${T.border}` }}>
                 {["Symbol", "LTP", "Chg%", "RSI", "MACD", "BB", "Volume", "Signal"].map(h =>
-                  <th key={h} style={{ padding: "6px 8px", textAlign: "left", fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: 0.8, textTransform: "uppercase" }}>{h}</th>
+                  <th key={h} style={{ padding: "7px 8px", textAlign: "left", fontSize: 8.5, color: T.textMuted, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace" }}>{h}</th>
                 )}
               </tr>
             </thead>
@@ -420,8 +469,8 @@ function WatchlistPanel({ data, T }) {
                 const isSel = selected === w.symbol;
                 return (
                   <tr key={w.symbol} onClick={() => setSelected(isSel ? null : w.symbol)}
-                    style={{ borderBottom: `1px solid ${T.border}20`, cursor: "pointer", background: isSel ? `${T.accent}06` : i % 2 ? T.bg + "80" : "transparent" }}>
-                    <td style={{ padding: "9px 8px", fontWeight: 800, fontSize: 11, color: T.text }}>{w.symbol}</td>
+                    style={{ borderBottom: `1px solid ${T.border}15`, cursor: "pointer", background: isSel ? `${T.accent}05` : i % 2 ? T.bg + "60" : "transparent", transition: "background 0.15s" }}>
+                    <td style={{ padding: "9px 8px", fontWeight: 700, fontSize: 11, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{w.symbol}</td>
                     <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.text}>₹{(w.ltp || 0).toFixed(0)}</Mono></td>
                     <td style={{ padding: "9px 8px" }}><Delta value={w.change_pct || 0} size={10} /></td>
                     <td style={{ padding: "9px 8px" }}><Mono size={10.5} color={rsi > 70 ? T.red : rsi < 30 ? T.green : T.text}>{rsi}</Mono></td>
@@ -432,7 +481,7 @@ function WatchlistPanel({ data, T }) {
                   </tr>
                 );
               })}
-              {!items.length && <tr><td colSpan={8} style={{ padding: "30px 8px", textAlign: "center", fontSize: 11, color: T.textMuted }}>No live watchlist data</td></tr>}
+              {!items.length && <tr><td colSpan={8} style={{ padding: "30px 8px", textAlign: "center", fontSize: 11, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>NO LIVE WATCHLIST DATA</td></tr>}
             </tbody>
           </table>
         )}
@@ -445,15 +494,15 @@ function WatchlistPanel({ data, T }) {
 function PositionsPanel({ positions, tickHistory, T }) {
   const { isMobile } = useBreakpoint();
   if (!positions?.length) return (
-    <Card T={T}>
-      <CardHeader T={T} title="Open Positions" subtitle="Live P&L with sparklines" />
-      <div style={{ padding: "48px 16px", textAlign: "center", color: T.textMuted, fontSize: 12 }}>No open positions</div>
+    <Card T={T} accent={T.green}>
+      <CardHeader T={T} title="Open Positions" subtitle="Live P&L with sparklines" accent={T.green} />
+      <div style={{ padding: "48px 16px", textAlign: "center", color: T.textMuted, fontSize: 12, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2 }}>NO OPEN POSITIONS</div>
     </Card>
   );
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="Open Positions" subtitle="Live P&L with sparklines"
+    <Card T={T} accent={T.green}>
+      <CardHeader T={T} title="Open Positions" subtitle="Live P&L with sparklines" accent={T.green}
         right={<Pill label={`${positions.length} open`} color={T.accent} T={T} />}
       />
       <div>
@@ -468,12 +517,13 @@ function PositionsPanel({ positions, tickHistory, T }) {
           const slDist = p.stop_loss ? Math.abs(((ltp - Number(p.stop_loss)) / ltp) * 100) : null;
 
           return (
-            <div key={i} style={{ borderBottom: i < positions.length - 1 ? `1px solid ${T.border}` : "none", padding: "14px 16px" }}>
+            <div key={i} style={{ borderBottom: i < positions.length - 1 ? `1px solid ${T.border}` : "none", padding: "14px 16px", position: "relative" }}>
+              <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 2, background: isUp ? T.green : T.red, boxShadow: `0 0 8px ${isUp ? T.green : T.red}` }} />
               {isMobile ? (
                 <>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <span style={{ fontWeight: 800, fontSize: 13, color: T.text }}>{p.symbol}</span>
+                      <span style={{ fontWeight: 700, fontSize: 13, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{p.symbol}</span>
                       <Pill label={p.side} color={p.side === "BUY" ? T.green : T.red} T={T} />
                       <Mono size={10} color={T.textMuted}>×{qty}</Mono>
                     </div>
@@ -484,12 +534,12 @@ function PositionsPanel({ positions, tickHistory, T }) {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 8 }}>
                     <div>
-                      <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>AVG / LTP</div>
+                      <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>AVG / LTP</div>
                       <Mono size={10} color={T.text}>₹{avg.toFixed(0)} / <span style={{ color: isUp ? T.green : T.red }}>₹{ltp.toFixed(0)}</span></Mono>
                     </div>
                     {slDist !== null && (
                       <div>
-                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>SL Distance</div>
+                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>SL DISTANCE</div>
                         <Mono size={11} color={slDist < 0.5 ? T.red : slDist < 1.5 ? T.amber : T.green}>{slDist.toFixed(2)}%</Mono>
                         <div style={{ marginTop: 3 }}><ProgressBar value={Math.min(slDist, 5)} max={5} color={slDist < 1 ? T.red : T.amber} /></div>
                       </div>
@@ -500,12 +550,12 @@ function PositionsPanel({ positions, tickHistory, T }) {
               ) : (
                 <div style={{ display: "grid", gridTemplateColumns: "120px 55px 100px 110px 110px 80px 1fr", alignItems: "center", gap: 14 }}>
                   <div>
-                    <div style={{ fontWeight: 800, fontSize: 12, color: T.text, marginBottom: 4 }}>{p.symbol}</div>
+                    <div style={{ fontWeight: 700, fontSize: 12, color: T.text, marginBottom: 4, fontFamily: "'Share Tech Mono', monospace" }}>{p.symbol}</div>
                     <Pill label={p.side} color={p.side === "BUY" ? T.green : T.red} T={T} />
                   </div>
                   <Mono size={11} color={T.textSub}>{qty}</Mono>
                   <div>
-                    <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>AVG / LTP</div>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>AVG / LTP</div>
                     <Mono size={10} color={T.text}>₹{avg.toFixed(0)} / <span style={{ color: isUp ? T.green : T.red }}>₹{ltp.toFixed(0)}</span></Mono>
                   </div>
                   <div>
@@ -515,7 +565,7 @@ function PositionsPanel({ positions, tickHistory, T }) {
                   <div>
                     {slDist !== null ? (
                       <>
-                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 4 }}>SL Distance</div>
+                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 4, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>SL DIST</div>
                         <Mono size={11} color={slDist < 0.5 ? T.red : slDist < 1.5 ? T.amber : T.green}>{slDist.toFixed(2)}%</Mono>
                         <div style={{ marginTop: 4 }}><ProgressBar value={Math.min(slDist, 5)} max={5} color={slDist < 1 ? T.red : T.amber} /></div>
                       </>
@@ -524,7 +574,7 @@ function PositionsPanel({ positions, tickHistory, T }) {
                   <div>
                     {p.target ? (
                       <>
-                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>Target</div>
+                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>TARGET</div>
                         <Mono size={11} color={T.accent}>₹{Number(p.target).toFixed(0)}</Mono>
                       </>
                     ) : <Mono size={10} color={T.textMuted}>—</Mono>}
@@ -556,23 +606,23 @@ function SLTrackerPanel({ positions, ticks, T }) {
   }), [positions, ticks]);
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="SL / Target Tracker" subtitle="Stop-loss status · trailing stops · target proximity" />
+    <Card T={T} accent={T.amber}>
+      <CardHeader T={T} title="SL / Target Tracker" subtitle="Stop-loss status · trailing stops · target proximity" accent={T.amber} />
       <div style={{ padding: "12px 16px" }}>
         {items.map((p, i) => (
-          <div key={i} style={{ marginBottom: 12, padding: "12px 14px", background: T.bg, borderRadius: 7, border: `1px solid ${T.border}` }}>
+          <div key={i} style={{ marginBottom: 12, padding: "12px 14px", background: T.bg, borderRadius: 3, border: `1px solid ${T.border}`, borderLeft: `2px solid ${p.progress > 50 ? T.green : T.amber}` }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ fontWeight: 800, fontSize: 12, color: T.text }}>{p.symbol}</span>
+                <span style={{ fontWeight: 700, fontSize: 12, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{p.symbol}</span>
                 <Pill label={p.side || "BUY"} color={(p.side || "") === "SELL" ? T.red : T.green} T={T} />
               </div>
-              <Mono size={13} color={T.text} weight={700}>₹{p.ltp.toFixed(0)}</Mono>
+              <Mono size={14} color={T.text} weight={700}>₹{p.ltp.toFixed(0)}</Mono>
             </div>
-            <div style={{ position: "relative", height: 8, background: T.border, borderRadius: 4, margin: "0 0 12px", overflow: "visible" }}>
-              <div style={{ position: "absolute", left: 0, width: `${p.progress}%`, height: "100%", background: `linear-gradient(90deg, ${T.accent}50, ${T.accent})`, borderRadius: 4 }} />
-              <div style={{ position: "absolute", left: "4%", top: -4, height: 16, width: 1.5, background: T.red, opacity: 0.7 }} />
-              <div style={{ position: "absolute", right: "4%", top: -4, height: 16, width: 1.5, background: T.green, opacity: 0.7 }} />
-              <div style={{ position: "absolute", left: `${p.progress}%`, top: -5, transform: "translateX(-50%)", width: 14, height: 14, background: T.accent, borderRadius: "50%", border: `2px solid ${T.card}`, boxShadow: `0 0 0 2px ${T.accent}40` }} />
+            <div style={{ position: "relative", height: 6, background: T.border, borderRadius: 0, margin: "0 0 12px", overflow: "visible" }}>
+              <div style={{ position: "absolute", left: 0, width: `${p.progress}%`, height: "100%", background: `linear-gradient(90deg, ${T.accent}60, ${T.accent})`, boxShadow: `0 0 8px ${T.accent}60` }} />
+              <div style={{ position: "absolute", left: "4%", top: -4, height: 14, width: 1, background: T.red, opacity: 0.8 }} />
+              <div style={{ position: "absolute", right: "4%", top: -4, height: 14, width: 1, background: T.green, opacity: 0.8 }} />
+              <div style={{ position: "absolute", left: `${p.progress}%`, top: -5, transform: "translateX(-50%)", width: 14, height: 14, background: T.accent, borderRadius: "50%", border: `2px solid ${T.card}`, boxShadow: `0 0 0 2px ${T.accent}60, 0 0 8px ${T.accent}` }} />
             </div>
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 8 }}>
               {[
@@ -582,7 +632,7 @@ function SLTrackerPanel({ positions, ticks, T }) {
                 { label: "Progress", v: `${p.progress.toFixed(0)}%`, c: p.progress > 50 ? T.green : T.amber },
               ].map(it => (
                 <div key={it.label}>
-                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 3 }}>{it.label}</div>
+                  <div style={{ fontSize: 8.5, color: T.textMuted, marginBottom: 3, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>{it.label}</div>
                   <Mono size={11} color={it.c} weight={700}>{it.v}</Mono>
                   {it.sub && <div style={{ fontSize: 9, color: T.textMuted, marginTop: 1 }}>{it.sub}</div>}
                 </div>
@@ -590,7 +640,7 @@ function SLTrackerPanel({ positions, ticks, T }) {
             </div>
           </div>
         ))}
-        {!items.length && <div style={{ fontSize: 12, color: T.textMuted, padding: "24px 0" }}>No tracked positions</div>}
+        {!items.length && <div style={{ fontSize: 12, color: T.textMuted, padding: "24px 0", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>NO TRACKED POSITIONS</div>}
       </div>
     </Card>
   );
@@ -608,34 +658,34 @@ function AITimelinePanel({ decisions, T }) {
   }, [decisions]);
 
   if (!chartData.length) return (
-    <Card T={T}>
-      <CardHeader T={T} title="AI Confidence Timeline" subtitle="Signal quality over time" />
-      <div style={{ padding: "48px 16px", textAlign: "center", color: T.textMuted, fontSize: 12 }}>No decision history yet</div>
+    <Card T={T} accent={T.purple}>
+      <CardHeader T={T} title="AI Confidence Timeline" subtitle="Signal quality over time" accent={T.purple} />
+      <div style={{ padding: "48px 16px", textAlign: "center", color: T.textMuted, fontSize: 12, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2 }}>NO DECISION HISTORY YET</div>
     </Card>
   );
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="AI Confidence Timeline" subtitle="Signal confidence & latency per cycle" />
+    <Card T={T} accent={T.purple}>
+      <CardHeader T={T} title="AI Confidence Timeline" subtitle="Signal confidence & latency per cycle" accent={T.purple} />
       <div style={{ padding: "14px 16px" }}>
         <ResponsiveContainer width="100%" height={isMobile ? 150 : 180}>
           <ComposedChart data={chartData} margin={{ left: isMobile ? -10 : 0, right: isMobile ? -10 : 0 }}>
             <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
-            <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} interval={isMobile ? 6 : 4} />
-            <YAxis yAxisId="c" domain={[0, 100]} tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={isMobile ? 30 : 38} />
-            <YAxis yAxisId="l" orientation="right" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `${v}ms`} width={isMobile ? 34 : 42} />
+            <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} interval={isMobile ? 6 : 4} />
+            <YAxis yAxisId="c" domain={[0, 100]} tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={isMobile ? 30 : 38} />
+            <YAxis yAxisId="l" orientation="right" tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} tickFormatter={v => `${v}ms`} width={isMobile ? 34 : 42} />
             <Tooltip {...tooltipStyle(T)} formatter={(v, n) => [n === "confidence" ? `${v}%` : `${v}ms`, n]} />
             <ReferenceLine yAxisId="c" y={65} stroke={T.amber} strokeDasharray="4 2" strokeWidth={1} opacity={0.6} />
-            <Bar yAxisId="c" dataKey="confidence" fill={T.accent} opacity={0.15} radius={[2, 2, 0, 0]} />
-            <Line yAxisId="c" type="monotone" dataKey="confidence" stroke={T.accent} strokeWidth={2} dot={false} />
+            <Bar yAxisId="c" dataKey="confidence" fill={T.accent} opacity={0.12} radius={[2, 2, 0, 0]} />
+            <Line yAxisId="c" type="monotone" dataKey="confidence" stroke={T.accent} strokeWidth={2} dot={false} style={{ filter: `drop-shadow(0 0 4px ${T.accent})` }} />
             <Line yAxisId="l" type="monotone" dataKey="latency" stroke={T.purple} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
           </ComposedChart>
         </ResponsiveContainer>
         <div style={{ display: "flex", gap: 16, marginTop: 10, flexWrap: "wrap" }}>
           {[{ label: "Confidence", c: T.accent }, { label: "Latency (ms)", c: T.purple }, { label: "65% threshold", c: T.amber }].map(l => (
             <div key={l.label} style={{ display: "flex", gap: 5, alignItems: "center" }}>
-              <div style={{ width: 14, height: 2, background: l.c }} />
-              <span style={{ fontSize: 10, color: T.textMuted }}>{l.label}</span>
+              <div style={{ width: 16, height: 1.5, background: l.c, boxShadow: `0 0 4px ${l.c}` }} />
+              <span style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>{l.label}</span>
             </div>
           ))}
         </div>
@@ -659,49 +709,49 @@ function StrategyReviewPanel({ reviewData, T }) {
   const maxW = Math.max(...Object.values(weights));
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="AI Strategy Review" subtitle="Performance review & parameter adjustments"
+    <Card T={T} accent={T.purple}>
+      <CardHeader T={T} title="AI Strategy Review" subtitle="Performance review & parameter adjustments" accent={T.purple}
         right={<Pill label="auto-updated" color={T.green} T={T} />}
       />
       <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
         <div>
-          <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, marginBottom: 12, textTransform: "uppercase", fontWeight: 700 }}>Strategy Weights</div>
+          <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 1.5, marginBottom: 12, textTransform: "uppercase", fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" }}>Strategy Weights</div>
           {Object.entries(weights).map(([k, v]) => (
-            <div key={k} style={{ marginBottom: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                <span style={{ fontSize: 11, color: T.text }}>{k.replace(/_/g, " ")}</span>
+            <div key={k} style={{ marginBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 11, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{k.replace(/_/g, " ")}</span>
                 <Mono size={11} color={STRAT_C[k] || T.accent}>{(v * 100).toFixed(0)}%</Mono>
               </div>
               <ProgressBar value={v} max={maxW} color={STRAT_C[k] || T.accent} height={4} />
             </div>
           ))}
-          <div style={{ marginTop: 14, padding: "10px 12px", background: T.bg, borderRadius: 6 }}>
-            <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, marginBottom: 8, textTransform: "uppercase" }}>Parameter Adjustments</div>
+          <div style={{ marginTop: 14, padding: "10px 12px", background: T.bg, borderRadius: 3, border: `1px solid ${T.border}` }}>
+            <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 1.5, marginBottom: 8, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace" }}>Parameter Adjustments</div>
             {Object.entries(review.parameter_adjustments || {}).map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                <span style={{ fontSize: 10, color: T.textMuted }}>{k.replace(/_/g, " ")}</span>
+                <span style={{ fontSize: 10, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{k.replace(/_/g, " ")}</span>
                 <Mono size={10.5} color={T.accent}>{v}</Mono>
               </div>
             ))}
           </div>
         </div>
         <div>
-          <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, marginBottom: 8, textTransform: "uppercase" }}>Assessment</div>
-          <p style={{ fontSize: 11, color: T.textSub, lineHeight: 1.7, padding: "10px 12px", background: T.bg, borderRadius: 6, marginBottom: 12 }}>{review.overall_assessment}</p>
+          <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 1.5, marginBottom: 8, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace" }}>Assessment</div>
+          <p style={{ fontSize: 11, color: T.textSub, lineHeight: 1.8, padding: "10px 12px", background: T.bg, borderRadius: 3, marginBottom: 12, borderLeft: `2px solid ${T.accent}40` }}>{review.overall_assessment}</p>
           <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 9, color: T.green, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "flex", gap: 5, alignItems: "center" }}>
+            <div style={{ fontSize: 8.5, color: T.green, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6, display: "flex", gap: 5, alignItems: "center", fontFamily: "'Share Tech Mono', monospace" }}>
               <CheckCircle size={9} /> Focus Patterns
             </div>
             {(review.focus_patterns || []).map((p, i) => (
-              <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "5px 10px", background: T.greenDim, borderLeft: `2px solid ${T.green}50`, borderRadius: 3, marginBottom: 4 }}>{p}</div>
+              <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "6px 10px", background: T.greenDim, borderLeft: `2px solid ${T.green}60`, borderRadius: 2, marginBottom: 4 }}>{p}</div>
             ))}
           </div>
           <div>
-            <div style={{ fontSize: 9, color: T.red, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "flex", gap: 5, alignItems: "center" }}>
+            <div style={{ fontSize: 8.5, color: T.red, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6, display: "flex", gap: 5, alignItems: "center", fontFamily: "'Share Tech Mono', monospace" }}>
               <XCircle size={9} /> Avoid Patterns
             </div>
             {(review.avoid_patterns || []).map((p, i) => (
-              <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "5px 10px", background: T.redDim, borderLeft: `2px solid ${T.red}50`, borderRadius: 3, marginBottom: 4 }}>{p}</div>
+              <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "6px 10px", background: T.redDim, borderLeft: `2px solid ${T.red}60`, borderRadius: 2, marginBottom: 4 }}>{p}</div>
             ))}
           </div>
         </div>
@@ -739,21 +789,21 @@ function ModelPerformancePanel({ decisions, T }) {
   const fallbackRate = display.filter(m => m.isFallback).reduce((s, x) => s + x.pct, 0);
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="Model Performance" subtitle="Gemini usage & fallback tracking"
+    <Card T={T} accent={T.blue}>
+      <CardHeader T={T} title="Model Performance" subtitle="Gemini usage & fallback tracking" accent={T.blue}
         right={<Pill label={fallbackRate > 0 ? `${fallbackRate}% fallback` : "100% primary"} color={fallbackRate > 0 ? T.amber : T.green} T={T} />}
       />
       <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2,1fr)", gap: 10 }}>
         {display.map(m => (
-          <div key={m.model} style={{ background: T.bg, borderRadius: 7, padding: "12px 14px", border: `1px solid ${(m.isFallback ? T.amber : T.green) + "30"}` }}>
+          <div key={m.model} style={{ background: T.bg, borderRadius: 3, padding: "12px 14px", border: `1px solid ${(m.isFallback ? T.amber : T.green) + "25"}`, borderTop: `2px solid ${m.isFallback ? T.amber : T.green}` }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, alignItems: "center" }}>
               <Mono size={10.5} color={T.text} weight={700}>gemini-{m.model}</Mono>
               <Pill label={m.isFallback ? "fallback" : "primary"} color={m.isFallback ? T.amber : T.green} T={T} />
             </div>
-            <ProgressBar value={m.pct} max={100} color={m.isFallback ? T.amber : T.accent} height={4} />
+            <ProgressBar value={m.pct} max={100} color={m.isFallback ? T.amber : T.accent} height={3} />
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 7 }}>
-              <span style={{ fontSize: 10, color: T.textMuted }}>{m.pct}% calls</span>
-              <span style={{ fontSize: 10, color: T.textMuted }}>{m.avgLatency}ms avg</span>
+              <span style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{m.pct}% calls</span>
+              <span style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{m.avgLatency}ms avg</span>
             </div>
           </div>
         ))}
@@ -770,13 +820,13 @@ function KillSwitchPanel({ risk, riskEvents, T, onReset }) {
   const events = (riskEvents?.events || []).filter(e => e.type?.includes("KILL") || e.type?.includes("STOP") || e.severity === "CRITICAL");
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="Kill Switch Monitor" subtitle="Safety gauges & trigger history"
+    <Card T={T} accent={killSwitch ? T.red : T.green}>
+      <CardHeader T={T} title="Kill Switch Monitor" subtitle="Safety gauges & trigger history" accent={killSwitch ? T.red : T.green}
         right={
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <Pill label={killSwitch ? "TRIGGERED" : "SAFE"} color={killSwitch ? T.red : T.green} T={T} />
             {killSwitch && (
-              <button onClick={onReset} style={{ background: T.redDim, border: `1px solid ${T.red}40`, borderRadius: 5, padding: "4px 8px", cursor: "pointer", fontSize: 10, color: T.red, fontWeight: 700 }}>RESET</button>
+              <button onClick={onReset} style={{ background: T.redDim, border: `1px solid ${T.red}50`, borderRadius: 3, padding: "4px 10px", cursor: "pointer", fontSize: 9, color: T.red, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>RESET</button>
             )}
           </div>
         }
@@ -789,25 +839,25 @@ function KillSwitchPanel({ risk, riskEvents, T, onReset }) {
           ].map(g => {
             const pct = Math.min((g.value / g.max) * 100, 100);
             return (
-              <div key={g.label} style={{ background: T.bg, borderRadius: 7, padding: "12px 14px" }}>
+              <div key={g.label} style={{ background: T.bg, borderRadius: 3, padding: "12px 14px", border: `1px solid ${T.border}` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                  <span style={{ fontSize: 10, color: T.textMuted }}>{g.label}</span>
+                  <span style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>{g.label}</span>
                   <Mono size={11} color={pct > 75 ? g.color : T.text}>{g.value.toFixed(2)}% / {g.max}%</Mono>
                 </div>
-                <div style={{ position: "relative", height: 10, background: T.border, borderRadius: 5 }}>
-                  <div style={{ position: "absolute", width: `${pct}%`, height: "100%", background: `linear-gradient(90deg, ${g.color}80, ${g.color})`, borderRadius: 5, boxShadow: pct > 75 ? `0 0 8px ${g.color}60` : "none" }} />
+                <div style={{ position: "relative", height: 8, background: T.border, borderRadius: 0 }}>
+                  <div style={{ position: "absolute", width: `${pct}%`, height: "100%", background: `linear-gradient(90deg, ${g.color}70, ${g.color})`, boxShadow: pct > 75 ? `0 0 10px ${g.color}80` : "none" }} />
                   <div style={{ position: "absolute", left: "75%", top: 0, height: "100%", width: 1, background: T.textDim }} />
                 </div>
-                <div style={{ fontSize: 9, color: T.textMuted, marginTop: 5 }}>{(g.max - g.value).toFixed(2)}% remaining to trigger</div>
+                <div style={{ fontSize: 9, color: T.textMuted, marginTop: 5, fontFamily: "'Share Tech Mono', monospace" }}>{(g.max - g.value).toFixed(2)}% remaining</div>
               </div>
             );
           })}
         </div>
-        <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Recent Risk Events</div>
+        <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Recent Risk Events</div>
         {events.length === 0 ? (
-          <div style={{ fontSize: 11, color: T.textMuted, padding: "12px 0" }}>No critical events — system operating normally</div>
+          <div style={{ fontSize: 11, color: T.textMuted, padding: "12px 0", fontFamily: "'Share Tech Mono', monospace" }}>No critical events — system nominal</div>
         ) : events.slice(0, 5).map((e, i) => (
-          <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 10px", background: T.bg, borderRadius: 5, marginBottom: 4, borderLeft: `2px solid ${T.red}` }}>
+          <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 10px", background: T.bg, borderRadius: 2, marginBottom: 4, borderLeft: `2px solid ${T.red}` }}>
             <AlertTriangle size={11} color={T.red} style={{ marginTop: 1, flexShrink: 0 }} />
             <Mono size={9.5} color={T.textMuted}>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString("en-IN") : "—"}</Mono>
             <span style={{ fontSize: 11, color: T.textSub, flex: 1 }}>{e.description || e.message}</span>
@@ -826,8 +876,8 @@ function ExecutionQueuePanel({ orders, T }) {
   const recent = (orders || []).filter(o => ["COMPLETE", "FILLED"].includes((o.status || "").toUpperCase())).slice(0, 8);
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="Execution Queue" subtitle="Pending orders & recent fills"
+    <Card T={T} accent={T.amber}>
+      <CardHeader T={T} title="Execution Queue" subtitle="Pending orders & recent fills" accent={T.amber}
         right={
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {pending.length > 0 && <Pill label={`${pending.length} pending`} color={T.amber} T={T} />}
@@ -838,37 +888,37 @@ function ExecutionQueuePanel({ orders, T }) {
       <div style={{ padding: "10px 16px 14px" }}>
         {pending.length > 0 && (
           <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Pending</div>
+            <div style={{ fontSize: 8.5, color: T.amber, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Pending</div>
             {pending.map((o, i) => {
               const age = o.placed_at ? Math.round((Date.now() - new Date(o.placed_at).getTime()) / 1000) : 0;
               return (
-                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "9px 12px", background: T.bg, borderRadius: 6, marginBottom: 4, border: `1px solid ${T.amber}20`, flexWrap: "wrap" }}>
-                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.amber, flexShrink: 0, animation: "pulse 1.5s infinite" }} />
-                  <span style={{ fontWeight: 800, fontSize: 11, color: T.text, minWidth: 70 }}>{o.symbol}</span>
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "9px 12px", background: T.bg, borderRadius: 2, marginBottom: 4, border: `1px solid ${T.amber}25`, borderLeft: `2px solid ${T.amber}`, flexWrap: "wrap" }}>
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.amber, flexShrink: 0, animation: "pulse-dot 1.5s infinite", boxShadow: `0 0 6px ${T.amber}` }} />
+                  <span style={{ fontWeight: 700, fontSize: 11, color: T.text, minWidth: 70, fontFamily: "'Share Tech Mono', monospace" }}>{o.symbol}</span>
                   <Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} />
                   <Mono size={10} color={T.textSub}>{o.quantity} @ {o.price ? `₹${o.price}` : `₹${o.trigger_price} TRG`}</Mono>
                   <Pill label={o.order_type || "LIMIT"} color={T.blue} T={T} />
-                  <span style={{ marginLeft: "auto", fontSize: 10, color: T.textMuted }}>{age}s</span>
+                  <span style={{ marginLeft: "auto", fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{age}s</span>
                 </div>
               );
             })}
           </div>
         )}
-        <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Recent Fills</div>
+        <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Recent Fills</div>
         {recent.slice(0, 5).map((o, i) => {
           const slip = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
           return (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 12px", background: T.bg, borderRadius: 5, marginBottom: 3, flexWrap: "wrap" }}>
-              <CheckCircle size={10} color={T.green} />
-              <span style={{ fontWeight: 800, fontSize: 11, color: T.text, minWidth: 70 }}>{o.symbol}</span>
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 12px", background: T.bg, borderRadius: 2, marginBottom: 3, flexWrap: "wrap", borderLeft: `2px solid ${T.green}40` }}>
+              <CheckCircle size={10} color={T.green} style={{ filter: `drop-shadow(0 0 3px ${T.green})` }} />
+              <span style={{ fontWeight: 700, fontSize: 11, color: T.text, minWidth: 70, fontFamily: "'Share Tech Mono', monospace" }}>{o.symbol}</span>
               <Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} />
               <Mono size={10} color={T.text}>₹{o.average_price?.toLocaleString("en-IN") || o.price?.toLocaleString("en-IN") || "MKT"}</Mono>
               {slip !== null && <Mono size={10} color={Math.abs(slip) > 0.1 ? T.amber : T.green}>{slip >= 0 ? "+" : ""}{slip.toFixed(3)}% slip</Mono>}
-              <span style={{ marginLeft: "auto", fontSize: 9, color: T.textMuted }}>{o.placed_at ? new Date(o.placed_at).toLocaleTimeString("en-IN") : "—"}</span>
+              <span style={{ marginLeft: "auto", fontSize: 9, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{o.placed_at ? new Date(o.placed_at).toLocaleTimeString("en-IN") : "—"}</span>
             </div>
           );
         })}
-        {!recent.length && <div style={{ fontSize: 11, color: T.textMuted, paddingTop: 4 }}>No fills today</div>}
+        {!recent.length && <div style={{ fontSize: 11, color: T.textMuted, paddingTop: 4, fontFamily: "'Share Tech Mono', monospace" }}>No fills today</div>}
       </div>
     </Card>
   );
@@ -888,18 +938,24 @@ function IntradayChartPanel({ ticks, tickHistory, T }) {
   const color = dayChange >= 0 ? T.green : T.red;
 
   return (
-    <Card T={T}>
-      <CardHeader T={T} title="Intraday Chart" subtitle="15-min OHLCV"
+    <Card T={T} accent={color}>
+      <CardHeader T={T} title="Intraday Chart" subtitle="15-min OHLCV" accent={color}
         right={
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
             {symbols.map(s => (
               <button key={s} onClick={() => setSymbol(s)} style={{
-                background: symbol === s ? `${T.accent}20` : "transparent",
+                background: symbol === s ? `${T.accent}18` : "transparent",
                 border: `1px solid ${symbol === s ? T.accent : T.border}`,
-                borderRadius: 4, padding: "3px 7px", cursor: "pointer",
-                fontSize: 9.5, color: symbol === s ? T.accent : T.textMuted,
-                fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700,
+                borderRadius: 2,
+                padding: "3px 8px",
+                cursor: "pointer",
+                fontSize: 9,
+                color: symbol === s ? T.accent : T.textMuted,
+                fontFamily: "'Share Tech Mono', monospace",
+                fontWeight: 700,
+                letterSpacing: 0.5,
                 transition: "all 0.15s",
+                boxShadow: symbol === s ? `0 0 8px ${T.accent}30` : "none",
               }}>{s}</button>
             ))}
           </div>
@@ -916,26 +972,26 @@ function IntradayChartPanel({ ticks, tickHistory, T }) {
               { l: "Change", v: `${dayChange >= 0 ? "+" : ""}${dayChange.toFixed(2)}%`, c: color },
             ].map(it => (
               <div key={it.l}>
-                <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>{it.l}</div>
+                <div style={{ fontSize: 8.5, color: T.textMuted, marginBottom: 3, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>{it.l}</div>
                 <Mono size={12} color={it.c || T.text} weight={700}>{it.v}</Mono>
               </div>
             ))}
           </div>
         )}
         {chartData.length === 0 ? (
-          <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: T.textMuted, background: T.bg, borderRadius: 6 }}>
+          <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: T.textMuted, background: T.bg, borderRadius: 3, border: `1px dashed ${T.border}`, fontFamily: "'Share Tech Mono', monospace" }}>
             No live ticks for {symbol}
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={isMobile ? 150 : 190}>
             <ComposedChart data={chartData} margin={{ top: 5, right: isMobile ? -5 : 5, bottom: 0, left: isMobile ? -10 : 0 }}>
               <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
-              <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} interval={8} />
-              <YAxis yAxisId="p" domain={["auto", "auto"]} tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v.toFixed(0)} width={isMobile ? 38 : 46} />
-              <YAxis yAxisId="v" orientation="right" tick={{ fill: T.textMuted, fontSize: 8 }} tickLine={false} axisLine={false} tickFormatter={v => `${(v / 1000).toFixed(0)}K`} width={isMobile ? 28 : 34} />
+              <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 8, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} interval={8} />
+              <YAxis yAxisId="p" domain={["auto", "auto"]} tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} tickFormatter={v => v.toFixed(0)} width={isMobile ? 38 : 46} />
+              <YAxis yAxisId="v" orientation="right" tick={{ fill: T.textMuted, fontSize: 8, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} tickFormatter={v => `${(v / 1000).toFixed(0)}K`} width={isMobile ? 28 : 34} />
               <Tooltip {...tooltipStyle(T)} formatter={(v, n) => [n === "volume" ? `${(v / 1000).toFixed(1)}K` : v.toFixed(2), n]} />
-              <Bar yAxisId="v" dataKey="volume" fill={T.purple} opacity={0.2} radius={[1, 1, 0, 0]} />
-              <Line yAxisId="p" type="monotone" dataKey="close" stroke={color} strokeWidth={2} dot={false} />
+              <Bar yAxisId="v" dataKey="volume" fill={T.purple} opacity={0.18} radius={[1, 1, 0, 0]} />
+              <Line yAxisId="p" type="monotone" dataKey="close" stroke={color} strokeWidth={2} dot={false} style={{ filter: `drop-shadow(0 0 4px ${color})` }} />
               <Line yAxisId="p" type="monotone" dataKey="high" stroke={T.green} strokeWidth={0.5} dot={false} strokeDasharray="2 3" opacity={0.5} />
               <Line yAxisId="p" type="monotone" dataKey="low" stroke={T.red} strokeWidth={0.5} dot={false} strokeDasharray="2 3" opacity={0.5} />
             </ComposedChart>
@@ -951,9 +1007,11 @@ function BottomNav({ tabs, active, onChange, T }) {
   return (
     <div style={{
       position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
-      background: T.card, borderTop: `1px solid ${T.border}`,
+      background: T.card,
+      borderTop: `1px solid ${T.border}`,
       display: "flex", overflowX: "auto", WebkitOverflowScrolling: "touch",
-      scrollbarWidth: "none", backdropFilter: "blur(20px)",
+      scrollbarWidth: "none",
+      boxShadow: `0 -4px 20px rgba(0,0,0,0.5)`,
     }}>
       {tabs.map(tab => {
         const Icon = tab.icon;
@@ -964,10 +1022,11 @@ function BottomNav({ tabs, active, onChange, T }) {
             padding: "10px 14px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
             color: isActive ? T.accent : T.textMuted,
             borderTop: `2px solid ${isActive ? T.accent : "transparent"}`,
-            minWidth: 54, transition: "color 0.15s",
+            minWidth: 54, transition: "all 0.15s",
+            boxShadow: isActive ? `0 -2px 12px ${T.accent}30` : "none",
           }}>
-            <Icon size={14} />
-            <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.4, whiteSpace: "nowrap" }}>{tab.label.toUpperCase()}</span>
+            <Icon size={14} style={{ filter: isActive ? `drop-shadow(0 0 4px ${T.accent})` : "none" }} />
+            <span style={{ fontSize: 7.5, fontWeight: 700, letterSpacing: 1, whiteSpace: "nowrap", fontFamily: "'Share Tech Mono', monospace" }}>{tab.label.toUpperCase()}</span>
           </button>
         );
       })}
@@ -1201,73 +1260,174 @@ export default function TradingDashboard() {
   const col2 = isMobile ? "1fr" : "1fr 1fr";
 
   const inputStyle = {
-    background: T.bg, border: `1px solid ${T.border}`, color: T.text,
-    borderRadius: 6, padding: "9px 12px", fontSize: 11,
-    fontFamily: "'IBM Plex Mono', monospace", outline: "none",
-    transition: "border-color 0.15s",
+    background: T.bg,
+    border: `1px solid ${T.border}`,
+    color: T.text,
+    borderRadius: 3,
+    padding: "9px 12px",
+    fontSize: 11,
+    fontFamily: "'Share Tech Mono', monospace",
+    outline: "none",
+    transition: "border-color 0.15s, box-shadow 0.15s",
+    letterSpacing: 0.5,
   };
 
   const btnPrimary = (color) => ({
-    background: `${color}15`, border: `1px solid ${color}40`, borderRadius: 6,
-    padding: "7px 14px", cursor: "pointer", fontSize: 10, fontWeight: 700,
-    color, letterSpacing: 0.5, transition: "all 0.15s",
+    background: `${color}12`,
+    border: `1px solid ${color}40`,
+    borderRadius: 3,
+    padding: "7px 16px",
+    cursor: "pointer",
+    fontSize: 9.5,
+    fontWeight: 700,
+    color,
+    letterSpacing: 1.5,
+    transition: "all 0.15s",
+    fontFamily: "'Share Tech Mono', monospace",
+    textTransform: "uppercase",
+    boxShadow: `0 0 12px ${color}0`,
   });
 
   return (
-    <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'IBM Plex Sans', system-ui, sans-serif", paddingBottom: isMobile ? 68 : 0 }}>
-      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'Rajdhani', sans-serif", paddingBottom: isMobile ? 68 : 0, position: "relative" }}>
+      {/* Google Fonts */}
+      <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet" />
+
+      {/* Global styles */}
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
         ::-webkit-scrollbar { width: 4px; height: 4px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: ${T.border}; border-radius: 2px; }
+        ::-webkit-scrollbar-thumb { background: ${T.border}; border-radius: 0; }
         button { font-family: inherit; }
         input { font-family: inherit; }
-        @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
-        @keyframes shimmer { 0%,100%{opacity:0.4} 50%{opacity:0.8} }
-        @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+
+        @keyframes pulse-dot {
+          0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 currentColor; }
+          50% { opacity: 0.6; transform: scale(0.85); }
+        }
+        @keyframes sweep {
+          0% { transform: translateX(-100%); opacity: 0; }
+          50% { opacity: 1; }
+          100% { transform: translateX(200%); opacity: 0; }
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes glitch {
+          0%, 100% { clip-path: none; transform: none; }
+          20% { clip-path: rect(0 9999px 4px 0); transform: translate(-2px, 0); }
+          40% { clip-path: rect(8px 9999px 100% 0); transform: translate(2px, 0); }
+          60% { clip-path: rect(0 9999px 60px 0); transform: translate(-1px, 0); }
+        }
+        @keyframes scan {
+          0% { top: -100%; }
+          100% { top: 100%; }
+        }
+
         .tab-content { animation: fadeIn 0.2s ease; }
+
         input[type="date"] { color-scheme: ${isDark ? "dark" : "light"}; }
-        input:focus { border-color: ${T.accent} !important; }
+        input:focus {
+          border-color: ${T.accent} !important;
+          box-shadow: 0 0 0 1px ${T.accent}30, 0 0 12px ${T.accent}20 !important;
+        }
+        button:hover { opacity: 0.85; }
+
+        /* Scanline overlay on cards */
+        .card-scan::after {
+          content: '';
+          position: absolute;
+          top: -100%;
+          left: 0;
+          width: 100%;
+          height: 40%;
+          background: linear-gradient(to bottom, transparent, ${T.scanline}, transparent);
+          animation: scan 6s linear infinite;
+          pointer-events: none;
+        }
       `}</style>
+
+      {/* Background grid */}
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none",
+        backgroundImage: `
+          linear-gradient(${T.gridLine} 1px, transparent 1px),
+          linear-gradient(90deg, ${T.gridLine} 1px, transparent 1px)
+        `,
+        backgroundSize: "48px 48px",
+      }} />
+
+      {/* Corner decorations */}
+      {isDark && (
+        <>
+          <div style={{ position: "fixed", top: 0, left: 0, width: 300, height: 300, background: `radial-gradient(circle, ${T.accent}06 0%, transparent 70%)`, pointerEvents: "none", zIndex: 0 }} />
+          <div style={{ position: "fixed", bottom: 0, right: 0, width: 400, height: 400, background: `radial-gradient(circle, ${T.purple}05 0%, transparent 70%)`, pointerEvents: "none", zIndex: 0 }} />
+        </>
+      )}
 
       {/* ── TOP HEADER ── */}
       <header style={{
-        background: T.card, borderBottom: `1px solid ${T.border}`,
-        position: "sticky", top: 0, zIndex: 100, boxShadow: T.shadow,
+        background: isDark ? `${T.card}f0` : `${T.card}f8`,
+        borderBottom: `1px solid ${T.border}`,
+        position: "sticky",
+        top: 0,
+        zIndex: 100,
+        backdropFilter: "blur(20px)",
+        WebkitBackdropFilter: "blur(20px)",
       }}>
-        <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "0 12px" : "0 16px" }}>
+        {/* Top accent line */}
+        <div style={{ height: 2, background: `linear-gradient(90deg, transparent, ${T.accent}, ${T.purple}, ${T.blue}, transparent)` }} />
+
+        <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "0 12px" : "0 20px" }}>
           {/* Row 1: brand + indices + controls */}
-          <div style={{ height: 52, display: "flex", alignItems: "center", gap: isMobile ? 8 : 16 }}>
+          <div style={{ height: 54, display: "flex", alignItems: "center", gap: isMobile ? 8 : 16 }}>
+
             {/* Logo */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-              <div style={{ width: 30, height: 30, borderRadius: 7, background: `linear-gradient(135deg, ${T.accent}, ${T.blue})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <Zap size={13} color="#fff" fill="#fff" />
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              <div style={{ position: "relative", width: 34, height: 34 }}>
+                <div style={{ position: "absolute", inset: 0, borderRadius: 4, background: `linear-gradient(135deg, ${T.accent}30, ${T.blue}20)`, border: `1px solid ${T.accent}40` }} />
+                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Zap size={14} color={T.accent} fill={T.accent} style={{ filter: `drop-shadow(0 0 6px ${T.accent})` }} />
+                </div>
               </div>
               {!isMobile && (
                 <div>
-                  <div style={{ fontWeight: 800, fontSize: 13, letterSpacing: 0.5, color: T.text }}>AgentTrader</div>
-                  <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 2, textTransform: "uppercase" }}>NSE · F&O · Gemini AI</div>
+                  <div style={{ fontFamily: "'Orbitron', monospace", fontWeight: 700, fontSize: 13, letterSpacing: 2, color: T.text }}>AGENTTRADER</div>
+                  <div style={{ fontSize: 8, color: T.textMuted, letterSpacing: 3, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace" }}>NSE · F&O · GEMINI AI</div>
                 </div>
               )}
             </div>
 
-            {/* Divider */}
-            {!isMobile && <div style={{ width: 1, height: 24, background: T.border }} />}
+            {!isMobile && <div style={{ width: 1, height: 28, background: T.border }} />}
 
             {/* Index pills */}
             <div style={{ display: "flex", gap: 6, flex: 1, overflowX: "auto", scrollbarWidth: "none" }}>
               {[
-                { label: "NIFTY", val: indices.nifty, base: 22000 },
-                { label: "BNIFTY", val: indices.banknifty, base: 47000 },
-                { label: "VIX", val: indices.vix, base: 14, warn: (indices.vix || 0) > 18 },
+                { label: "NIFTY 50", val: indices.nifty, base: 22000 },
+                { label: "BANK NIFTY", val: indices.banknifty, base: 47000 },
+                { label: "INDIA VIX", val: indices.vix, base: 14, warn: (indices.vix || 0) > 18 },
               ].map(idx => {
                 const chg = idx.base ? (((idx.val || idx.base) - idx.base) / idx.base * 100) : 0;
+                const isUp = chg >= 0;
                 return (
-                  <div key={idx.label} style={{ display: "flex", gap: 6, alignItems: "center", padding: "4px 10px", background: T.bg, borderRadius: 5, border: `1px solid ${T.border}`, flexShrink: 0 }}>
-                    <span style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: 0.5 }}>{idx.label}</span>
-                    <Mono size={11} color={idx.warn ? T.amber : T.text} weight={700}>{idx.val?.toFixed(2) || "—"}</Mono>
-                    {idx.val && <span style={{ fontSize: 9, color: chg >= 0 ? T.green : T.red, fontFamily: "'IBM Plex Mono'" }}>{chg >= 0 ? "▲" : "▼"}{Math.abs(chg).toFixed(2)}%</span>}
+                  <div key={idx.label} style={{
+                    display: "flex", gap: 8, alignItems: "center",
+                    padding: "5px 12px",
+                    background: T.bg,
+                    borderRadius: 3,
+                    border: `1px solid ${T.border}`,
+                    borderTop: `1px solid ${idx.warn ? T.amber : isUp ? T.green : T.red}40`,
+                    flexShrink: 0,
+                  }}>
+                    <span style={{ fontSize: 8.5, color: T.textMuted, fontWeight: 700, letterSpacing: 1.5, fontFamily: "'Share Tech Mono', monospace" }}>{idx.label}</span>
+                    <Mono size={12} color={idx.warn ? T.amber : T.text} weight={700}>{idx.val?.toFixed(2) || "—"}</Mono>
+                    {idx.val && (
+                      <span style={{ fontSize: 9.5, color: isUp ? T.green : T.red, fontFamily: "'Share Tech Mono', monospace", textShadow: isUp ? `0 0 8px ${T.green}` : `0 0 8px ${T.red}` }}>
+                        {isUp ? "▲" : "▼"}{Math.abs(chg).toFixed(2)}%
+                      </span>
+                    )}
                   </div>
                 );
               })}
@@ -1276,22 +1436,30 @@ export default function TradingDashboard() {
             {/* Right controls */}
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
               {!isMobile && (
-                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: T.textMuted }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px", background: T.bg, borderRadius: 3, border: `1px solid ${T.border}` }}>
                   <StatusDot active={connected} color={T.green} />
-                  <span style={{ fontFamily: "monospace" }}>{connected ? "LIVE" : "OFFLINE"}</span>
-                  <span style={{ color: T.textDim }}>·</span>
-                  <span style={{ fontFamily: "monospace" }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>
+                  <span style={{ fontSize: 9, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>{connected ? "LIVE" : "OFFLINE"}</span>
+                  <span style={{ color: T.textDim, fontSize: 9 }}>|</span>
+                  <span style={{ fontSize: 9, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{lastUpdate.toLocaleTimeString("en-IN")}</span>
                 </div>
               )}
 
               {killSwitch && (
-                <button onClick={handleResetKillSwitch} style={{ ...btnPrimary(T.red), padding: "5px 10px", fontSize: 9 }}>
-                  ⚠ KILL SWITCH
-                </button>
+                <button onClick={handleResetKillSwitch} style={{
+                  background: T.redDim, border: `1px solid ${T.red}50`, borderRadius: 3,
+                  padding: "5px 10px", cursor: "pointer", fontSize: 9, color: T.red, fontWeight: 700,
+                  fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1,
+                  animation: "pulse-dot 1s infinite",
+                  boxShadow: `0 0 12px ${T.red}40`,
+                }}>⚠ KILL SWITCH</button>
               )}
 
               {/* Theme toggle */}
-              <button onClick={() => setIsDark(p => !p)} style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 6, padding: 7, cursor: "pointer", color: T.textSub, display: "flex", alignItems: "center" }}>
+              <button onClick={() => setIsDark(p => !p)} style={{
+                background: T.bg, border: `1px solid ${T.border}`, borderRadius: 3,
+                padding: 8, cursor: "pointer", color: T.textSub,
+                display: "flex", alignItems: "center",
+              }}>
                 {isDark ? <Sun size={13} /> : <Moon size={13} />}
               </button>
 
@@ -1300,17 +1468,23 @@ export default function TradingDashboard() {
                 onClick={engineRunning ? handleStopEngine : handleStartEngine}
                 disabled={startingEngine}
                 style={{
-                  background: engineRunning ? T.greenDim : T.blueDim,
+                  background: engineRunning ? `${T.green}12` : `${T.blue}12`,
                   border: `1px solid ${engineRunning ? T.green : T.blue}40`,
-                  borderRadius: 6, padding: "6px 12px", cursor: "pointer",
-                  fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                  borderRadius: 3,
+                  padding: "6px 14px",
+                  cursor: "pointer",
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  letterSpacing: 1.5,
                   color: engineRunning ? T.green : T.blue,
-                  display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
+                  display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap",
                   transition: "all 0.15s",
+                  fontFamily: "'Share Tech Mono', monospace",
+                  boxShadow: engineRunning ? `0 0 12px ${T.green}30` : `0 0 12px ${T.blue}20`,
                 }}
               >
-                <Power size={10} />
-                {isMobile ? (startingEngine ? "…" : engineRunning ? "ON" : "GO") : (startingEngine ? "STARTING…" : engineRunning ? "RUNNING" : "START")}
+                <Power size={10} style={{ filter: `drop-shadow(0 0 3px ${engineRunning ? T.green : T.blue})` }} />
+                {isMobile ? (startingEngine ? "…" : engineRunning ? "ON" : "GO") : (startingEngine ? "STARTING…" : engineRunning ? "ENGINE ON" : "START ENGINE")}
               </button>
             </div>
           </div>
@@ -1323,14 +1497,22 @@ export default function TradingDashboard() {
                 const isActive = activeTab === tab.id;
                 return (
                   <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
-                    background: "none", border: "none", cursor: "pointer",
-                    padding: "9px 16px", fontSize: 10, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    padding: "9px 18px",
+                    fontSize: 9.5,
+                    fontWeight: 700,
+                    letterSpacing: 1.5,
+                    textTransform: "uppercase",
                     color: isActive ? T.accent : T.textMuted,
                     borderBottom: `2px solid ${isActive ? T.accent : "transparent"}`,
                     display: "flex", alignItems: "center", gap: 6,
                     transition: "all 0.15s", whiteSpace: "nowrap", flexShrink: 0,
+                    fontFamily: "'Share Tech Mono', monospace",
+                    boxShadow: isActive ? `inset 0 -2px 8px ${T.accent}20` : "none",
                   }}>
-                    <Icon size={10} />
+                    <Icon size={10} style={{ filter: isActive ? `drop-shadow(0 0 3px ${T.accent})` : "none" }} />
                     {tab.label}
                   </button>
                 );
@@ -1341,20 +1523,20 @@ export default function TradingDashboard() {
       </header>
 
       {/* ── ALERT BANNERS ── */}
-      <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px 0" : "12px 16px 0" }}>
+      <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px 0" : "12px 20px 0", position: "relative", zIndex: 1 }}>
         {replicationEnabled && replicationStatus === "partial_failure" && (
-          <div style={{ background: T.amberDim, border: `1px solid ${T.amber}35`, borderRadius: 7, padding: "9px 14px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ background: `${T.amber}0c`, border: `1px solid ${T.amber}30`, borderLeft: `3px solid ${T.amber}`, borderRadius: 3, padding: "9px 14px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <AlertTriangle size={12} color={T.amber} />
-            <span style={{ fontSize: 11, color: T.amber, fontWeight: 600 }}>Replica warning: Zerodha copy partially failing</span>
+            <span style={{ fontSize: 11, color: T.amber, fontWeight: 600, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>REPLICA WARNING: Zerodha copy partially failing</span>
             {replicationError && <span style={{ fontSize: 10, color: T.textMuted }}>· {replicationError}</span>}
           </div>
         )}
         {!engineRunning && (
-          <div style={{ background: T.blueDim, border: `1px solid ${T.blue}25`, borderRadius: 7, padding: "9px 14px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ background: `${T.blue}0a`, border: `1px solid ${T.blue}25`, borderLeft: `3px solid ${T.blue}`, borderRadius: 3, padding: "9px 14px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <Power size={12} color={T.blue} />
-            <span style={{ fontSize: 11, color: T.blue, fontWeight: 600 }}>Engine stopped</span>
+            <span style={{ fontSize: 11, color: T.blue, fontWeight: 600, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>ENGINE STOPPED</span>
             <span style={{ fontSize: 11, color: T.textMuted }}>· Live data streams when engine is running</span>
-            <button onClick={handleStartEngine} style={{ ...btnPrimary(T.blue), marginLeft: "auto", padding: "5px 14px" }}>
+            <button onClick={handleStartEngine} style={{ ...btnPrimary(T.blue), marginLeft: "auto", padding: "5px 16px" }}>
               START ENGINE →
             </button>
           </div>
@@ -1362,47 +1544,57 @@ export default function TradingDashboard() {
       </div>
 
       {/* ── MAIN CONTENT ── */}
-      <main style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px" : "14px 16px" }}>
+      <main style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px" : "14px 20px", position: "relative", zIndex: 1 }}>
 
         {/* OVERVIEW */}
         {activeTab === "overview" && (
           <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* KPI Row */}
             <div style={{ display: "grid", gridTemplateColumns: gridKpi, gap: 10 }}>
-              <StatTile T={T} label="Today P&L" value={<span style={{ color: pnlColor, fontFamily: "'IBM Plex Mono'", fontWeight: 800, fontSize: 20 }}>{(pnl.total || 0) >= 0 ? "+" : ""}₹{Math.abs(pnl.total || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>} sub={`${(pnl.pct || 0) >= 0 ? "+" : ""}${(pnl.pct || 0).toFixed(2)}% day`} color={pnlColor} icon={(pnl.total || 0) >= 0 ? TrendingUp : TrendingDown} />
-              <StatTile T={T} label="Realized P&L" value={<span style={{ color: (pnl.realized||0)>=0?T.green:T.red, fontFamily: "'IBM Plex Mono'", fontWeight: 800, fontSize: 20 }}>{(pnl.realized||0)>=0?"+":""}₹{Math.abs(pnl.realized||0).toLocaleString("en-IN",{maximumFractionDigits:0})}</span>} sub="Booked today" color={T.green} icon={Target} />
+              <StatTile T={T} label="Today P&L"
+                value={<span style={{ color: pnlColor, fontFamily: "'Share Tech Mono', monospace", fontWeight: 700, fontSize: 22, textShadow: `0 0 16px ${pnlColor}40` }}>{(pnl.total || 0) >= 0 ? "+" : ""}₹{Math.abs(pnl.total || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>}
+                sub={`${(pnl.pct || 0) >= 0 ? "+" : ""}${(pnl.pct || 0).toFixed(2)}% day`}
+                color={pnlColor} icon={(pnl.total || 0) >= 0 ? TrendingUp : TrendingDown}
+              />
+              <StatTile T={T} label="Realized P&L"
+                value={<span style={{ color: (pnl.realized || 0) >= 0 ? T.green : T.red, fontFamily: "'Share Tech Mono', monospace", fontWeight: 700, fontSize: 22 }}>{(pnl.realized || 0) >= 0 ? "+" : ""}₹{Math.abs(pnl.realized || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>}
+                sub="Booked today" color={T.green} icon={Target}
+              />
               <StatTile T={T} label="Available" value={`₹${((funds.available || 0) / 1000).toFixed(1)}K`} sub={`₹${((funds.used_margin || 0) / 1000).toFixed(1)}K margin used`} color={T.blue} icon={DollarSign} />
               <StatTile T={T} label="Positions" value={positions.length} sub={`${10 - positions.length} slots free`} color={T.purple} icon={Activity} />
               <StatTile T={T} label="Win Rate" value={`${(risk.win_rate || 0).toFixed(1)}%`} sub={`${risk.trades_today || 0} trades`} color={T.amber} icon={Shield} />
               <StatTile T={T} label="Max Drawdown" value={`${(risk.drawdown_pct || 0).toFixed(2)}%`} sub={(risk.drawdown_pct || 0) < 2 ? "Within limits" : "⚠ Near limit"} color={(risk.drawdown_pct || 0) < 2 ? T.green : T.red} icon={AlertTriangle} />
             </div>
 
+            {/* P&L Chart + Risk Gauges */}
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "2fr 1fr", gap: 14 }}>
-              <Card T={T}>
-                <CardHeader T={T} title="Intraday P&L" subtitle="Real-time equity curve"
-                  right={<span style={{ fontFamily: "monospace", fontSize: 13, fontWeight: 800, color: pnlColor }}>{(pnl.total || 0) >= 0 ? "+" : ""}₹{Math.abs(pnl.total || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>}
+              <Card T={T} accent={pnlColor}>
+                <CardHeader T={T} title="Intraday P&L" subtitle="Real-time equity curve" accent={pnlColor}
+                  right={<span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 14, fontWeight: 700, color: pnlColor, textShadow: `0 0 10px ${pnlColor}` }}>{(pnl.total || 0) >= 0 ? "+" : ""}₹{Math.abs(pnl.total || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>}
                 />
                 <div style={{ padding: "14px 16px" }}>
                   <ResponsiveContainer width="100%" height={isMobile ? 130 : 170}>
                     <AreaChart data={pnlHistory} margin={{ left: isMobile ? -8 : 0, right: 5 }}>
                       <defs>
                         <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor={pnlColor} stopOpacity="0.25" />
+                          <stop offset="0%" stopColor={pnlColor} stopOpacity="0.3" />
                           <stop offset="100%" stopColor={pnlColor} stopOpacity="0" />
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
-                      <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} interval={14} />
-                      <YAxis tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 40 : 50} />
+                      <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} interval={14} />
+                      <YAxis tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 40 : 50} />
                       <Tooltip {...tooltipStyle(T)} formatter={v => [`₹${v.toLocaleString("en-IN")}`, "P&L"]} />
-                      <ReferenceLine y={0} stroke={T.border} strokeDasharray="3 3" />
-                      <Area type="monotone" dataKey="pnl" stroke={pnlColor} fill="url(#pnlGrad)" strokeWidth={2} dot={false} />
+                      <ReferenceLine y={0} stroke={T.border} strokeDasharray="4 2" />
+                      <Area type="monotone" dataKey="pnl" stroke={pnlColor} fill="url(#pnlGrad)" strokeWidth={2} dot={false} style={{ filter: `drop-shadow(0 0 4px ${pnlColor})` }} />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
               </Card>
 
-              <Card T={T}>
-                <CardHeader T={T} title="Risk Gauges" subtitle="Limit consumption" />
+              <Card T={T} accent={T.red}>
+                <CardHeader T={T} title="Risk Gauges" subtitle="Limit consumption" accent={T.red} />
                 <div style={{ padding: "14px 16px" }}>
                   {[
                     { label: "Daily Loss Limit", used: Math.abs(Math.min(0, risk.daily_pnl_pct || 0)), max: 2.0, color: T.red },
@@ -1411,76 +1603,106 @@ export default function TradingDashboard() {
                     { label: "Margin Used", used: ((funds.used_margin || 0) / (funds.total || 1)) * 100, max: 80, color: T.blue },
                   ].map(r => {
                     const pct = Math.min((r.used / r.max) * 100, 100);
-                    const dangerColor = pct > 75 ? T.red : r.color;
                     return (
-                      <div key={r.label} style={{ marginBottom: 16 }}>
+                      <div key={r.label} style={{ marginBottom: 18 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                          <span style={{ fontSize: 10, color: T.textMuted }}>{r.label}</span>
+                          <span style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>{r.label}</span>
                           <Mono size={10} color={pct > 75 ? T.red : T.text}>{r.noPercent ? `${Math.round(r.used)}/${r.max}` : `${r.used.toFixed(1)}%`}</Mono>
                         </div>
-                        <ProgressBar value={r.used} max={r.max} color={dangerColor} height={4} />
+                        <ProgressBar value={r.used} max={r.max} color={pct > 75 ? T.red : r.color} height={4} />
                       </div>
                     );
                   })}
                   <div style={{ paddingTop: 10, borderTop: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontSize: 10, color: T.textMuted }}>Kill Switch</span>
-                    <span style={{ fontSize: 10, fontWeight: 700, color: killSwitch ? T.red : T.green }}>{killSwitch ? "⚠ TRIGGERED" : "✓ SAFE"}</span>
+                    <span style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>Kill Switch</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: killSwitch ? T.red : T.green, fontFamily: "'Share Tech Mono', monospace", textShadow: `0 0 8px ${killSwitch ? T.red : T.green}` }}>{killSwitch ? "⚠ TRIGGERED" : "✓ SAFE"}</span>
                   </div>
                 </div>
               </Card>
             </div>
 
+            {/* AI Cycle + Live Ticks */}
             <div style={{ display: "grid", gridTemplateColumns: col2, gap: 14 }}>
-              <Card T={T}>
-                <CardHeader T={T} title="AI Cycle" subtitle="Current decision pipeline"
+              <Card T={T} accent={T.accent}>
+                <CardHeader T={T} title="AI Cycle" subtitle="Current decision pipeline" accent={T.accent}
                   right={latestDecision?.market_regime ? <Pill label={latestDecision.market_regime} color={T.accent} T={T} /> : null}
                 />
                 <div style={{ padding: "14px 16px" }}>
-                  <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap" }}>
-                    {["collecting_context", "calling_model", "risk_checks", "placing_orders", "decision_complete"].map(s => {
+                  {/* Stage pipeline */}
+                  <div style={{ display: "flex", gap: 3, marginBottom: 10, flexWrap: "wrap" }}>
+                    {["collecting_context", "calling_model", "risk_checks", "placing_orders", "decision_complete"].map((s, si) => {
                       const active = agentStatus?.stage === s;
                       return (
-                        <span key={s} style={{ fontSize: 9, padding: "3px 7px", borderRadius: 3, border: `1px solid ${active ? T.accent : T.border}`, color: active ? T.accent : T.textMuted, background: active ? T.accentDim : "transparent", transition: "all 0.2s" }}>
-                          {s.replace(/_/g, " ")}
+                        <span key={s} style={{
+                          fontSize: 8.5, padding: "3px 8px", borderRadius: 2,
+                          border: `1px solid ${active ? T.accent : T.border}`,
+                          color: active ? T.accent : T.textMuted,
+                          background: active ? T.accentDim : "transparent",
+                          transition: "all 0.2s",
+                          fontFamily: "'Share Tech Mono', monospace",
+                          letterSpacing: 0.5,
+                          boxShadow: active ? `0 0 8px ${T.accent}30` : "none",
+                        }}>
+                          {active && "▶ "}{s.replace(/_/g, " ")}
                         </span>
                       );
                     })}
                   </div>
-                  <div style={{ height: 5, background: T.bg, borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
-                    <div style={{ width: `${Math.max(3, progressPct)}%`, height: "100%", background: `linear-gradient(90deg, ${T.accent}, ${T.blue})`, transition: "width 0.3s" }} />
+
+                  {/* Progress bar */}
+                  <div style={{ position: "relative", height: 4, background: T.bg, borderRadius: 0, overflow: "hidden", marginBottom: 10, border: `1px solid ${T.border}` }}>
+                    <div style={{ position: "absolute", left: 0, top: 0, width: `${Math.max(2, progressPct)}%`, height: "100%", background: `linear-gradient(90deg, ${T.accent}80, ${T.accent})`, boxShadow: `0 0 8px ${T.accent}` }} />
+                    {/* Sweep effect */}
+                    <div style={{ position: "absolute", top: 0, width: "30%", height: "100%", background: `linear-gradient(90deg, transparent, ${T.accent}40, transparent)`, animation: "sweep 2s linear infinite" }} />
                   </div>
-                  <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 12 }}>
-                    {progressPct}% complete · {agentStatus?.last_cycle_duration_ms ? `${agentStatus.last_cycle_duration_ms}ms` : "—"}
+
+                  <div style={{ fontSize: 9.5, color: T.textMuted, marginBottom: 12, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>
+                    {progressPct}% · {agentStatus?.last_cycle_duration_ms ? `${agentStatus.last_cycle_duration_ms}ms` : "—"}
                   </div>
-                  {eventTape.slice(-5).reverse().map((e, i) => (
-                    <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 4 }}>
-                      <span style={{ fontSize: 9, color: T.textDim, minWidth: 42, fontFamily: "monospace", flexShrink: 0, paddingTop: 1 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
-                      <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber, marginTop: 5, flexShrink: 0 }} />
-                      <span style={{ fontSize: 10, color: e.level === "error" ? T.red : e.level === "success" ? T.green : T.textSub }}>{e.message}</span>
-                    </div>
-                  ))}
-                  {!eventTape.length && <span style={{ fontSize: 11, color: T.textMuted }}>Waiting for AI events…</span>}
+
+                  {/* Event log */}
+                  <div style={{ maxHeight: 130, overflowY: "auto" }}>
+                    {eventTape.slice(-5).reverse().map((e, i) => (
+                      <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 5, padding: "4px 0", borderBottom: `1px solid ${T.border}20` }}>
+                        <span style={{ fontSize: 8.5, color: T.textDim, minWidth: 40, fontFamily: "'Share Tech Mono', monospace", flexShrink: 0, paddingTop: 1, letterSpacing: 0.5 }}>{new Date(e.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
+                        <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber, marginTop: 5, flexShrink: 0, boxShadow: `0 0 4px ${e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber}` }} />
+                        <span style={{ fontSize: 10, color: e.level === "error" ? T.red : e.level === "success" ? T.green : T.textSub }}>{e.message}</span>
+                      </div>
+                    ))}
+                    {!eventTape.length && <span style={{ fontSize: 11, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>Waiting for AI events…</span>}
+                  </div>
                 </div>
               </Card>
 
-              <Card T={T}>
-                <CardHeader T={T} title="Live Ticks" subtitle="Real-time price feed" right={<StatusDot active={connected} color={T.green} />} />
+              {/* Live Ticks */}
+              <Card T={T} accent={T.cyan}>
+                <CardHeader T={T} title="Live Ticks" subtitle="Real-time price feed" accent={T.cyan}
+                  right={<StatusDot active={connected} color={T.green} />}
+                />
                 <div style={{ padding: "10px 16px 14px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
                   {Object.entries(ticks).slice(0, isMobile ? 6 : 9).map(([sym, val]) => {
                     const curr = tickPrice(val);
                     const prev = tickPrice(prevTicks[sym] || curr);
                     const delta = curr - prev;
                     const series = tickHistory[sym] || [];
+                    const isUp = delta >= 0;
                     return (
-                      <div key={sym} style={{ background: T.bg, borderRadius: 6, padding: "8px 10px" }}>
-                        <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{sym}</div>
-                        <Mono size={10.5} color={delta > 0 ? T.green : delta < 0 ? T.red : T.text} weight={700}>₹{curr ? curr.toLocaleString("en-IN") : "—"}</Mono>
-                        <Sparkline data={series.slice(-15)} color={delta >= 0 ? T.green : T.red} height={24} />
+                      <div key={sym} style={{
+                        background: T.bg,
+                        borderRadius: 3,
+                        padding: "9px 10px",
+                        border: `1px solid ${T.border}`,
+                        borderTop: `1px solid ${isUp ? T.green : T.red}30`,
+                        transition: "border-color 0.3s",
+                      }}>
+                        <div style={{ fontSize: 8.5, color: T.textMuted, marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "'Share Tech Mono', monospace", fontWeight: 600, letterSpacing: 0.5 }}>{sym}</div>
+                        <Mono size={10.5} color={isUp ? T.green : T.red} weight={700}>₹{curr ? curr.toLocaleString("en-IN") : "—"}</Mono>
+                        <Sparkline data={series.slice(-15)} color={isUp ? T.green : T.red} height={24} />
                       </div>
                     );
                   })}
                   {!Object.keys(ticks).length && (
-                    <div style={{ gridColumn: "1/-1", textAlign: "center", padding: "24px 0", fontSize: 11, color: T.textMuted }}>Waiting for tick data…</div>
+                    <div style={{ gridColumn: "1/-1", textAlign: "center", padding: "24px 0", fontSize: 11, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>WAITING FOR TICK DATA…</div>
                   )}
                 </div>
               </Card>
@@ -1517,40 +1739,50 @@ export default function TradingDashboard() {
             <AITimelinePanel decisions={agentDecisions} T={T} />
             <StrategyReviewPanel reviewData={null} T={T} />
             <ModelPerformancePanel decisions={agentDecisions} T={T} />
-            <Card T={T}>
-              <CardHeader T={T} title="Latest AI Signals"
+            <Card T={T} accent={T.purple}>
+              <CardHeader T={T} title="Latest AI Signals" accent={T.purple}
                 subtitle={`${latestSignals.length} signals · ${latestDecision?.timestamp ? new Date(latestDecision.timestamp).toLocaleTimeString("en-IN") : "—"}`}
               />
               <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
                 {latestSignals.map((s, i) => {
                   const conf = Math.round((Number(s.confidence || 0)) * 100);
                   const confColor = conf >= 70 ? T.green : conf >= 50 ? T.amber : T.red;
+                  const actionColor = ACTION_COLORS_FN(T)[s.action] || T.textMuted;
                   return (
-                    <div key={i} style={{ background: T.bg, borderRadius: 8, padding: "14px", border: `1px solid ${T.border}` }}>
+                    <div key={i} style={{
+                      background: T.bg,
+                      borderRadius: 4,
+                      padding: "14px",
+                      border: `1px solid ${T.border}`,
+                      borderTop: `2px solid ${actionColor}`,
+                      position: "relative",
+                      overflow: "hidden",
+                    }}>
+                      <div style={{ position: "absolute", top: 0, right: 0, width: 80, height: 80, background: `radial-gradient(circle, ${actionColor}06 0%, transparent 70%)`, pointerEvents: "none" }} />
                       <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontWeight: 800, fontSize: 13, color: T.text }}>{s.symbol}</span>
-                        <Pill label={s.action} color={ACTION_COLORS_FN(T)[s.action] || T.textMuted} T={T} />
+                        <span style={{ fontWeight: 700, fontSize: 14, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{s.symbol}</span>
+                        <Pill label={s.action} color={actionColor} T={T} />
                         <span style={{ marginLeft: "auto" }}><Pill label={s.strategy || "—"} color={STRATEGY_COLORS_FN(T)[s.strategy] || T.textMuted} T={T} /></span>
                       </div>
                       <div style={{ marginBottom: 10 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                          <span style={{ fontSize: 9, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.8 }}>Confidence</span>
+                          <span style={{ fontSize: 8.5, color: T.textMuted, textTransform: "uppercase", letterSpacing: 1, fontFamily: "'Share Tech Mono', monospace" }}>Confidence</span>
                           <Mono size={10} color={confColor}>{conf}%</Mono>
                         </div>
                         <ProgressBar value={conf} max={100} color={confColor} height={4} />
                       </div>
-                      <div style={{ fontSize: 10, color: T.textMuted, lineHeight: 1.7, fontFamily: "'IBM Plex Mono'" }}>
+                      <div style={{ fontSize: 9.5, color: T.textMuted, lineHeight: 1.8, fontFamily: "'Share Tech Mono', monospace" }}>
                         Entry: {s.entry_price ? `₹${Number(s.entry_price).toFixed(0)}` : "—"} · SL: {s.stop_loss ? `₹${Number(s.stop_loss).toFixed(0)}` : "—"} · Tgt: {s.target ? `₹${Number(s.target).toFixed(0)}` : "—"}
                         {s.risk_reward ? ` · R/R: ${Number(s.risk_reward).toFixed(1)}` : ""}
                       </div>
-                      <p style={{ fontSize: 10.5, color: T.textSub, marginTop: 8, lineHeight: 1.6 }}>{s.rationale}</p>
+                      <p style={{ fontSize: 11, color: T.textSub, marginTop: 8, lineHeight: 1.6 }}>{s.rationale}</p>
                       <div style={{ marginTop: 10 }}>
                         <Pill label={s.risk_status === "approved" ? "risk passed" : "risk rejected"} color={s.risk_status === "approved" ? T.green : T.red} T={T} />
                       </div>
                     </div>
                   );
                 })}
-                {!latestSignals.length && <div style={{ fontSize: 11, color: T.textMuted }}>No live AI signals yet</div>}
+                {!latestSignals.length && <div style={{ fontSize: 11, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>NO LIVE AI SIGNALS YET</div>}
               </div>
             </Card>
           </div>
@@ -1560,30 +1792,31 @@ export default function TradingDashboard() {
         {activeTab === "orders" && (
           <div className="tab-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <ExecutionQueuePanel orders={orders} T={T} />
-            <Card T={T}>
-              <CardHeader T={T} title="Order History" subtitle="All orders today"
+            <Card T={T} accent={T.blue}>
+              <CardHeader T={T} title="Order History" subtitle="All orders today" accent={T.blue}
                 right={<button onClick={refetchOrders} style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4 }}><RefreshCw size={12} /></button>}
               />
               <div style={{ padding: "0 16px 14px", overflowX: "auto" }}>
                 {!orders.length ? (
-                  <div style={{ textAlign: "center", padding: "40px 0", color: T.textMuted, fontSize: 12 }}>No orders today</div>
+                  <div style={{ textAlign: "center", padding: "40px 0", color: T.textMuted, fontSize: 12, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2 }}>NO ORDERS TODAY</div>
                 ) : isMobile ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
                     {orders.slice(0, 30).map((o, i) => {
                       const slip = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
+                      const statusColor = { COMPLETE: T.green, FILLED: T.green, PENDING: T.amber, REJECTED: T.red }[(o.status || "").toUpperCase()] || T.textMuted;
                       return (
-                        <div key={i} style={{ background: T.bg, borderRadius: 7, padding: "12px 14px", border: `1px solid ${T.border}` }}>
+                        <div key={i} style={{ background: T.bg, borderRadius: 3, padding: "12px 14px", border: `1px solid ${T.border}`, borderLeft: `2px solid ${statusColor}` }}>
                           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                             <div style={{ display: "flex", gap: 8 }}>
-                              <span style={{ fontWeight: 800, fontSize: 12, color: T.text }}>{o.symbol}</span>
+                              <span style={{ fontWeight: 700, fontSize: 12, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{o.symbol}</span>
                               <Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} />
                             </div>
-                            <Pill label={o.status} color={{ COMPLETE: T.green, FILLED: T.green, PENDING: T.amber, REJECTED: T.red }[(o.status || "").toUpperCase()] || T.textMuted} T={T} />
+                            <Pill label={o.status} color={statusColor} T={T} />
                           </div>
                           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                             {[{ l: "Qty", v: o.quantity }, { l: "Price", v: o.price ? `₹${o.price}` : "MKT" }, { l: "Avg Fill", v: o.average_price ? `₹${o.average_price}` : "—" }, { l: "Slippage", v: slip !== null ? `${slip.toFixed(3)}%` : "—" }].map(it => (
                               <div key={it.l}>
-                                <div style={{ fontSize: 9, color: T.textMuted }}>{it.l}</div>
+                                <div style={{ fontSize: 8.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>{it.l}</div>
                                 <Mono size={11} color={T.text}>{it.v}</Mono>
                               </div>
                             ))}
@@ -1597,23 +1830,24 @@ export default function TradingDashboard() {
                     <thead>
                       <tr style={{ borderBottom: `1px solid ${T.border}` }}>
                         {["Time", "Symbol", "Side", "Qty", "Price", "Avg Fill", "Status", "Tag", "Slippage"].map(h =>
-                          <th key={h} style={{ padding: "7px 8px", textAlign: "left", fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: 0.8, textTransform: "uppercase" }}>{h}</th>
+                          <th key={h} style={{ padding: "7px 8px", textAlign: "left", fontSize: 8.5, color: T.textMuted, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace" }}>{h}</th>
                         )}
                       </tr>
                     </thead>
                     <tbody>
                       {orders.slice(0, 30).map((o, i) => {
                         const slip = o.price && o.average_price ? ((o.average_price - o.price) / o.price * 100) : null;
+                        const statusColor = { COMPLETE: T.green, FILLED: T.green, PENDING: T.amber, REJECTED: T.red }[(o.status || "").toUpperCase()] || T.textMuted;
                         return (
-                          <tr key={i} style={{ borderBottom: `1px solid ${T.border}20`, background: i % 2 ? T.bg + "60" : "transparent" }}>
+                          <tr key={i} style={{ borderBottom: `1px solid ${T.border}15`, background: i % 2 ? T.bg + "50" : "transparent" }}>
                             <td style={{ padding: "9px 8px" }}><Mono size={10} color={T.textMuted}>{new Date(o.placed_at).toLocaleTimeString("en-IN")}</Mono></td>
-                            <td style={{ padding: "9px 8px", fontWeight: 800, fontSize: 11, color: T.text }}>{o.symbol}</td>
+                            <td style={{ padding: "9px 8px", fontWeight: 700, fontSize: 11, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{o.symbol}</td>
                             <td style={{ padding: "9px 8px" }}><Pill label={o.side} color={o.side === "BUY" ? T.green : T.red} T={T} /></td>
                             <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.text}>{o.quantity}</Mono></td>
                             <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.text}>{o.price ? `₹${o.price}` : "MKT"}</Mono></td>
                             <td style={{ padding: "9px 8px" }}><Mono size={11} color={T.textSub}>{o.average_price ? `₹${o.average_price}` : "—"}</Mono></td>
-                            <td style={{ padding: "9px 8px" }}><Pill label={o.status} color={{ COMPLETE: T.green, FILLED: T.green, PENDING: T.amber, REJECTED: T.red }[(o.status || "").toUpperCase()] || T.textMuted} T={T} /></td>
-                            <td style={{ padding: "9px 8px", fontSize: 10, color: T.textMuted }}>{o.tag || "—"}</td>
+                            <td style={{ padding: "9px 8px" }}><Pill label={o.status} color={statusColor} T={T} /></td>
+                            <td style={{ padding: "9px 8px", fontSize: 10, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>{o.tag || "—"}</td>
                             <td style={{ padding: "9px 8px" }}><Mono size={10} color={slip !== null && Math.abs(slip) > 0.1 ? T.amber : T.textMuted}>{slip !== null ? `${slip.toFixed(3)}%` : "—"}</Mono></td>
                           </tr>
                         );
@@ -1633,8 +1867,8 @@ export default function TradingDashboard() {
             <ModelPerformancePanel decisions={agentDecisions} T={T} />
 
             {/* Broker UI Primary */}
-            <Card T={T}>
-              <CardHeader T={T} title="UI Primary Broker" subtitle="Dashboard data source" />
+            <Card T={T} accent={T.blue}>
+              <CardHeader T={T} title="UI Primary Broker" subtitle="Dashboard data source" accent={T.blue} />
               <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
                 <div style={{ display: "flex", gap: 8 }}>
                   {["dhan", "zerodha"].map(b => (
@@ -1642,49 +1876,52 @@ export default function TradingDashboard() {
                       background: uiPrimarySelection === b ? T.accentDim : "transparent",
                       border: `1px solid ${uiPrimarySelection === b ? T.accent : T.border}`,
                       color: uiPrimarySelection === b ? T.accent : T.textMuted,
-                      borderRadius: 6, padding: "7px 14px", fontSize: 10, fontWeight: 700, cursor: "pointer", textTransform: "uppercase", transition: "all 0.15s",
+                      borderRadius: 3, padding: "7px 18px", fontSize: 9.5, fontWeight: 700, cursor: "pointer",
+                      textTransform: "uppercase", transition: "all 0.15s",
+                      fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1,
+                      boxShadow: uiPrimarySelection === b ? `0 0 12px ${T.accent}25` : "none",
                     }}>{b}</button>
                   ))}
                 </div>
-                <div style={{ fontSize: 10, color: T.textMuted }}>
+                <div style={{ fontSize: 9.5, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>
                   Selected: <Mono size={10} color={T.text}>{uiPrimaryBroker}</Mono> · Effective: <Mono size={10} color={T.text}>{effectivePrimaryBroker}</Mono>
                 </div>
-                {primaryOverrideActive && <div style={{ fontSize: 10, color: T.amber }}>⚠ Fallback active. {liveData?.primary_override_reason || ""}</div>}
-                {brokerPrefMessage && <div style={{ fontSize: 10, color: brokerPrefMessage.startsWith("Error") ? T.red : T.green }}>{brokerPrefMessage}</div>}
-                <button onClick={saveUiPrimaryBroker} disabled={savingBrokerPref} style={btnPrimary(T.blue)}>{savingBrokerPref ? "Saving…" : "Save Preference"}</button>
+                {primaryOverrideActive && <div style={{ fontSize: 10, color: T.amber, fontFamily: "'Share Tech Mono', monospace" }}>⚠ Fallback active. {liveData?.primary_override_reason || ""}</div>}
+                {brokerPrefMessage && <div style={{ fontSize: 10, color: brokerPrefMessage.startsWith("Error") ? T.red : T.green, fontFamily: "'Share Tech Mono', monospace" }}>{brokerPrefMessage}</div>}
+                <button onClick={saveUiPrimaryBroker} disabled={savingBrokerPref} style={btnPrimary(T.blue)}>{savingBrokerPref ? "SAVING…" : "SAVE PREFERENCE"}</button>
               </div>
             </Card>
 
             {/* Broker Health */}
-            <Card T={T}>
-              <CardHeader T={T} title="Broker Health" subtitle="Connectivity status" />
+            <Card T={T} accent={T.green}>
+              <CardHeader T={T} title="Broker Health" subtitle="Connectivity status" accent={T.green} />
               <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
                 {["dhan", "zerodha"].map(b => {
                   const isConn = connectedBrokers.includes(b);
                   return (
-                    <div key={b} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: T.bg, borderRadius: 6 }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <div key={b} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: T.bg, borderRadius: 3, border: `1px solid ${isConn ? T.green : T.red}20`, borderLeft: `2px solid ${isConn ? T.green : T.red}` }}>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                         <StatusDot active={isConn} color={isConn ? T.green : T.red} />
-                        <span style={{ fontSize: 12, fontWeight: 700, color: T.text, textTransform: "uppercase" }}>{b}</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: T.text, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 }}>{b}</span>
                       </div>
                       <Pill label={isConn ? "healthy" : "down"} color={isConn ? T.green : T.red} T={T} />
                     </div>
                   );
                 })}
-                <div style={{ fontSize: 10, color: T.textMuted, paddingTop: 4 }}>Last checked: {lastUpdate.toLocaleTimeString("en-IN")}</div>
+                <div style={{ fontSize: 9.5, color: T.textMuted, paddingTop: 4, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 }}>Last checked: {lastUpdate.toLocaleTimeString("en-IN")}</div>
               </div>
             </Card>
 
             {/* Event Log */}
-            <Card T={T} style={{ gridColumn: isMobile ? "1" : "1/-1" }}>
-              <CardHeader T={T} title="Event Log" subtitle="Full AI agent pipeline events" />
+            <Card T={T} accent={T.textMuted} style={{ gridColumn: isMobile ? "1" : "1/-1" }}>
+              <CardHeader T={T} title="Event Log" subtitle="Full AI agent pipeline events" accent={T.textMuted} />
               <div style={{ padding: "10px 16px 14px", maxHeight: 320, overflowY: "auto" }}>
                 {!eventTape.length ? (
-                  <div style={{ fontSize: 11, color: T.textMuted, padding: "20px 0" }}>No events yet</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, padding: "20px 0", fontFamily: "'Share Tech Mono', monospace" }}>No events yet</div>
                 ) : eventTape.slice().reverse().map((e, i) => (
-                  <div key={i} style={{ display: "flex", gap: 8, padding: "6px 8px", borderRadius: 4, marginBottom: 2, background: i % 2 === 0 ? T.bg : "transparent", alignItems: "flex-start" }}>
+                  <div key={i} style={{ display: "flex", gap: 8, padding: "6px 8px", borderRadius: 2, marginBottom: 2, background: i % 2 === 0 ? T.bg : "transparent", alignItems: "flex-start", borderLeft: `1px solid ${e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber}30` }}>
                     <Mono size={9} color={T.textDim}>{new Date(e.timestamp).toLocaleTimeString("en-IN")}</Mono>
-                    <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber, marginTop: 5, flexShrink: 0 }} />
+                    <span style={{ width: 4, height: 4, borderRadius: "50%", background: e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber, marginTop: 5, flexShrink: 0, boxShadow: `0 0 4px ${e.level === "error" ? T.red : e.level === "success" ? T.green : T.amber}` }} />
                     <span style={{ fontSize: 10.5, color: e.level === "error" ? T.red : e.level === "success" ? T.green : T.textSub, flex: 1 }}>{e.message}</span>
                     {e.stage && <Mono size={9} color={T.textDim}>{e.stage}</Mono>}
                   </div>
@@ -1703,8 +1940,8 @@ export default function TradingDashboard() {
               <StatTile T={T} label="Data Source" value="NSE/BSE" sub="Stored candles" color={T.amber} icon={Database} />
               <StatTile T={T} label="Run ID" value={simState.runId || "—"} sub={`Status: ${simState.runStatus || "idle"}`} color={T.blue} icon={Activity} />
             </div>
-            <Card T={T}>
-              <CardHeader T={T} title="Paper Simulator" subtitle={SIM_SOURCE}
+            <Card T={T} accent={T.accent}>
+              <CardHeader T={T} title="Paper Simulator" subtitle={SIM_SOURCE} accent={T.accent}
                 right={
                   <div style={{ display: "flex", gap: 8 }}>
                     <button onClick={backfillAndRun} disabled={simState.loading || simBackfilling} style={{ ...btnPrimary(T.accent), opacity: simState.loading || simBackfilling ? 0.5 : 1 }}>
@@ -1733,24 +1970,27 @@ export default function TradingDashboard() {
                   ))}
                 </div>
 
-                {simBackfilling && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Backfilling historical candles…</div>}
-                {simState.loading && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Running replay… ({simState.runStatus || "queued"})</div>}
-                {simState.progress && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Progress: {simState.progress.processed}/{simState.progress.total} ({simState.progress.pct}%)</div>}
+                {simBackfilling && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Backfilling historical candles…</div>}
+                {simState.loading && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Running replay… ({simState.runStatus || "queued"})</div>}
+                {simState.progress && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Progress: {simState.progress.processed}/{simState.progress.total} ({simState.progress.pct}%)</div>}
                 {simState.error && (
-                  <div style={{ background: T.redDim, border: `1px solid ${T.red}30`, borderRadius: 6, padding: "10px 14px", marginBottom: 10 }}>
-                    <div style={{ fontSize: 11, color: T.red, marginBottom: 4 }}>Error: {simState.error}</div>
+                  <div style={{ background: T.redDim, border: `1px solid ${T.red}30`, borderLeft: `3px solid ${T.red}`, borderRadius: 3, padding: "10px 14px", marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, color: T.red, marginBottom: 4, fontFamily: "'Share Tech Mono', monospace" }}>Error: {simState.error}</div>
                     <div style={{ fontSize: 10, color: T.textMuted }}>Tip: backfill candles for same symbols/date window, then click Rerun.</div>
                   </div>
                 )}
                 {!simState.loading && !simState.error && !simState.data && (
-                  <div style={{ fontSize: 11, color: T.textMuted }}>No data yet. Backfill candles then click Rerun.</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>No data yet. Backfill candles then click Rerun.</div>
                 )}
 
                 {simState.data?.equity_curve?.length > 0 && (
                   <>
                     <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(5,1fr)", gap: 10, marginBottom: 14 }}>
                       <StatTile T={T} label="Final Value" value={`₹${Math.round(simState.data.summary.final_value || 0).toLocaleString("en-IN")}`} color={T.accent} />
-                      <StatTile T={T} label="Net P&L" value={<span style={{ color: (simState.data.summary.net_pnl || 0) >= 0 ? T.green : T.red, fontFamily: "'IBM Plex Mono'", fontSize: 18, fontWeight: 800 }}>{(simState.data.summary.net_pnl || 0) >= 0 ? "+" : ""}₹{Math.abs(simState.data.summary.net_pnl || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>} color={T.green} />
+                      <StatTile T={T} label="Net P&L"
+                        value={<span style={{ color: (simState.data.summary.net_pnl || 0) >= 0 ? T.green : T.red, fontFamily: "'Share Tech Mono', monospace", fontSize: 18, fontWeight: 700 }}>{(simState.data.summary.net_pnl || 0) >= 0 ? "+" : ""}₹{Math.abs(simState.data.summary.net_pnl || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>}
+                        color={T.green}
+                      />
                       <StatTile T={T} label="Drawdown" value={`${(simState.data.summary.drawdown_pct || 0).toFixed(2)}%`} color={T.red} />
                       <StatTile T={T} label="Win Rate" value={`${(simState.data.summary.win_rate || 0).toFixed(1)}%`} color={T.amber} />
                       <StatTile T={T} label="Total Trades" value={simState.data.summary.trade_count || 0} color={T.purple} />
@@ -1758,19 +1998,19 @@ export default function TradingDashboard() {
                     <ResponsiveContainer width="100%" height={isMobile ? 180 : 240}>
                       <LineChart data={(simState.data.equity_curve || []).map(x => ({ ...x, date: x.timestamp?.slice(0, 10) }))} margin={{ left: isMobile ? -8 : 0 }}>
                         <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
-                        <XAxis dataKey="date" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} minTickGap={20} />
-                        <YAxis tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(0)}K`} width={isMobile ? 40 : 50} />
+                        <XAxis dataKey="date" tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} minTickGap={20} />
+                        <YAxis tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(0)}K`} width={isMobile ? 40 : 50} />
                         <Tooltip {...tooltipStyle(T)} formatter={v => [`₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`, "Equity"]} />
-                        <Line type="monotone" dataKey="equity" stroke={T.accent} dot={false} strokeWidth={2} />
+                        <Line type="monotone" dataKey="equity" stroke={T.accent} dot={false} strokeWidth={2} style={{ filter: `drop-shadow(0 0 4px ${T.accent})` }} />
                       </LineChart>
                     </ResponsiveContainer>
-                    <div style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 6, padding: "10px 14px", maxHeight: 180, overflowY: "auto", marginTop: 14 }}>
-                      <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Trade log (latest first)</div>
+                    <div style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 3, padding: "10px 14px", maxHeight: 180, overflowY: "auto", marginTop: 14 }}>
+                      <div style={{ fontSize: 8.5, color: T.textMuted, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Trade log (latest first)</div>
                       {(simState.data.trades || []).length === 0 ? (
-                        <div style={{ fontSize: 10, color: T.textMuted }}>No trades in selected period.</div>
+                        <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>No trades in selected period.</div>
                       ) : simState.data.trades.map((t, i) => (
-                        <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "4px 0", borderBottom: `1px dashed ${T.border}` }}>
-                          <span style={{ color: t.action === "BUY" ? T.green : T.red, fontWeight: 700, marginRight: 8 }}>{t.action}</span>
+                        <div key={i} style={{ fontSize: 10, color: T.textSub, padding: "4px 0", borderBottom: `1px solid ${T.border}30` }}>
+                          <span style={{ color: t.action === "BUY" ? T.green : T.red, fontWeight: 700, marginRight: 8, fontFamily: "'Share Tech Mono', monospace" }}>{t.action}</span>
                           <Mono size={10} color={T.textMuted}>{t.timestamp?.slice(0, 10)}</Mono>
                           <span style={{ marginLeft: 8 }}>{t.symbol} @ ₹{Math.round(t.price).toLocaleString("en-IN")}</span>
                         </div>
@@ -1797,26 +2037,26 @@ export default function TradingDashboard() {
               ].map(s => <StatTile key={s.label} T={T} label={s.label} value={s.value} color={s.color} />)}
             </div>
 
-            <Card T={T}>
-              <CardHeader T={T} title="14-Day P&L History" subtitle="Net daily returns" />
+            <Card T={T} accent={T.accent}>
+              <CardHeader T={T} title="14-Day P&L History" subtitle="Net daily returns" accent={T.accent} />
               <div style={{ padding: "14px 16px" }}>
                 {dailyHistory?.history?.length ? (
                   <ResponsiveContainer width="100%" height={isMobile ? 150 : 200}>
                     <BarChart data={dailyHistory.history.slice().reverse()} margin={{ left: isMobile ? -8 : 0 }}>
                       <CartesianGrid strokeDasharray="2 2" stroke={T.border} />
-                      <XAxis dataKey="date" tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} />
-                      <YAxis tick={{ fill: T.textMuted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 40 : 50} />
+                      <XAxis dataKey="date" tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} />
+                      <YAxis tick={{ fill: T.textMuted, fontSize: 9, fontFamily: "'Share Tech Mono', monospace" }} tickLine={false} axisLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(1)}K`} width={isMobile ? 40 : 50} />
                       <Tooltip {...tooltipStyle(T)} formatter={v => [`₹${v.toLocaleString("en-IN")}`, "Net P&L"]} />
                       <ReferenceLine y={0} stroke={T.border} />
-                      <Bar dataKey="net_pnl" radius={[3, 3, 0, 0]}>
+                      <Bar dataKey="net_pnl" radius={[2, 2, 0, 0]}>
                         {(dailyHistory.history || []).map((entry, i) => (
-                          <Cell key={i} fill={(entry.net_pnl || 0) >= 0 ? T.green : T.red} opacity={0.75} />
+                          <Cell key={i} fill={(entry.net_pnl || 0) >= 0 ? T.green : T.red} opacity={0.8} />
                         ))}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
                 ) : (
-                  <div style={{ textAlign: "center", padding: "40px", color: T.textMuted, fontSize: 12 }}>No history yet</div>
+                  <div style={{ textAlign: "center", padding: "40px", color: T.textMuted, fontSize: 12, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2 }}>NO HISTORY YET</div>
                 )}
               </div>
             </Card>
