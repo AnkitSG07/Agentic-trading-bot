@@ -1277,8 +1277,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
       const price = prices[Math.min(prev.candle, prices.length - 1)] || 2500;
       const rsi = calcRsi(prices.slice(0, prev.candle + 1));
       const macd = calcMacd(prices.slice(0, prev.candle + 1));
-
-      // Advance date
+// Advance date
       const newDate = new Date(prev.date);
       newDate.setDate(newDate.getDate() + 1);
       if (newDate.getDay() === 0) newDate.setDate(newDate.getDate() + 1);
@@ -1823,14 +1822,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
                 />
                 <StatTile T={T} label="Drawdown" value={`${(simState.data.summary.drawdown_pct || 0).toFixed(2)}%`} color={T.red} />
                 <StatTile T={T} label="Win Rate" value={`${(simState.data.summary.win_rate || 0).toFixed(1)}%`} color={T.amber} />
-                <StatTile
-                        T={T}
-                        label="Total Trades"
-                        value={simState.data.summary.completed_trades ?? simState.data.summary.trade_count ?? 0}
-                        sub={`${simState.data.summary.order_count ?? simState.data.trades?.length ?? 0} orders`}
-                        color={T.purple}
-                      />
-
+                <StatTile T={T} label="Total Trades" value={simState.data.summary.trade_count || 0} color={T.purple} />
               </div>
               <ResponsiveContainer width="100%" height={200}>
                 <LineChart data={(simState.data.equity_curve || []).map(x => ({ ...x, date: x.timestamp?.slice(0, 10) }))} margin={{ left: 0 }}>
@@ -2549,4 +2541,4 @@ export default function TradingDashboard() {
       {isMobile && <BottomNav tabs={TABS} active={activeTab} onChange={setActiveTab} T={T} />}
     </div>
   );
-}
+}  
