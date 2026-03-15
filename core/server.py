@@ -960,7 +960,8 @@ class ReplayRunCreateRequest(BaseModel):
     initial_capital: float = 100000
     fee_pct: float = 0.0003
     slippage_pct: float = 0.0005
-
+    ai_every_n_candles: int = 1
+    
 
 @app.post("/api/replay/runs")
 async def create_replay_run(req: ReplayRunCreateRequest):
@@ -1005,6 +1006,9 @@ async def replay_run_status(run_id: str):
         "config": row.config,
         "metrics": row.metrics,
         "error": row.error,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
     }
 
 
