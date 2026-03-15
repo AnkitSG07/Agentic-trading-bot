@@ -63,6 +63,7 @@ class ReplayEngine:
         positions: dict[str, dict] = {}
         trades: list[dict] = []
         equity_curve: list[dict] = []
+        price_history: dict[str, list[float]] = {symbol: [] for symbol in cfg.symbols}
 
         await self.risk.initialize(Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash))
 
@@ -71,6 +72,12 @@ class ReplayEngine:
 
         for idx, ts in enumerate(sorted_ts, start=1):
             snap = by_ts[ts]
+            for symbol in cfg.symbols:
+                candle_data = snap.get(symbol)
+                if candle_data:
+                    price_history.setdefault(symbol, []).append(float(candle_data["close"]))
+                    if len(price_history[symbol]) > 240:
+                        price_history[symbol] = price_history[symbol][-240:]
             watch = []
             for symbol, candle in snap.items():
                 watch.append({"symbol": symbol, "ltp": candle["close"], "change_pct": 0.0, "indicators": {"overall_signal": "neutral"}, "levels": {}})
@@ -164,18 +171,65 @@ class ReplayEngine:
                 equity += Decimal(str(snap.get(symbol, {"close": float(p["entry_price"])})["close"])) * p["qty"]
             equity_curve.append({"timestamp": ts.isoformat(), "equity": float(equity)})
 
-            if idx == 1 or idx % 10 == 0 or idx == total_points:
-                await ReplayRunRepository.mark_progress(
-                    run_id,
-                    metrics={
-                        "progress": {
-                            "processed": idx,
-                            "total": total_points,
-                            "pct": round((idx / total_points) * 100, 2) if total_points else 0,
-                            "current_timestamp": ts.isoformat(),
-                        }
+            realized = [t for t in trades if t.get("action") in ("SELL", "SHORT")]
+            live_wins = sum(1 for t in realized if (t.get("pnl") or 0) > 0)
+            live_losses = sum(1 for t in realized if (t.get("pnl") or 0) < 0)
+            live_snapshot = {
+                "candle": idx,
+                "totalCandles": total_points,
+                "equity": float(equity),
+                "equityHistory": [float(point.get("equity") or 0) for point in equity_curve[-180:]],
+                "date": ts.isoformat(),
+                "tradeLog": [
+                    {
+                        "symbol": t.get("symbol"),
+                        "action": t.get("action"),
+                        "price": float(t.get("price") or 0),
+                        "quantity": int(t.get("quantity") or 0),
+                        "pnl": float(t.get("pnl") or 0) if t.get("pnl") is not None else None,
+                        "time": t.get("timestamp").isoformat() if hasattr(t.get("timestamp"), "isoformat") else t.get("timestamp"),
+                    }
+                    for t in trades[-60:]
+                ][::-1],
+                "positions": {
+                    symbol: {"side": "BUY", "entry": float(pos["entry_price"]), "qty": int(pos["qty"])}
+                    for symbol, pos in positions.items()
+                },
+                "openSignals": [],
+                "decisions": idx,
+                "signalCount": len(trades),
+                "wins": live_wins,
+                "losses": live_losses,
+                "maxEquity": max((point.get("equity") or 0) for point in equity_curve) if equity_curve else float(cfg.initial_capital),
+                "maxDrawdown": _max_drawdown(equity_curve),
+                "stage": "placing_orders",
+                "progressPct": round((idx / total_points) * 100, 2) if total_points else 0,
+                "regime": "replay_backtest",
+                "commentary": f"Replay running {idx}/{total_points}",
+                "thoughts": [
+                    {
+                        "timestamp": t.get("timestamp").isoformat() if hasattr(t.get("timestamp"), "isoformat") else t.get("timestamp"),
+                        "level": "success" if str(t.get("action", "")).upper() == "BUY" else "info",
+                        "message": f"{str(t.get('action', '')).upper()} <strong>{t.get('symbol') or ''}</strong> @ ₹{round(float(t.get('price') or 0))}",
+                    }
+                    for t in trades[-25:]
+                ],
+                "strategyWeights": {"momentum": 0.25, "mean_reversion": 0.25, "options_selling": 0.2, "breakout": 0.2, "scalping": 0.1},
+                "priceData": price_history,
+            }
+
+            await ReplayRunRepository.mark_progress(
+                run_id,
+                metrics={
+                    "progress": {
+                        "processed": idx,
+                        "total": total_points,
+                        "pct": round((idx / total_points) * 100, 2) if total_points else 0,
+                        "current_timestamp": ts.isoformat(),
                     },
-                )
+                    "live": live_snapshot,
+                },
+            )
     
         final_value = equity_curve[-1]["equity"] if equity_curve else float(cfg.initial_capital)
         total_return = ((final_value - cfg.initial_capital) / cfg.initial_capital * 100) if cfg.initial_capital else 0.0
