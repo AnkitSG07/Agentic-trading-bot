@@ -94,6 +94,36 @@ class HistoricalFetcherTests(TestCase):
         self.assertEqual(result["metrics"]["symbols_fallback_used"], 1)
         upsert_many.assert_awaited_once()
 
+    def test_backfill_defaults_to_fallback_when_not_configured(self):
+        from data.historical_data import BackfillRequest, FetchMeta, backfill_historical_data
+
+        requests_payload = [BackfillRequest(symbol="RELIANCE")]
+        fake_repo_module = types.ModuleType("database.repository")
+        upsert_many = AsyncMock()
+
+        class _FakeHistoricalCandleRepository:
+            pass
+
+        _FakeHistoricalCandleRepository.upsert_many = upsert_many
+        fake_repo_module.HistoricalCandleRepository = _FakeHistoricalCandleRepository
+
+        seen_allow_fallback: list[bool] = []
+
+        def _fake_fetch_daily_with_meta(self, symbol, start, end):
+            seen_allow_fallback.append(self._allow_fallback)
+            return ([{"timestamp": 1}], FetchMeta(provider="yahoo", attempts=5, used_fallback=True))
+
+        with (
+            patch("data.historical_data.load_config", return_value={"historical": {"max_attempts": 5, "base_delay_seconds": 0.0}}),
+            patch.object(NSEHistoricalFetcher, "fetch_daily_with_meta", new=_fake_fetch_daily_with_meta),
+            patch.dict(sys.modules, {"database.repository": fake_repo_module}),
+        ):
+            result = asyncio.run(backfill_historical_data(requests_payload))
+
+        self.assertEqual(result["inserted"], 1)
+        self.assertEqual(result["metrics"]["provider_yahoo_success"], 1)
+        self.assertEqual(seen_allow_fallback, [True])
+        upsert_many.assert_awaited_once()
 
 if __name__ == "__main__":
     import unittest
