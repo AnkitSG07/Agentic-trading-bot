@@ -272,7 +272,6 @@ class TradingAgent:
         # Tiered from throughput-first to quality-first so fallbacks degrade gracefully.
         "ultra_fast": [
             "groq/llama-3.1-8b-instant",
-            "groq/gemma2-9b-it",
         ],
         "fast": [
             "groq/mixtral-8x7b-32768",
@@ -493,6 +492,8 @@ class TradingAgent:
             "invalid api key",
             "permission_denied",
             "not have permission",
+            "decommissioned",
+            "model_decommissioned",
         ))
 
     # ── Safe Response Text Extraction ────────────────────────────────────────
