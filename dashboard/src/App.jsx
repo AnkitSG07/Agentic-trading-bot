@@ -56,6 +56,11 @@ const toIsoDateOrNull = (value) => {
   return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
 };
 
+const normalizeSymbols = (value) => {
+  if (typeof value !== "string") return [];
+  return value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+};
+
 // ─── THEME ───────────────────────────────────────────────────────────────────
 const DARK = {
   bg: "#03060d", bgAlt: "#060b14", surface: "#08111e", card: "#0a1525",
@@ -1207,6 +1212,9 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
   const { isMobile } = useBreakpoint();
   const [liveSimRunning, setLiveSimRunning] = useState(false);
   const [liveSimPaused, setLiveSimPaused] = useState(false);
+  const selectedSymbols = useMemo(() => normalizeSymbols(simConfig.symbols), [simConfig.symbols]);
+  const symbolPool = selectedSymbols.length ? selectedSymbols : SIM_SYMBOLS;
+  const [chartSymbol, setChartSymbol] = useState(() => selectedSymbols[0] || SIM_SYMBOLS[0]);
 
   // Live sim state
   const [simLive, setSimLive] = useState({
@@ -1299,13 +1307,20 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
   const intervalRef = useRef(null);
   const priceDataRef = useRef(null);
 
+  useEffect(() => {
+    if (!symbolPool.includes(chartSymbol)) setChartSymbol(symbolPool[0]);
+  }, [chartSymbol, symbolPool]);
+
   // Init price data
   useEffect(() => {
     const data = {};
-    SIM_SYMBOLS.forEach(s => { data[s] = genPriceSeries(BASE_PRICES[s], 120); });
+    symbolPool.forEach((s, idx) => {
+      const fallbackBase = 1000 + idx * 250;
+      data[s] = genPriceSeries(BASE_PRICES[s] || fallbackBase, 120);
+    });
     priceDataRef.current = data;
     setSimLive(prev => ({ ...prev, priceData: data }));
-  }, []);
+  }, [symbolPool]);
 
   const fillThought = useCallback((tpl, sym, candle) => {
     const prices = priceDataRef.current?.[sym] || [];
@@ -1330,7 +1345,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
   }, []);
 
   const pushThought = useCallback((text, candle, level = "info") => {
-    const sym = SIM_SYMBOLS[Math.floor(Math.random() * 5)];
+    const sym = symbolPool[Math.floor(Math.random() * symbolPool.length)] || symbolPool[0] || "RELIANCE";
     const filled = fillThought(text, sym, candle);
     const entry = {
       timestamp: new Date().toISOString(),
@@ -1341,7 +1356,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
       ...prev,
       thoughts: [entry, ...prev.thoughts].slice(0, 20),
     }));
-  }, [fillThought]);
+  }, [fillThought, symbolPool]);
 
   const stopLiveSim = useCallback(() => {
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
@@ -1353,7 +1368,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
     setSimLive(prev => {
       if (prev.candle >= prev.totalCandles) { stopLiveSim(); return prev; }
 
-      const sym = SIM_SYMBOLS[Math.floor(Math.random() * 5)];
+      const sym = symbolPool[Math.floor(Math.random() * symbolPool.length)] || symbolPool[0] || "RELIANCE";
       const prices = priceDataRef.current?.[sym] || [];
       const price = prices[Math.min(prev.candle, prices.length - 1)] || 2500;
       const rsi = calcRsi(prices.slice(0, prev.candle + 1));
@@ -1388,7 +1403,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
       const numSignals = Math.random() < 0.35 ? 0 : Math.random() < 0.55 ? 1 : 2;
       let newSignals = [];
       for (let i = 0; i < numSignals; i++) {
-        const sigSym = SIM_SYMBOLS[Math.floor(Math.random() * 5)];
+        const sigSym = symbolPool[Math.floor(Math.random() * symbolPool.length)] || symbolPool[0] || "RELIANCE";
         const sigPrice = (priceDataRef.current?.[sigSym] || [])[Math.min(prev.candle, 119)] || 2500;
         const action = Math.random() > 0.45 ? "BUY" : "SELL";
         const slPct = 0.015 + Math.random() * 0.01;
@@ -1474,7 +1489,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
         equityHistory: newEquityHistory,
         tradeLog: newTradeLog.slice(0, 50),
         positions: newPositions,
-        openSignals: newSignals.length > 0 ? newSignals : prev.openSignals,
+        openSignals: newSignals,
         decisions: prev.decisions + 1,
         signalCount: prev.signalCount + newSignals.length,
         wins: newWins,
@@ -1489,7 +1504,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
         thoughts: [...thoughtsToAdd, ...prev.thoughts].slice(0, 25),
       };
     });
-  }, [fillThought, stopLiveSim]);
+  }, [fillThought, stopLiveSim, symbolPool]);
 
   const startLiveSim = useCallback(() => {
     setSimLive(prev => ({
@@ -1633,16 +1648,16 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
               <CardHeader T={T} title="Price Action" subtitle="OHLCV candlestick view" accent={T.amber}
                 right={
                   <select
-                    value={simConfig.symbols?.split(",")[0]?.trim() || "RELIANCE"}
-                    onChange={e => setSimConfig(p => ({ ...p, symbols: e.target.value }))}
+                    value={chartSymbol}
+                    onChange={e => setChartSymbol(e.target.value)}
                     style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textSub, fontSize: 9, padding: "3px 6px", fontFamily: "'Share Tech Mono', monospace" }}
                   >
-                    {SIM_SYMBOLS.map(s => <option key={s}>{s}</option>)}
+                    {symbolPool.map(s => <option key={s}>{s}</option>)}
                   </select>
                 }
               />
               <SimCandleChart
-                symbol={simConfig.symbols?.split(",")[0]?.trim() || "RELIANCE"}
+                symbol={chartSymbol}
                 candle={simLive.candle}
                 priceData={simLive.priceData}
                 T={T}
@@ -1653,7 +1668,9 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
             <Card T={T} accent={T.purple}>
               <CardHeader T={T} title="Indicator Matrix" subtitle="Live signal computation" accent={T.purple} />
               <div style={{ padding: "12px 14px" }}>
-                {SIM_SYMBOLS.slice(0, 4).map(sym => {
+                {selectedSymbols.length === 0 ? (
+                  <div style={{ color: T.textMuted, fontSize: 10, fontFamily: "'Share Tech Mono', monospace" }}>Add at least one symbol to view indicators.</div>
+                ) : symbolPool.slice(0, 4).map(sym => {
                   const prices = (simLive.priceData?.[sym] || []).slice(0, simLive.candle + 1);
                   const rsi = calcRsi(prices);
                   const macd = calcMacd(prices);
@@ -2092,7 +2109,7 @@ export default function TradingDashboard() {
       const normalizedEndDate = toIsoDateOrNull(simConfig.end_date);
       const payload = {
         ...simConfig,
-        symbols: simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean),
+        symbols: normalizeSymbols(simConfig.symbols),
         start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
         end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
         ai_every_n_candles: Math.max(1, Math.round(Number(simConfig.ai_every_n_candles || 1))),
@@ -2109,7 +2126,7 @@ export default function TradingDashboard() {
   }, [pollReplayRun, simConfig, simState.runId]);
 
   const backfillAndRun = useCallback(async () => {
-    const symbols = simConfig.symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+    const symbols = normalizeSymbols(simConfig.symbols);
     if (!symbols.length) { setSimState(prev => ({ ...prev, error: "Add at least one symbol." })); return; }
     setSimBackfilling(true);
     setSimState(prev => ({ ...prev, error: "", liveReplay: null, data: null, progress: null }));
