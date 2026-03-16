@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from database.json_utils import make_json_serializable
+from database.replay_utils import sanitize_replay_trades_for_insert
 from database.models import (
     Base, Trade, Position, SLOrder, AgentDecision,
     TickData, OHLCVCandle, DailySummary, RiskEvent,
@@ -663,7 +664,7 @@ class ReplayRunRepository:
                 )
             )
             if trades:
-                stmt = pg_insert(ReplayTrade).values(trades)
+                stmt = pg_insert(ReplayTrade).values(sanitize_replay_trades_for_insert(trades))
                 await session.execute(stmt)
 
     @staticmethod
