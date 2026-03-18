@@ -87,3 +87,25 @@ def test_invalid_selection_mode_falls_back_to_watchlist_with_warning(caplog):
     assert status["selection_mode_warning"] is not None
     assert "Invalid selection_mode 'bad_mode'" in status["selection_mode_warning"]
     assert "Invalid selection_mode 'bad_mode'" in caplog.text
+
+def test_legacy_market_namespace_still_drives_selection_config():
+    config = _config()
+    config.pop("engine")
+    config["market"] = {
+        "selection_mode": "auto_pick",
+        "watchlist_symbols": ["LEGACY"],
+        "min_stock_price": 20,
+        "max_stock_price": 2000,
+        "max_auto_pick_symbols": 3,
+        "min_avg_daily_volume": 2000,
+    }
+
+    engine = TradingEngine(config)
+
+    status = engine.get_engine_status()
+    assert status["selection_mode"] == "auto_pick"
+    assert status["configured_watchlist_symbols"] == ["LEGACY"]
+    assert engine.min_stock_price == 20
+    assert engine.max_stock_price == 2000
+    assert engine.max_auto_pick_symbols == 3
+    assert engine.min_avg_daily_volume == 2000
