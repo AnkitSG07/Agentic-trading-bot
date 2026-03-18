@@ -14,6 +14,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
+import pandas as pd
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +23,7 @@ from pydantic import BaseModel
 
 from core.engine import get_engine, set_engine, TradingEngine
 from core.replay_schema import ReplayRunCreateRequest
+from data.stock_selector import SelectorConfig, StockSelector
 from database.repository import (
     AgentDecisionRepository, DailySummaryRepository,
     PositionRepository, RiskEventRepository, TradeRepository,
@@ -951,6 +954,67 @@ async def broadcast(message: dict) -> None:
         ws_clients.remove(c)
 
 
+
+
+class ReplaySelectionRequest(BaseModel):
+    symbols: list[str] = []
+    exchange: str = "NSE"
+    timeframe: str = "day"
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    budget_cap: float
+    max_auto_symbols: int = 5
+    fee_pct: float = 0.0003
+    slippage_pct: float = 0.0005
+
+
+def _selector_candidate_universe(symbols: list[str] | None) -> list[str]:
+    if symbols:
+        return [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+    from core.engine import DEFAULT_WATCHLIST
+    return list(DEFAULT_WATCHLIST)
+
+
+async def _resolve_budget_selection(req: ReplaySelectionRequest | ReplayRunCreateRequest) -> dict:
+    from database.repository import HistoricalCandleRepository
+
+    symbols = _selector_candidate_universe(getattr(req, "symbols", None))
+    candles = await HistoricalCandleRepository.fetch_window(
+        symbols=symbols,
+        exchange=req.exchange,
+        timeframe=req.timeframe,
+        start_date=req.start_date,
+        end_date=req.end_date,
+    )
+    if not candles:
+        raise HTTPException(400, "No historical candles found for auto-pick selection. Backfill the candidate universe first.")
+
+    frames: dict[str, list[dict]] = {}
+    for candle in candles:
+        frames.setdefault(candle["symbol"], []).append(candle)
+
+    selector = StockSelector(SelectorConfig(max_auto_pick_symbols=req.max_auto_symbols))
+    data_frames = {symbol: pd.DataFrame(rows) for symbol, rows in frames.items()}
+    selected = selector.select_affordable_candidates(
+        data_frames,
+        budget_cap=float(req.budget_cap),
+        max_symbols=req.max_auto_symbols,
+        symbols=symbols,
+        fee_pct=float(getattr(req, "fee_pct", 0.0003) or 0.0003),
+        slippage_pct=float(getattr(req, "slippage_pct", 0.0005) or 0.0005),
+    )
+    if not selected:
+        raise HTTPException(400, f"No affordable symbols found within budget ₹{float(req.budget_cap):,.2f}.")
+
+    return {
+        "selection_mode": "auto",
+        "budget_cap": round(float(req.budget_cap), 2),
+        "max_auto_symbols": int(req.max_auto_symbols),
+        "candidate_symbols": symbols,
+        "selected_symbols": [item["symbol"] for item in selected],
+        "recommendations": selected,
+    }
+
 class HistoricalBackfillRequest(BaseModel):
     symbols: list[str]
     exchange: str = "NSE"
@@ -970,15 +1034,28 @@ async def backfill_history(req: HistoricalBackfillRequest):
     return await backfill_historical_data(jobs)
 
 
+
+@app.post("/api/replay/select-symbols")
+async def select_replay_symbols(req: ReplaySelectionRequest):
+    return await _resolve_budget_selection(req)
+
+
 @app.post("/api/replay/runs")
 async def create_replay_run(req: ReplayRunCreateRequest):
     from config.loader import load_config
     from core.replay_engine import create_and_start_replay
 
-    if not req.symbols:
-        raise HTTPException(400, "symbols are required")
     payload = req.model_dump()
+    if req.selection_mode == "manual":
+        if not req.symbols:
+            raise HTTPException(400, "symbols are required")
+    else:
+        selection = await _resolve_budget_selection(req)
+        payload["symbols"] = selection["selected_symbols"]
+        payload["selection_summary"] = selection
     result = await create_and_start_replay(load_config(), payload)
+    if req.selection_mode == "auto":
+        result["selection_summary"] = payload.get("selection_summary")
     return result
 
 
