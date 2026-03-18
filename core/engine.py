@@ -26,6 +26,7 @@ from brokers.base import (
 )
 from data.indicators import IndicatorsEngine
 from data.stock_selector import SelectorConfig, StockSelector
+from data.stock_universe import load_nse_equity_symbols
 from data.nse_feed import NSEDataFeed, NewsSentimentAnalyzer
 from database.repository import (
     AgentDecisionRepository, OHLCVRepository,
@@ -176,6 +177,7 @@ class TradingEngine:
         self._latest_options_chain: dict[str, dict] = {}
         self._latest_watchlist: list[dict] = []
         self._instrument_cache: dict[str, Instrument] = {}
+        self._nse_equity_symbols_cache: list[str] = []
         self._ohlcv_frames: dict[str, pd.DataFrame] = {}
         self._nifty_history: list[float] = []
         self._primary_broker_name: str = ""
@@ -312,13 +314,13 @@ class TradingEngine:
 
         candidate_symbols: list[str] = []
         for source in (
-            self._instrument_cache.keys(),
+            self._nse_equity_symbols_cache,
             self._ohlcv_frames.keys(),
             self.configured_watchlist_symbols,
         ):
             for symbol in source:
                 normalized = str(symbol or "").strip().upper()
-                if not normalized or normalized.startswith("NIFTY") or normalized in candidate_symbols:
+                if not normalized or normalized in candidate_symbols:
                     continue
                 candidate_symbols.append(normalized)
 
@@ -1459,7 +1461,10 @@ class TradingEngine:
             insts = await execution_broker.get_instruments(Exchange.NSE)
             for i in insts:
                 self._instrument_cache[i.symbol] = i
-            logger.info(f"✅ {len(insts)} instruments loaded")
+            self._nse_equity_symbols_cache = load_nse_equity_symbols(self._instrument_cache)
+            logger.info(
+                f"✅ {len(insts)} instruments loaded | NSE cash equities cached={len(self._nse_equity_symbols_cache)}"
+            )
         except Exception as e:
             logger.error(f"Instrument load error: {e}")
 
