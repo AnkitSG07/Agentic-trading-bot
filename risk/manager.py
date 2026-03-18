@@ -7,7 +7,7 @@ and provides kill-switch functionality.
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
 from brokers.base import Funds, Order, Position
@@ -26,6 +26,9 @@ class RiskConfig:
     trailing_stop: bool = True
     trailing_stop_pct: float = 0.8
     position_sizing_method: str = "kelly"  # fixed | kelly | volatility_adjusted
+    max_order_value_absolute: Optional[float] = None
+    min_cash_buffer: float = 0.0
+    tiny_account_mode: bool = False
 
 
 @dataclass
@@ -159,29 +162,53 @@ class RiskManager:
             self._trigger_kill_switch(f"Drawdown limit hit: {self.today.drawdown_pct:.2f}%")
             return RiskCheck(False, "Drawdown limit exceeded")
 
-        # 5. Capital per trade check
-        trade_value = entry_price * quantity
-        max_allowed = funds.available_cash * Decimal(str(self.config.max_capital_per_trade_pct / 100))
-        if trade_value > max_allowed:
-            # Adjust quantity down to fit within limit
-            adjusted_qty = int(max_allowed / entry_price)
-            if adjusted_qty <= 0:
-                return RiskCheck(False, f"Insufficient capital for even 1 unit of {symbol}")
-            logger.warning(
-                f"⚠️ Quantity adjusted: {quantity} → {adjusted_qty} "
-                f"(max ₹{max_allowed:,.0f} per trade)"
-            )
-            return RiskCheck(True, "Quantity adjusted to fit risk limit", adjusted_quantity=adjusted_qty)
+        # 5. Capital / small-account sizing guardrails
+        adjusted_quantity = quantity
+        adjusted_reasons: list[str] = []
+        available_cash = max(funds.available_cash, Decimal("0"))
+        percent_cap = available_cash * Decimal(str(self.config.max_capital_per_trade_pct / 100))
+        absolute_cap = None
+        if self.config.max_order_value_absolute is not None:
+            absolute_cap = Decimal(str(self.config.max_order_value_absolute))
+        if self.config.tiny_account_mode and absolute_cap is None:
+            absolute_cap = percent_cap
 
-        # 6. Available funds check
-        if trade_value > funds.available_cash:
-            return RiskCheck(False, f"Insufficient funds: need ₹{trade_value:,.0f}, have ₹{funds.available_cash:,.0f}")
+        effective_cap = percent_cap
+        if absolute_cap is not None:
+            effective_cap = min(effective_cap, absolute_cap)
+
+        cash_buffer = Decimal(str(self.config.min_cash_buffer or 0))
+        spendable_cash = max(Decimal("0"), available_cash - cash_buffer)
+        if self.config.tiny_account_mode:
+            spendable_cash = min(spendable_cash, available_cash * Decimal("0.75"))
+
+        max_trade_value = min(effective_cap, spendable_cash)
+        trade_value = entry_price * adjusted_quantity
+        if trade_value > max_trade_value and entry_price > 0:
+            adjusted_quantity = int((max_trade_value / entry_price).to_integral_value(rounding=ROUND_DOWN))
+            if adjusted_quantity <= 0:
+                return RiskCheck(False, f"Insufficient capital for even 1 unit of {symbol} after caps/buffer")
+            trade_value = entry_price * adjusted_quantity
+            adjusted_reasons.append(f"quantity adjusted to {adjusted_quantity} within ₹{max_trade_value:,.0f}")
+            logger.warning(
+                f"⚠️ Quantity adjusted: {quantity} → {adjusted_quantity} "
+                f"(effective cap ₹{max_trade_value:,.0f})"
+            )
+
+        # 6. Available funds and cash buffer check
+        if trade_value > available_cash:
+            return RiskCheck(False, f"Insufficient funds: need ₹{trade_value:,.0f}, have ₹{available_cash:,.0f}")
+        remaining_cash = available_cash - trade_value
+        if remaining_cash < cash_buffer:
+            return RiskCheck(False, f"Cash buffer breach: would leave ₹{remaining_cash:,.0f}, need ₹{cash_buffer:,.0f}")
 
         # 7. Validate SL is set
+        adjusted_sl = None
         if not stop_loss:
-            auto_sl = self._compute_stop_loss(entry_price, side)
-            logger.info(f"Auto SL applied: ₹{auto_sl:,.2f}")
-            return RiskCheck(True, "Auto SL applied", adjusted_sl=auto_sl)
+            adjusted_sl = self._compute_stop_loss(entry_price, side)
+            stop_loss = adjusted_sl
+            logger.info(f"Auto SL applied: ₹{adjusted_sl:,.2f}")
+            adjusted_reasons.append("auto stop-loss applied")
 
         # 8. SL sanity check (SL shouldn't be too far or too close)
         sl_distance_pct = abs(float((entry_price - stop_loss) / entry_price * 100))
@@ -190,7 +217,8 @@ class RiskManager:
         if sl_distance_pct < 0.1:
             return RiskCheck(False, f"SL too tight: {sl_distance_pct:.2f}% (min 0.1%)")
 
-        return RiskCheck(True, "All risk checks passed")
+        reason = "All risk checks passed" if not adjusted_reasons else "; ".join(adjusted_reasons)
+        return RiskCheck(True, reason, adjusted_quantity=adjusted_quantity if adjusted_quantity != quantity else None, adjusted_sl=adjusted_sl)
 
     # ── Position Sizing ──────────────────────────────────────────────────────
 
