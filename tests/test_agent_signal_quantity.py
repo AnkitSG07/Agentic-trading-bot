@@ -69,3 +69,24 @@ def test_zero_quantity_signal_skipped_when_capital_cannot_afford_min_qty():
     signals = agent._parse_signals(decision, _ctx(capital=1000, ltp=5000))
 
     assert signals == []
+
+
+def test_fallback_quantity_honors_absolute_order_cap():
+    agent = TradingAgent({"max_capital_per_trade_pct": 50, "min_trade_quantity": 1, "max_order_value_absolute": 3000})
+    decision = {
+        "signals": [
+            {
+                "action": "BUY",
+                "symbol": "RELIANCE",
+                "quantity": 0,
+                "entry_price": 1000,
+                "confidence": 0.9,
+                "risk_reward": 2.0,
+            }
+        ]
+    }
+
+    signals = agent._parse_signals(decision, _ctx(capital=100000, ltp=1000))
+
+    assert len(signals) == 1
+    assert signals[0].quantity == 3
