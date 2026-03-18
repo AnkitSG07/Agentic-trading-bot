@@ -981,49 +981,208 @@ def _selector_candidate_universe(symbols: list[str] | None) -> list[str]:
         loaded_symbols = load_nse_equity_symbols(getattr(engine, "_instrument_cache", {}))
         if loaded_symbols:
             return loaded_symbols
-            
+
+    
     from core.engine import DEFAULT_WATCHLIST
     return list(DEFAULT_WATCHLIST)
 
 
-async def _resolve_budget_selection(req: ReplaySelectionRequest | ReplayRunCreateRequest) -> dict:
-    from database.repository import HistoricalCandleRepository
-
-    symbols = _selector_candidate_universe(getattr(req, "symbols", None))
-    candles = await HistoricalCandleRepository.fetch_window(
-        symbols=symbols,
-        exchange=req.exchange,
-        timeframe=req.timeframe,
-        start_date=req.start_date,
-        end_date=req.end_date,
+def _selection_config() -> SelectorConfig:
+    engine = get_engine()
+    if not engine:
+        return SelectorConfig()
+    max_stock_price = getattr(engine, "_effective_max_stock_price", None)
+    effective_max_price = max_stock_price() if callable(max_stock_price) else getattr(engine, "max_stock_price", 5000.0)
+    return SelectorConfig(
+        min_stock_price=float(getattr(engine, "min_stock_price", 50.0) or 50.0),
+        max_stock_price=float(effective_max_price or 5000.0),
+        min_avg_daily_volume=float(getattr(engine, "min_avg_daily_volume", 100000.0) or 100000.0),
+        min_avg_daily_turnover=float(getattr(engine, "min_avg_daily_turnover", 5000000.0) or 5000000.0),
+        max_auto_pick_symbols=int(getattr(engine, "max_auto_pick_symbols", 10) or 10),
     )
-    if not candles:
-        raise HTTPException(400, "No historical candles found for auto-pick selection. Backfill the candidate universe first.")
 
+
+def _validated_budget_cap(raw_budget: float | None) -> float:
+    budget = float(raw_budget or 0)
+    if not math.isfinite(budget) or budget <= 0:
+        raise HTTPException(400, "Invalid budget. Enter a rupee budget greater than zero.")
+    return budget
+
+
+async def _fetch_universe_quotes(symbols: list[str], exchange: str) -> dict[str, dict]:
+    engine = get_engine()
+    if not engine or not symbols:
+        return {}
+
+    broker = getattr(engine, "primary_broker", None)
+    if not broker:
+        return {}
+
+    instrument_cache = getattr(engine, "_instrument_cache", {}) or {}
+    instruments = []
+    instrument_by_symbol = {}
+    for symbol in symbols:
+        inst = instrument_cache.get(symbol)
+        if inst is None:
+            get_instrument = getattr(engine, "_get_instrument", None)
+            if callable(get_instrument):
+                try:
+                    inst = await get_instrument(symbol, exchange)
+                except Exception as exc:
+                    logger.debug("Quote instrument resolution skipped for %s: %s", symbol, exc)
+                    inst = None
+        if inst is None:
+            continue
+        instruments.append(inst)
+        instrument_by_symbol[symbol] = inst
+
+    if not instruments:
+        return {}
+
+    try:
+        quotes = await broker.get_quote(instruments)
+    except Exception as exc:
+        logger.warning("Universe quote fetch failed for replay selection: %s", exc)
+        return {}
+
+    latest: dict[str, dict] = {}
+    for symbol, quote in (quotes or {}).items():
+        ltp = float(getattr(quote, "ltp", 0) or 0)
+        if ltp <= 0:
+            continue
+        latest[str(symbol).strip().upper()] = {
+            "symbol": str(symbol).strip().upper(),
+            "ltp": ltp,
+            "instrument": instrument_by_symbol.get(str(symbol).strip().upper()),
+            "quote": quote,
+        }
+    return latest
+
+
+def _live_affordable_candidates(
+    symbols: list[str],
+    latest_quotes: dict[str, dict],
+    budget_cap: float,
+    fee_pct: float,
+    slippage_pct: float,
+    config: SelectorConfig,
+) -> list[dict]:
+    allowance_multiplier = 1.0 + max(float(fee_pct), 0.0) + max(float(slippage_pct), 0.0) + 0.002
+    affordable: list[dict] = []
+    for position, symbol in enumerate(symbols):
+        quote = latest_quotes.get(symbol)
+        if not quote:
+            continue
+        ltp = float(quote["ltp"])
+        if ltp < float(config.min_stock_price) or ltp > float(config.max_stock_price):
+            continue
+        qty = int(float(budget_cap) // (ltp * allowance_multiplier))
+        if qty <= 0:
+            continue
+        estimated_cost = round(qty * ltp * allowance_multiplier, 2)
+        affordable.append({
+            "symbol": symbol,
+            "ltp": round(ltp, 2),
+            "estimated_qty": qty,
+            "estimated_cost": estimated_cost,
+            "budget_cap": round(float(budget_cap), 2),
+            "allowance_multiplier": round(allowance_multiplier, 6),
+            "reason": f"Affordable from live universe quote @ ₹{ltp:,.2f}",
+            "live_quote_available": True,
+            "live_universe_rank": position + 1,
+        })
+    affordable.sort(key=lambda item: (item["ltp"], item["symbol"]))
+    return affordable
+
+
+def _frames_from_candles(candles: list[dict]) -> dict[str, pd.DataFrame]:
     frames: dict[str, list[dict]] = {}
     for candle in candles:
         frames.setdefault(candle["symbol"], []).append(candle)
+    return {symbol: pd.DataFrame(rows) for symbol, rows in frames.items()}
 
-    selector = StockSelector(SelectorConfig(max_auto_pick_symbols=req.max_auto_symbols))
-    data_frames = {symbol: pd.DataFrame(rows) for symbol, rows in frames.items()}
-    selected = selector.select_affordable_candidates(
-        data_frames,
-        budget_cap=float(req.budget_cap),
-        max_symbols=req.max_auto_symbols,
-        symbols=symbols,
-        fee_pct=float(getattr(req, "fee_pct", 0.0003) or 0.0003),
-        slippage_pct=float(getattr(req, "slippage_pct", 0.0005) or 0.0005),
+
+async def _fetch_candidate_history(
+    candidate_symbols: list[str],
+    exchange: str,
+    timeframe: str,
+    start_date: datetime | None,
+    end_date: datetime | None,
+) -> list[dict]:
+    from database.repository import HistoricalCandleRepository
+
+    if not candidate_symbols:
+        return []
+    return await HistoricalCandleRepository.fetch_window(
+        symbols=candidate_symbols,
+        exchange=exchange,
+        timeframe=timeframe,
+        start_date=start_date,
+        end_date=end_date,
     )
-    if not selected:
-        raise HTTPException(400, f"No affordable symbols found within budget ₹{float(req.budget_cap):,.2f}.")
+
+
+async def _resolve_budget_selection(req: ReplaySelectionRequest | ReplayRunCreateRequest) -> dict:
+    budget_cap = _validated_budget_cap(getattr(req, "budget_cap", None))
+    symbols = _selector_candidate_universe(getattr(req, "symbols", None))
+    config = _selection_config()
+    max_auto_symbols = int(getattr(req, "max_auto_symbols", config.max_auto_pick_symbols) or config.max_auto_pick_symbols)
+    fee_pct = float(getattr(req, "fee_pct", 0.0003) or 0.0003)
+    slippage_pct = float(getattr(req, "slippage_pct", 0.0005) or 0.0005)
+
+    live_quotes = await _fetch_universe_quotes(symbols, req.exchange)
+    affordable_live = _live_affordable_candidates(symbols, live_quotes, budget_cap, fee_pct, slippage_pct, config)
+    if not affordable_live:
+        raise HTTPException(400, f"No affordable instruments found from live universe data within budget ₹{budget_cap:,.2f}.")
+
+    candidate_limit = max(max_auto_symbols, min(len(affordable_live), max(max_auto_symbols * 4, 25)))
+    candidate_subset = [item["symbol"] for item in affordable_live[:candidate_limit]]
+    candles = await _fetch_candidate_history(
+        candidate_subset,
+        req.exchange,
+        req.timeframe,
+        req.start_date,
+        req.end_date,
+    )
+    data_frames = _frames_from_candles(candles)
+
+    selector = StockSelector(SelectorConfig(
+        min_stock_price=config.min_stock_price,
+        max_stock_price=config.max_stock_price,
+        min_avg_daily_volume=config.min_avg_daily_volume,
+        min_avg_daily_turnover=config.min_avg_daily_turnover,
+        max_auto_pick_symbols=max_auto_symbols,
+    ))
+    ranked_selection = selector.select_affordable_candidates(
+        data_frames,
+        budget_cap=budget_cap,
+        max_symbols=max_auto_symbols,
+        symbols=candidate_subset,
+        fee_pct=fee_pct,
+        slippage_pct=slippage_pct,
+    )
+
+    selected = ranked_selection or affordable_live[:max_auto_symbols]
+    selected_symbols = [item["symbol"] for item in selected]
+    historical_coverage = sorted(data_frames.keys())
+
+    recommendations = []
+    live_by_symbol = {item["symbol"]: item for item in affordable_live}
+    for rank, item in enumerate(selected, start=1):
+        merged = {**live_by_symbol.get(item["symbol"], {}), **item}
+        merged["rank"] = rank
+        merged["selection_source"] = "historical_ranking" if item["symbol"] in historical_coverage and ranked_selection else "live_universe"
+        recommendations.append(merged)
 
     return {
         "selection_mode": "auto",
-        "budget_cap": round(float(req.budget_cap), 2),
-        "max_auto_symbols": int(req.max_auto_symbols),
+        "budget_cap": round(budget_cap, 2),
+        "max_auto_symbols": max_auto_symbols,
         "candidate_symbols": symbols,
-        "selected_symbols": [item["symbol"] for item in selected],
-        "recommendations": selected,
+        "candidate_subset": candidate_subset,
+        "historical_candidate_symbols": historical_coverage,
+        "selected_symbols": selected_symbols,
+        "recommendations": recommendations,
     }
 
 class HistoricalBackfillRequest(BaseModel):
@@ -1060,10 +1219,23 @@ async def create_replay_run(req: ReplayRunCreateRequest):
     if req.selection_mode == "manual":
         if not req.symbols:
             raise HTTPException(400, "symbols are required")
+    elif req.symbols:
+        payload["symbols"] = [str(symbol).strip().upper() for symbol in req.symbols if str(symbol).strip()]
     else:
         selection = await _resolve_budget_selection(req)
-        payload["symbols"] = selection["selected_symbols"]
+        payload["symbols"] = list(selection["selected_symbols"])
         payload["selection_summary"] = selection
+
+    replay_candles = await _fetch_candidate_history(
+        payload["symbols"],
+        payload["exchange"],
+        payload["timeframe"],
+        payload.get("start_date"),
+        payload.get("end_date"),
+    )
+    if not replay_candles:
+        raise HTTPException(400, "No historical candles found after backfill for the selected replay symbols.")
+
     result = await create_and_start_replay(load_config(), payload)
     if req.selection_mode == "auto":
         result["selection_summary"] = payload.get("selection_summary")
