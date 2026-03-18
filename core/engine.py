@@ -123,7 +123,22 @@ class TradingEngine:
         self.risk = RiskManager(RiskConfig(**risk_kwargs))
         self.tracker = ActivePositionTracker()
 
-        engine_cfg = config.get("engine", {})
+        legacy_market_cfg = config.get("market", {})
+        engine_cfg = {
+            **{
+                key: legacy_market_cfg.get(key)
+                for key in (
+                    "selection_mode",
+                    "watchlist_symbols",
+                    "min_stock_price",
+                    "max_stock_price",
+                    "max_auto_pick_symbols",
+                    "min_avg_daily_volume",
+                )
+                if legacy_market_cfg.get(key) is not None
+            },
+            **config.get("engine", {}),
+        }
         self.selection_mode_requested = str(engine_cfg.get("selection_mode", "watchlist") or "watchlist")
         self.selection_mode_warning = ""
         self.selection_mode = self._validated_selection_mode(self.selection_mode_requested)
@@ -298,6 +313,23 @@ class TradingEngine:
                 connected.append(name)
 
         return connected
+
+    def connected_broker_names(self) -> list[str]:
+        now = monotonic()
+        connected = [
+            name
+            for name in self.brokers
+            if (cached := self._broker_health_cache.get(name))
+            and (now - cached[1]) <= self._broker_health_ttl_seconds
+            and cached[0]
+        ]
+        if connected:
+            return connected
+
+        if self._primary_broker_name in self.brokers:
+            return [self._primary_broker_name]
+
+        return list(self.brokers.keys())
 
     async def resolve_ui_primary_broker_live(self) -> tuple[str, bool, str]:
         connected = await self.connected_broker_names_live()
