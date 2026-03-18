@@ -25,6 +25,7 @@ from brokers.base import (
     OrderSide, OrderStatus, OrderType, Position, ProductType,
 )
 from data.indicators import IndicatorsEngine
+from data.stock_selector import SelectorConfig, StockSelector
 from data.nse_feed import NSEDataFeed, NewsSentimentAnalyzer
 from database.repository import (
     AgentDecisionRepository, OHLCVRepository,
@@ -36,12 +37,13 @@ from risk.manager import RiskConfig, RiskManager
 logger = logging.getLogger("engine")
 IST = pytz.timezone("Asia/Kolkata")
 
-WATCHLIST = [
+DEFAULT_WATCHLIST = [
     "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
     "KOTAKBANK", "HINDUNILVR", "WIPRO", "SBIN", "AXISBANK",
     "ADANIENT", "BAJFINANCE", "TITAN", "MARUTI", "NESTLEIND",
     "TATAMOTORS", "TATAPOWER", "ZOMATO", "PAYTM", "LT",
 ]
+VALID_SELECTION_MODES = {"watchlist", "auto_pick"}
 
 # ─── MODULE-LEVEL SINGLETON ───────────────────────────────────────────────────
 
@@ -107,7 +109,11 @@ class TradingEngine:
         self.config = config
         self.brokers: dict[str, BaseBroker] = {}
         self.primary_broker: Optional[BaseBroker] = None
-        self.agent = TradingAgent(config.get("agent", {}))
+        agent_config = dict(config.get("agent", {}))
+        risk_cfg = config.get("risk", {})
+        if "max_order_value_absolute" in risk_cfg and "max_order_value_absolute" not in agent_config:
+            agent_config["max_order_value_absolute"] = risk_cfg.get("max_order_value_absolute")
+        self.agent = TradingAgent(agent_config)
         self.indicators = IndicatorsEngine()
         self.nse_feed = NSEDataFeed()
         self.sentiment = NewsSentimentAnalyzer()
@@ -116,6 +122,23 @@ class TradingEngine:
         risk_kwargs = {k: v for k, v in config.get("risk", {}).items() if k in risk_fields}
         self.risk = RiskManager(RiskConfig(**risk_kwargs))
         self.tracker = ActivePositionTracker()
+
+        engine_cfg = config.get("engine", {})
+        self.selection_mode = self._validated_selection_mode(engine_cfg.get("selection_mode", "watchlist"))
+        self.configured_watchlist_symbols = self._normalize_symbols(engine_cfg.get("watchlist_symbols", DEFAULT_WATCHLIST))
+        self.min_stock_price = float(engine_cfg.get("min_stock_price", 50) or 50)
+        self.max_stock_price = float(engine_cfg.get("max_stock_price", 5000) or 5000)
+        self.max_auto_pick_symbols = int(engine_cfg.get("max_auto_pick_symbols", 10) or 10)
+        self.min_avg_daily_volume = float(engine_cfg.get("min_avg_daily_volume", 100000) or 100000)
+        self.selector = StockSelector(SelectorConfig(
+            min_stock_price=self.min_stock_price,
+            max_stock_price=self.max_stock_price,
+            min_avg_daily_volume=self.min_avg_daily_volume,
+            max_auto_pick_symbols=self.max_auto_pick_symbols,
+        ))
+        self._selected_symbols: list[str] = list(self.configured_watchlist_symbols)
+        self._candidate_universe_symbols: list[str] = list(self.configured_watchlist_symbols)
+        self._latest_ranked_candidates: list[dict] = []
 
         self._running = False
         self._tick_data: dict[str, dict] = {}
@@ -158,8 +181,81 @@ class TradingEngine:
         self._broker_health_cache: dict[str, tuple[bool, float]] = {}
         self._broker_health_ttl_seconds: float = 5.0
 
-    def connected_broker_names(self) -> list[str]:
-        return list(self.brokers.keys())
+
+    @staticmethod
+    def _normalize_symbols(symbols) -> list[str]:
+        if not isinstance(symbols, list):
+            return list(DEFAULT_WATCHLIST)
+        normalized: list[str] = []
+        for symbol in symbols:
+            value = str(symbol or "").strip().upper()
+            if value and value not in normalized:
+                normalized.append(value)
+        return normalized or list(DEFAULT_WATCHLIST)
+
+    @staticmethod
+    def _validated_selection_mode(raw_mode: object) -> str:
+        mode = str(raw_mode or "watchlist").strip().lower()
+        if mode not in VALID_SELECTION_MODES:
+            logger.warning("Invalid selection_mode '%s'; falling back to watchlist", raw_mode)
+            return "watchlist"
+        return mode
+
+    def apply_runtime_overrides(self, overrides: dict | None = None) -> None:
+        overrides = overrides or {}
+        if "selection_mode" in overrides:
+            self.selection_mode = self._validated_selection_mode(overrides.get("selection_mode"))
+        if "watchlist_symbols" in overrides:
+            self.configured_watchlist_symbols = self._normalize_symbols(overrides.get("watchlist_symbols"))
+        for attr, key, caster in (
+            ("min_stock_price", "min_stock_price", float),
+            ("max_stock_price", "max_stock_price", float),
+            ("max_auto_pick_symbols", "max_auto_pick_symbols", int),
+            ("min_avg_daily_volume", "min_avg_daily_volume", float),
+        ):
+            if key in overrides and overrides.get(key) is not None:
+                setattr(self, attr, caster(overrides.get(key)))
+        if overrides:
+            self.selector = StockSelector(SelectorConfig(
+                min_stock_price=self.min_stock_price,
+                max_stock_price=self.max_stock_price,
+                min_avg_daily_volume=self.min_avg_daily_volume,
+                max_auto_pick_symbols=self.max_auto_pick_symbols,
+            ))
+            risk_overrides = {
+                "max_order_value_absolute": overrides.get("max_order_value_absolute"),
+                "min_cash_buffer": overrides.get("min_cash_buffer"),
+                "tiny_account_mode": overrides.get("tiny_account_mode"),
+            }
+            for key, value in risk_overrides.items():
+                if value is not None and hasattr(self.risk.config, key):
+                    setattr(self.risk.config, key, value)
+                    if key == "max_order_value_absolute":
+                        self.agent.max_order_value_absolute = value
+
+    def _build_candidate_universe(self) -> list[str]:
+        if self.selection_mode == "watchlist":
+            return list(self.configured_watchlist_symbols)
+        cache_symbols = [s for s in self._instrument_cache.keys() if s and not s.startswith("NIFTY")]
+        return cache_symbols or list(self.configured_watchlist_symbols)
+
+    def _refresh_selection(self) -> None:
+        self._candidate_universe_symbols = self._build_candidate_universe()
+        ranked = self.selector.rank_candidates(self._ohlcv_frames, self._candidate_universe_symbols)
+        self._latest_ranked_candidates = ranked
+        if self.selection_mode == "auto_pick":
+            selected = [item["symbol"] for item in ranked[: self.max_auto_pick_symbols]]
+            self._selected_symbols = selected or list(self.configured_watchlist_symbols)
+        else:
+            self._selected_symbols = list(self.configured_watchlist_symbols)
+
+    def get_engine_status(self) -> dict:
+        return {
+            "selection_mode": self.selection_mode,
+            "active_symbols": list(self._selected_symbols),
+            "ranked_candidates": list(self._latest_ranked_candidates),
+            "configured_watchlist_symbols": list(self.configured_watchlist_symbols),
+        }
 
     async def connected_broker_names_live(self) -> list[str]:
         connected: list[str] = []
@@ -281,8 +377,13 @@ class TradingEngine:
         await self.risk.initialize(funds)
 
         await self._load_instruments()
+        self._candidate_universe_symbols = self._build_candidate_universe()
         await self._preload_ohlcv()
+        self._refresh_selection()
         await self._subscribe_market_data()
+
+
+        
 
         if self._replication_enabled:
             self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
@@ -957,7 +1058,7 @@ class TradingEngine:
         now = datetime.now(IST)
         from_date = now - timedelta(days=120)
         data_broker = self._select_data_broker("ohlcv")
-        for symbol in WATCHLIST:
+        for symbol in self._candidate_universe_symbols:
             try:
                 inst = await self._get_instrument_for_broker(symbol, data_broker)
                 candles = await data_broker.get_ohlcv(inst, "day", from_date, now)
@@ -976,13 +1077,14 @@ class TradingEngine:
                 await asyncio.sleep(0.25)
             except Exception as e:
                 logger.debug(f"Skip {symbol}: {e}")
-        logger.info(f"✅ OHLCV: {len(self._ohlcv_frames)} symbols")
+        self._refresh_selection()
+        logger.info(f"✅ OHLCV: {len(self._ohlcv_frames)} symbols | active={len(self._selected_symbols)}")
 
     async def _refresh_ohlcv(self) -> None:
         now = datetime.now(IST)
         from_date = now - timedelta(days=2)
         data_broker = self._select_data_broker("ohlcv")
-        for symbol in WATCHLIST[:10]:
+        for symbol in self._candidate_universe_symbols[:10]:
             try:
                 inst = await self._get_instrument_for_broker(symbol, data_broker)
                 candles = await data_broker.get_ohlcv(inst, "day", from_date, now)
@@ -996,16 +1098,23 @@ class TradingEngine:
                     ).drop_duplicates().tail(250)
             except Exception:
                 pass
+        self._refresh_selection()
 
     async def _get_watchlist_indicators(self) -> list[dict]:
         result = []
-        for symbol in WATCHLIST:
+        ranked_by_symbol = {item["symbol"]: item for item in self._latest_ranked_candidates}
+        for symbol in self._selected_symbols:
             df = self._ohlcv_frames.get(symbol)
             if df is None or df.empty:
                 continue
             try:
                 bundle = self.indicators.compute(df, symbol, "day")
-                result.append(self.indicators.to_dict(bundle))
+                item = self.indicators.to_dict(bundle)
+                meta = ranked_by_symbol.get(symbol, {})
+                item["rank"] = meta.get("rank")
+                item["score"] = meta.get("score")
+                item["selection_reason"] = meta.get("reason", "configured watchlist symbol" if symbol in self.configured_watchlist_symbols else "selected by engine")
+                result.append(item)
             except Exception:
                 pass
         return result
@@ -1243,13 +1352,13 @@ class TradingEngine:
             previous = self.brokers.get(self._active_tick_broker_name)
             if previous:
                 try:
-                    old_insts = [await self._get_instrument_for_broker(s, previous) for s in WATCHLIST[:20]]
+                    old_insts = [await self._get_instrument_for_broker(s, previous) for s in self._selected_symbols[:20]]
                     await previous.unsubscribe_ticks(old_insts)
                 except Exception as e:
                     logger.debug(f"Tick unsubscribe failed for {self._active_tick_broker_name}: {e}")
             logger.warning(f"Switched live ticks: {self._active_tick_broker_name} -> {broker_name} due to websocket 403")
 
-        insts = [await self._get_instrument_for_broker(s, data_broker) for s in WATCHLIST[:20]]
+        insts = [await self._get_instrument_for_broker(s, data_broker) for s in self._selected_symbols[:20]]
         self._tick_token_to_symbol = {
             str(inst.instrument_token): inst.symbol
             for inst in insts
