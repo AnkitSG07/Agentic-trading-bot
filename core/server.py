@@ -249,6 +249,7 @@ class EngineStartRequest(BaseModel):
     max_stock_price: Optional[float] = None
     max_auto_pick_symbols: Optional[int] = None
     min_avg_daily_volume: Optional[float] = None
+    min_avg_daily_turnover: Optional[float] = None
     max_order_value_absolute: Optional[float] = None
     min_cash_buffer: Optional[float] = None
     tiny_account_mode: Optional[bool] = None
@@ -337,6 +338,7 @@ async def engine_status():
         "last_replication_error": engine._last_replication_error,
         "kill_switch": engine.risk._kill_switch,
         "trading_allowed": engine.risk.is_trading_allowed,
+        "broker_health": engine.get_broker_health_summary(),
         **selection_status,
     }
 
