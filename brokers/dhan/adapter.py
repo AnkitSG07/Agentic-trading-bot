@@ -8,7 +8,7 @@ Prerequisites:
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Optional
 
@@ -66,9 +66,11 @@ DHAN_INTERVAL_MAP = {
     "minute": "1",
     "5minute": "5",
     "15minute": "15",
-    "30minute": "30",
     "60minute": "60",
     "day": "D",
+}
+DHAN_AGGREGATED_INTERVALS = {
+    "30minute": ("15minute", "15", timedelta(minutes=30)),
 }
 
 
@@ -156,49 +158,135 @@ class DhanBroker(BaseBroker):
             logger.error(f"get_quote error: {e}")
         return quotes
 
+    async def _fetch_raw_ohlcv(
+        self, instrument: Instrument, interval: str,
+        from_date: datetime, to_date: datetime
+    ) -> list[dict]:
+        dhan_interval = DHAN_INTERVAL_MAP.get(interval)
+        if dhan_interval is None:
+            raise ValueError(
+                f"Dhan does not support interval '{interval}'. Supported direct intervals: "
+                f"{', '.join(sorted(DHAN_INTERVAL_MAP))}."
+            )
+
+        logger.info(
+            "Fetching Dhan OHLCV | symbol=%s requested_interval=%s translated_interval=%s",
+            instrument.symbol,
+            interval,
+            dhan_interval,
+        )
+
+        if dhan_interval == "D":
+            resp = await asyncio.to_thread(
+                self.dhan.historical_daily_data,
+                security_id=instrument.instrument_token,
+                exchange_segment=DHAN_EXCHANGE_MAP.get(instrument.exchange, "NSE_EQ"),
+                instrument_type="EQUITY",
+                expiry_code=0,
+                from_date=from_date.strftime("%Y-%m-%d"),
+                to_date=to_date.strftime("%Y-%m-%d"),
+            )
+        else:
+            resp = await asyncio.to_thread(
+                self.dhan.intraday_minute_data,
+                security_id=instrument.instrument_token,
+                exchange_segment=DHAN_EXCHANGE_MAP.get(instrument.exchange, "NSE_EQ"),
+                instrument_type="EQUITY",
+                interval=dhan_interval,
+                from_date=from_date.strftime("%Y-%m-%d"),
+                to_date=to_date.strftime("%Y-%m-%d"),
+            )
+
+        if resp.get("status") != "success":
+            logger.warning(
+                "Dhan OHLCV request failed | symbol=%s requested_interval=%s translated_interval=%s response=%s",
+                instrument.symbol,
+                interval,
+                dhan_interval,
+                resp,
+            )
+            return []
+
+        return resp.get("data", [])
+
+    @staticmethod
+    def _parse_ohlcv_rows(rows: list[dict]) -> list[OHLCV]:
+        return [
+            OHLCV(
+                timestamp=datetime.strptime(c["start_Time"], "%Y-%m-%d %H:%M:%S"),
+                open=Decimal(str(c["open"])),
+                high=Decimal(str(c["high"])),
+                low=Decimal(str(c["low"])),
+                close=Decimal(str(c["close"])),
+                volume=int(c.get("volume", 0)),
+            )
+            for c in rows
+        ]
+
+    @staticmethod
+    def _aggregate_ohlcv(candles: list[OHLCV], bucket_size: timedelta) -> list[OHLCV]:
+        ordered = sorted(candles, key=lambda item: item.timestamp)
+        if not ordered:
+            return []
+
+        aggregated: list[OHLCV] = []
+        anchor = ordered[0].timestamp.replace(second=0, microsecond=0)
+        bucket_seconds = int(bucket_size.total_seconds())
+
+        for candle in ordered:
+            bucket_offset = int((candle.timestamp - anchor).total_seconds()) // bucket_seconds
+            bucket_start = anchor + timedelta(seconds=bucket_offset * bucket_seconds)
+
+            if not aggregated or aggregated[-1].timestamp != bucket_start:
+                aggregated.append(
+                    OHLCV(
+                        timestamp=bucket_start,
+                        open=candle.open,
+                        high=candle.high,
+                        low=candle.low,
+                        close=candle.close,
+                        volume=candle.volume,
+                        oi=candle.oi,
+                    )
+                )
+                continue
+
+            current = aggregated[-1]
+            current.high = max(current.high, candle.high)
+            current.low = min(current.low, candle.low)
+            current.close = candle.close
+            current.volume += candle.volume
+            current.oi = candle.oi
+
+        return aggregated
+
     async def get_ohlcv(
         self, instrument: Instrument, interval: str,
         from_date: datetime, to_date: datetime
     ) -> list[OHLCV]:
         try:
-            dhan_interval = DHAN_INTERVAL_MAP.get(interval, "D")
-            if dhan_interval == "D":
-                resp = await asyncio.to_thread(
-                    self.dhan.historical_daily_data,
-                    security_id=instrument.instrument_token,
-                    exchange_segment=DHAN_EXCHANGE_MAP.get(instrument.exchange, "NSE_EQ"),
-                    instrument_type="EQUITY",
-                    expiry_code=0,
-                    from_date=from_date.strftime("%Y-%m-%d"),
-                    to_date=to_date.strftime("%Y-%m-%d"),
+            if interval in DHAN_AGGREGATED_INTERVALS:
+                source_interval_key, source_interval, bucket_size = DHAN_AGGREGATED_INTERVALS[interval]
+                logger.info(
+                    "Aggregating Dhan OHLCV | symbol=%s requested_interval=%s translated_interval=%s",
+                    instrument.symbol,
+                    interval,
+                    source_interval,
                 )
-            else:
-                resp = await asyncio.to_thread(
-                    self.dhan.intraday_minute_data,
-                    security_id=instrument.instrument_token,
-                    exchange_segment=DHAN_EXCHANGE_MAP.get(instrument.exchange, "NSE_EQ"),
-                    instrument_type="EQUITY",
-                    interval=dhan_interval,
-                    from_date=from_date.strftime("%Y-%m-%d"),
-                    to_date=to_date.strftime("%Y-%m-%d"),
-                )
+                rows = await self._fetch_raw_ohlcv(instrument, source_interval_key, from_date, to_date)
+                return self._aggregate_ohlcv(self._parse_ohlcv_rows(rows), bucket_size)
 
-            if resp.get("status") != "success":
-                return []
-
-            return [
-                OHLCV(
-                    timestamp=datetime.strptime(c["start_Time"], "%Y-%m-%d %H:%M:%S"),
-                    open=Decimal(str(c["open"])),
-                    high=Decimal(str(c["high"])),
-                    low=Decimal(str(c["low"])),
-                    close=Decimal(str(c["close"])),
-                    volume=int(c.get("volume", 0)),
-                )
-                for c in resp.get("data", [])
-            ]
+            return self._parse_ohlcv_rows(
+                await self._fetch_raw_ohlcv(instrument, interval, from_date, to_date)
+            )
         except Exception as e:
-            logger.error(f"get_ohlcv error: {e}")
+            logger.error(
+                "get_ohlcv error | symbol=%s requested_interval=%s translated_interval=%s error=%s",
+                instrument.symbol,
+                interval,
+                DHAN_INTERVAL_MAP.get(interval, DHAN_AGGREGATED_INTERVALS.get(interval, ("unsupported",))[0]),
+                e,
+            )
             return []
 
     async def get_instruments(self, exchange: Exchange) -> list[Instrument]:
