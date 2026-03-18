@@ -75,6 +75,35 @@ agent:
   max_concurrent_strategies: 5
   confidence_threshold: 0.50          # Min confidence to place trade
 
+## ─── ENGINE SELECTION ───────────────────────────────────────
+engine:
+  selection_mode: "watchlist"        # watchlist | auto_pick
+  watchlist_symbols:
+    - "RELIANCE"
+    - "TCS"
+    - "INFY"
+    - "HDFCBANK"
+    - "ICICIBANK"
+    - "KOTAKBANK"
+    - "HINDUNILVR"
+    - "WIPRO"
+    - "SBIN"
+    - "AXISBANK"
+    - "ADANIENT"
+    - "BAJFINANCE"
+    - "TITAN"
+    - "MARUTI"
+    - "NESTLEIND"
+    - "TATAMOTORS"
+    - "TATAPOWER"
+    - "ZOMATO"
+    - "PAYTM"
+    - "LT"
+  min_stock_price: 50
+  max_stock_price: 5000
+  max_auto_pick_symbols: 10
+  min_avg_daily_volume: 100000
+  
 ## ─── RISK MANAGEMENT ────────────────────────────────────────
 risk:
   max_capital_per_trade_pct: 5.0      # Max 5% of capital per trade
@@ -86,7 +115,10 @@ risk:
   trailing_stop: true
   trailing_stop_pct: 0.8
   position_sizing_method: "kelly"     # fixed | kelly | volatility_adjusted
-
+  max_order_value_absolute: null
+  min_cash_buffer: 0
+  tiny_account_mode: false
+  
 ## ─── STRATEGIES ─────────────────────────────────────────────
 strategies:
   momentum:
