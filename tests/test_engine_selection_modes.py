@@ -16,6 +16,12 @@ def _config(selection_mode="watchlist"):
             "max_stock_price": 1000,
             "max_auto_pick_symbols": 2,
             "min_avg_daily_volume": 1000,
+            "min_avg_daily_turnover": 50000,
+            "session_profiles": {
+                "opening": {"selection_multiplier": 0.5, "risk_cap_multiplier": 0.5},
+                "mid_session": {"selection_multiplier": 1.0, "risk_cap_multiplier": 1.0},
+                "closing": {"selection_multiplier": 0.5, "risk_cap_multiplier": 0.75},
+            },
         },
         "risk": {"max_order_value_absolute": 5000, "min_cash_buffer": 100, "tiny_account_mode": False},
     }
@@ -44,6 +50,40 @@ def test_runtime_overrides_update_engine_status_and_risk_config():
     assert engine.risk.config.max_order_value_absolute == 999
     assert engine.risk.config.min_cash_buffer == 55
     assert engine.risk.config.tiny_account_mode is True
+
+
+def test_effective_max_stock_price_respects_absolute_order_cap():
+    engine = TradingEngine(_config("auto_pick"))
+    engine.risk.today.starting_capital = 10000
+    engine.risk.config.max_order_value_absolute = 120
+
+    assert engine._effective_max_stock_price() == 120
+
+
+def test_session_profile_reduces_selection_and_risk_limits():
+    engine = TradingEngine(_config("auto_pick"))
+    engine._instrument_cache = {symbol: object() for symbol in ["AAA", "BBB", "CCC"]}
+    engine._ohlcv_frames = {
+        "AAA": _frame(100, volume=7000),
+        "BBB": _frame(200, volume=9000),
+        "CCC": _frame(300, volume=11000),
+    }
+
+    engine._apply_session_profile(pd.Timestamp("2025-01-01 09:20:00", tz="Asia/Kolkata").to_pydatetime())
+    engine._refresh_selection()
+    status = engine.get_engine_status()
+
+    assert len(status["active_symbols"]) == 1
+    assert status["session_profile"]["session"] == "opening"
+    assert engine.risk.config.max_order_value_absolute == 2500
+
+
+def test_engine_status_exposes_effective_price_and_session_profile():
+    engine = TradingEngine(_config("auto_pick"))
+    status = engine.get_engine_status()
+
+    assert "effective_max_stock_price" in status
+    assert "session_profile" in status
 
 
 def test_watchlist_mode_keeps_configured_symbols_active():
