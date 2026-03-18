@@ -133,12 +133,18 @@ class DhanBroker(BaseBroker):
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             for inst in instruments:
+                if not inst.instrument_token:
+                    logger.warning(
+                        "Skipping Dhan quote fetch for %s: missing instrument_token",
+                        inst.symbol,
+                    )
+                    continue
                 resp = await asyncio.to_thread(
                     self.dhan.intraday_minute_data,
                     security_id=inst.instrument_token,
                     exchange_segment=DHAN_EXCHANGE_MAP.get(inst.exchange, "NSE_EQ"),
                     instrument_type="EQUITY",
-                    interval="1",
+                    interval=1,
                     from_date=today,
                     to_date=today,
                 )
@@ -176,6 +182,13 @@ class DhanBroker(BaseBroker):
             dhan_interval,
         )
 
+        if not instrument.instrument_token:
+            logger.warning(
+                "Skipping Dhan OHLCV fetch for %s: missing instrument_token",
+                instrument.symbol,
+            )
+            return []
+
         if dhan_interval == "D":
             resp = await asyncio.to_thread(
                 self.dhan.historical_daily_data,
@@ -192,7 +205,7 @@ class DhanBroker(BaseBroker):
                 security_id=instrument.instrument_token,
                 exchange_segment=DHAN_EXCHANGE_MAP.get(instrument.exchange, "NSE_EQ"),
                 instrument_type="EQUITY",
-                interval=dhan_interval,
+                interval=int(dhan_interval),
                 from_date=from_date.strftime("%Y-%m-%d"),
                 to_date=to_date.strftime("%Y-%m-%d"),
             )
@@ -299,9 +312,20 @@ class DhanBroker(BaseBroker):
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get("https://images.dhan.co/api-data/api-scrip-master.csv")
-                text = resp.text
+                resp.raise_for_status()
+                text = resp.content.decode("utf-8-sig")
 
             reader = csv.DictReader(io.StringIO(text))
+            required_headers = {"SEM_EXM_EXCH_ID", "SEM_SMST_SECURITY_ID", "SEM_LOT_UNITS"}
+            actual_headers = set(reader.fieldnames or [])
+            missing_headers = required_headers - actual_headers
+            if missing_headers:
+                logger.warning(
+                    "Dhan instrument CSV missing headers %s | available_headers=%s",
+                    sorted(missing_headers),
+                    sorted(actual_headers),
+                )
+                return []
             ex_filter = DHAN_EXCHANGE_MAP.get(exchange, "NSE_EQ")
 
             instruments = []
@@ -324,7 +348,7 @@ class DhanBroker(BaseBroker):
                         exchange=exchange,
                         instrument_type=itype,
                         instrument_token=row.get("SEM_SMST_SECURITY_ID", ""),
-                        lot_size=int(row.get("SEM_LOT_UNITS", 1) or 1),
+                        lot_size=int(float(row.get("SEM_LOT_UNITS", 1) or 1)),
                         tick_size=Decimal(str(row.get("SEM_TICK_SIZE", "0.05") or "0.05")),
                     ))
                 except Exception:
