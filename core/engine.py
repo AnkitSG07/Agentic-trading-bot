@@ -44,6 +44,11 @@ DEFAULT_WATCHLIST = [
     "TATAMOTORS", "TATAPOWER", "ZOMATO", "PAYTM", "LT",
 ]
 VALID_SELECTION_MODES = {"watchlist", "auto_pick"}
+DEFAULT_SESSION_PROFILES = {
+    "opening": {"selection_multiplier": 0.7, "risk_cap_multiplier": 0.7},
+    "mid_session": {"selection_multiplier": 1.0, "risk_cap_multiplier": 1.0},
+    "closing": {"selection_multiplier": 0.6, "risk_cap_multiplier": 0.8},
+}
 
 # ─── MODULE-LEVEL SINGLETON ───────────────────────────────────────────────────
 
@@ -147,15 +152,23 @@ class TradingEngine:
         self.max_stock_price = float(engine_cfg.get("max_stock_price", 5000) or 5000)
         self.max_auto_pick_symbols = int(engine_cfg.get("max_auto_pick_symbols", 10) or 10)
         self.min_avg_daily_volume = float(engine_cfg.get("min_avg_daily_volume", 100000) or 100000)
+        self.min_avg_daily_turnover = float(engine_cfg.get("min_avg_daily_turnover", 5000000) or 5000000)
+        self.session_profiles = {**DEFAULT_SESSION_PROFILES, **config.get("engine", {}).get("session_profiles", {})}
         self.selector = StockSelector(SelectorConfig(
             min_stock_price=self.min_stock_price,
             max_stock_price=self.max_stock_price,
             min_avg_daily_volume=self.min_avg_daily_volume,
+            min_avg_daily_turnover=self.min_avg_daily_turnover,
             max_auto_pick_symbols=self.max_auto_pick_symbols,
         ))
+        self._base_risk_caps = {
+            "max_order_value_absolute": self.risk.config.max_order_value_absolute,
+            "max_open_positions": self.risk.config.max_open_positions,
+        }
         self._selected_symbols: list[str] = list(self.configured_watchlist_symbols)
         self._candidate_universe_symbols: list[str] = list(self.configured_watchlist_symbols)
         self._latest_ranked_candidates: list[dict] = []
+        self._active_session_profile: dict[str, object] = {"session": "mid_session", "selection_multiplier": 1.0, "risk_cap_multiplier": 1.0}
 
         self._running = False
         self._tick_data: dict[str, dict] = {}
@@ -197,6 +210,7 @@ class TradingEngine:
         )
         self._broker_health_cache: dict[str, tuple[bool, float]] = {}
         self._broker_health_ttl_seconds: float = 5.0
+        self._broker_health_scores: dict[str, float] = {}
 
 
     @staticmethod
@@ -231,14 +245,16 @@ class TradingEngine:
             ("max_stock_price", "max_stock_price", float),
             ("max_auto_pick_symbols", "max_auto_pick_symbols", int),
             ("min_avg_daily_volume", "min_avg_daily_volume", float),
+            ("min_avg_daily_turnover", "min_avg_daily_turnover", float),
         ):
             if key in overrides and overrides.get(key) is not None:
                 setattr(self, attr, caster(overrides.get(key)))
         if overrides:
             self.selector = StockSelector(SelectorConfig(
                 min_stock_price=self.min_stock_price,
-                max_stock_price=self.max_stock_price,
+                max_stock_price=self._effective_max_stock_price(),
                 min_avg_daily_volume=self.min_avg_daily_volume,
+                min_avg_daily_turnover=self.min_avg_daily_turnover,
                 max_auto_pick_symbols=self.max_auto_pick_symbols,
             ))
             risk_overrides = {
@@ -251,7 +267,44 @@ class TradingEngine:
                     setattr(self.risk.config, key, value)
                     if key == "max_order_value_absolute":
                         self.agent.max_order_value_absolute = value
+                        self._base_risk_caps["max_order_value_absolute"] = value
             self._refresh_selection()
+
+    def _effective_max_stock_price(self) -> float:
+        ceilings = [float(self.max_stock_price)]
+        absolute_cap = self.risk.config.max_order_value_absolute
+        if absolute_cap is not None:
+            ceilings.append(float(absolute_cap))
+        starting_capital = float(self.risk.today.starting_capital or 0)
+        if starting_capital > 0:
+            percent_budget = starting_capital * (self.risk.config.max_capital_per_trade_pct / 100.0)
+            if percent_budget > 0:
+                ceilings.append(percent_budget)
+        return max(float(self.min_stock_price), min(ceilings))
+
+    def _session_profile_for(self, session_name: str) -> dict[str, float]:
+        raw = self.session_profiles.get(session_name, {}) if isinstance(self.session_profiles, dict) else {}
+        selection_multiplier = float(raw.get("selection_multiplier", 1.0) or 1.0)
+        risk_cap_multiplier = float(raw.get("risk_cap_multiplier", 1.0) or 1.0)
+        return {
+            "session": session_name,
+            "selection_multiplier": max(0.25, min(selection_multiplier, 1.5)),
+            "risk_cap_multiplier": max(0.25, min(risk_cap_multiplier, 1.5)),
+        }
+
+    def _apply_session_profile(self, now: datetime) -> None:
+        session_name = self._get_session(now)
+        profile = self._session_profile_for(session_name)
+        self._active_session_profile = profile
+
+        base_absolute_cap = self._base_risk_caps.get("max_order_value_absolute")
+        if base_absolute_cap is not None:
+            adjusted_cap = float(base_absolute_cap) * profile["risk_cap_multiplier"]
+            self.risk.config.max_order_value_absolute = round(adjusted_cap, 2)
+            self.agent.max_order_value_absolute = round(adjusted_cap, 2)
+
+        base_positions = int(self._base_risk_caps.get("max_open_positions", self.risk.config.max_open_positions))
+        self.risk.config.max_open_positions = max(1, int(round(base_positions * profile["risk_cap_multiplier"])))
 
     def _build_candidate_universe(self) -> list[str]:
         if self.selection_mode == "watchlist":
@@ -275,8 +328,12 @@ class TradingEngine:
         self._candidate_universe_symbols = self._build_candidate_universe()
         ranked = self.selector.rank_candidates(self._ohlcv_frames, self._candidate_universe_symbols)
         self._latest_ranked_candidates = ranked
+        session_limit = max(
+            1,
+            int(round(self.max_auto_pick_symbols * float(self._active_session_profile.get("selection_multiplier", 1.0)))),
+        )
         if self.selection_mode == "auto_pick":
-            selected = [item["symbol"] for item in ranked[: self.max_auto_pick_symbols]]
+            selected = [item["symbol"] for item in ranked[:session_limit]]
             self._selected_symbols = selected or list(self.configured_watchlist_symbols)
         else:
             self._selected_symbols = list(self.configured_watchlist_symbols)
@@ -290,6 +347,8 @@ class TradingEngine:
             "candidate_universe_symbols": list(self._candidate_universe_symbols),
             "ranked_candidates": list(self._latest_ranked_candidates),
             "configured_watchlist_symbols": list(self.configured_watchlist_symbols),
+            "session_profile": dict(self._active_session_profile),
+            "effective_max_stock_price": self._effective_max_stock_price(),
         }
 
     async def connected_broker_names_live(self) -> list[str]:
@@ -330,6 +389,31 @@ class TradingEngine:
             return [self._primary_broker_name]
 
         return list(self.brokers.keys())
+
+    def _broker_health_score(self, name: str, broker: BaseBroker) -> float:
+        healthy, _ = self._broker_health_cache.get(name, (True, 0.0))
+        score = 100.0 if healthy else 40.0
+        if getattr(broker, "_ws_blocked", False):
+            score -= 30.0
+        if getattr(broker, "_historical_data_blocked", False):
+            score -= 20.0
+        if name == self._primary_broker_name:
+            score += 5.0
+        return max(0.0, min(score, 100.0))
+
+    def get_broker_health_summary(self) -> dict[str, dict[str, float | bool]]:
+        summary: dict[str, dict[str, float | bool]] = {}
+        for name, broker in self.brokers.items():
+            score = self._broker_health_score(name, broker)
+            self._broker_health_scores[name] = score
+            healthy, _ = self._broker_health_cache.get(name, (False, 0.0))
+            summary[name] = {
+                "score": round(score, 1),
+                "healthy": bool(healthy),
+                "ws_blocked": bool(getattr(broker, "_ws_blocked", False)),
+                "historical_data_blocked": bool(getattr(broker, "_historical_data_blocked", False)),
+            }
+        return summary
 
     async def resolve_ui_primary_broker_live(self) -> tuple[str, bool, str]:
         connected = await self.connected_broker_names_live()
@@ -478,6 +562,7 @@ class TradingEngine:
                     await self._run_strategy_review()
                     last_review = now
 
+                self._apply_session_profile(now)
                 await self._ensure_tick_subscription_health()    
                 await self._refresh_ohlcv()
                 await self._decision_cycle(now)
@@ -645,11 +730,32 @@ class TradingEngine:
                 signals_rejected=rejected,
                 risk_assessment=(latest_decision or {}).get("risk_assessment") or "",
                 session_recommendation=(latest_decision or {}).get("session_recommendation") or "",
-                raw_response={"rejection_breakdown": rejection_breakdown},
+                raw_response={
+                    "decision": (latest_decision or {}).get("raw_response") or {},
+                    "rejection_breakdown": rejection_breakdown,
+                    "signals": (latest_decision or {}).get("signals") or [],
+                },
                 context_snapshot={
-                    "capital": context.available_capital,
-                    "positions": len(context.open_positions),
-                    "session": context.session,
+                    "market": {
+                        "timestamp": context.timestamp.isoformat(),
+                        "capital": context.available_capital,
+                        "positions": len(context.open_positions),
+                        "session": context.session,
+                        "regime": getattr(context, "_regime", "unknown"),
+                    },
+                    "selection": self.get_engine_status(),
+                    "risk": {
+                        "max_order_value_absolute": self.risk.config.max_order_value_absolute,
+                        "min_cash_buffer": self.risk.config.min_cash_buffer,
+                        "tiny_account_mode": self.risk.config.tiny_account_mode,
+                        "max_open_positions": self.risk.config.max_open_positions,
+                        "max_capital_per_trade_pct": self.risk.config.max_capital_per_trade_pct,
+                    },
+                    "broker_health": self.get_broker_health_summary(),
+                    "watchlist": context.watchlist_data,
+                    "open_positions": context.open_positions,
+                    "options_chain_summary": context.options_chain_summary,
+                    "recent_news_sentiment": context.recent_news_sentiment,
                 },
             )
         except Exception as e:
@@ -1101,6 +1207,7 @@ class TradingEngine:
             recent_news_sentiment=news, pcr=pcr,
         )
         ctx._regime = trend
+        ctx._session_profile = dict(self._active_session_profile)
         return ctx
 
     # ── OHLCV ─────────────────────────────────────────────────────────────────
@@ -1360,7 +1467,14 @@ class TradingEngine:
         dhan = self.brokers.get("dhan")
         zerodha = self.brokers.get("zerodha")
         selected_name, override_active, _ = self.resolve_ui_primary_broker()
-        selected = self.brokers.get(selected_name) or dhan or self.primary_broker
+        broker_candidates = [
+            (name, broker)
+            for name, broker in self.brokers.items()
+            if broker is not None
+        ]
+        if broker_candidates:
+            broker_candidates.sort(key=lambda item: self._broker_health_score(item[0], item[1]), reverse=True)
+        selected = self.brokers.get(selected_name) or (broker_candidates[0][1] if broker_candidates else None) or dhan or self.primary_broker
 
         if not selected:
             return self.get_execution_broker()
