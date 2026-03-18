@@ -180,7 +180,10 @@ class RiskManager:
         cash_buffer = Decimal(str(self.config.min_cash_buffer or 0))
         spendable_cash = max(Decimal("0"), available_cash - cash_buffer)
         if self.config.tiny_account_mode:
-            spendable_cash = min(spendable_cash, available_cash * Decimal("0.75"))
+            tiny_cash_reserve = max(cash_buffer, available_cash * Decimal("0.40"))
+            spendable_cash = max(Decimal("0"), available_cash - tiny_cash_reserve)
+            effective_cap = min(effective_cap, available_cash * Decimal("0.50"))
+            adjusted_reasons.append("tiny-account caps applied")
 
         max_trade_value = min(effective_cap, spendable_cash)
         trade_value = entry_price * adjusted_quantity
