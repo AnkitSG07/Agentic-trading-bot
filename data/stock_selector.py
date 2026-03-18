@@ -30,10 +30,9 @@ class StockSelector:
                 candidates.append(ranked)
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
-        limit = max(1, int(self.config.max_auto_pick_symbols))
-        for idx, item in enumerate(candidates[:limit], start=1):
+        for idx, item in enumerate(candidates, start=1):
             item["rank"] = idx
-        return candidates[:limit]
+        return candidates
 
     def _score_symbol(self, symbol: str, df: pd.DataFrame | None) -> dict | None:
         if df is None or df.empty or "close" not in df.columns or "volume" not in df.columns or len(df) < 20:
