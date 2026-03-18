@@ -36,7 +36,7 @@ def _engine_state_file() -> Path:
     return Path(configured)
 
 
-def _persist_engine_state(autostart: bool, mode: str = "paper") -> None:
+def _persist_engine_state(autostart: bool, mode: str = "paper", overrides: Optional[dict] = None) -> None:
     """Persist desired engine start mode so API restarts can recover gracefully."""
     path = _engine_state_file()
     try:
@@ -44,6 +44,7 @@ def _persist_engine_state(autostart: bool, mode: str = "paper") -> None:
         payload = {
             "autostart": bool(autostart),
             "mode": mode,
+            "overrides": overrides or {},
             "updated_at": datetime.now().isoformat(),
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -54,16 +55,17 @@ def _persist_engine_state(autostart: bool, mode: str = "paper") -> None:
 def _load_engine_state() -> dict:
     path = _engine_state_file()
     if not path.exists():
-        return {"autostart": False, "mode": "paper"}
+        return {"autostart": False, "mode": "paper", "overrides": {}}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return {
             "autostart": bool(data.get("autostart", False)),
             "mode": str(data.get("mode", "paper") or "paper"),
+            "overrides": data.get("overrides", {}) or {},
         }
     except Exception as e:
         logger.warning(f"Unable to load engine state from {path}: {e}")
-        return {"autostart": False, "mode": "paper"}
+        return {"autostart": False, "mode": "paper", "overrides": {}}
 
 
 def _broker_pref_file() -> Path:
@@ -133,7 +135,7 @@ async def _resolve_ui_primary_status(engine: Optional[TradingEngine]) -> dict:
         "reason": reason,
     }
 
-async def _start_engine_task(mode: str) -> None:
+async def _start_engine_task(mode: str, overrides: Optional[dict] = None) -> None:
     """Shared background launcher used by API start endpoint and startup recovery."""
     # Load config with full env-var expansion (same as main.py)
     from config.loader import load_config
@@ -148,6 +150,7 @@ async def _start_engine_task(mode: str) -> None:
                 broker_cfg["sandbox"] = True
 
     new_engine = TradingEngine(config)
+    new_engine.apply_runtime_overrides(overrides or {})
     preferred_ui_broker = _load_ui_primary_broker_preference()
     if preferred_ui_broker:
         new_engine.set_ui_primary_broker(preferred_ui_broker)
@@ -197,7 +200,7 @@ async def lifespan(app: FastAPI):
     if state.get("autostart"):
         mode = state.get("mode", "paper")
         logger.info(f"♻️ Recovering engine after API restart (mode={mode})")
-        asyncio.create_task(_start_engine_task(mode))
+        asyncio.create_task(_start_engine_task(mode, state.get("overrides", {})))
 
     yield
     logger.info("🌐 API server shutting down")
@@ -240,6 +243,15 @@ class KillSwitchResetRequest(BaseModel):
 
 class EngineStartRequest(BaseModel):
     mode: str = "paper"
+    selection_mode: Optional[str] = None
+    watchlist_symbols: Optional[list[str]] = None
+    min_stock_price: Optional[float] = None
+    max_stock_price: Optional[float] = None
+    max_auto_pick_symbols: Optional[int] = None
+    min_avg_daily_volume: Optional[float] = None
+    max_order_value_absolute: Optional[float] = None
+    min_cash_buffer: Optional[float] = None
+    tiny_account_mode: Optional[bool] = None
 
 class BrokerPreferenceRequest(BaseModel):
     ui_primary_broker: Literal["dhan", "zerodha"]
@@ -291,9 +303,11 @@ async def start_engine(req: EngineStartRequest, background_tasks: BackgroundTask
     if engine and engine._running:
         raise HTTPException(400, "Engine already running")
 
-    _persist_engine_state(autostart=True, mode=req.mode)
-    background_tasks.add_task(_start_engine_task, req.mode)
-    return {"status": "starting", "mode": req.mode}
+    overrides = req.model_dump(exclude_none=True)
+    overrides.pop("mode", None)
+    _persist_engine_state(autostart=True, mode=req.mode, overrides=overrides)
+    background_tasks.add_task(_start_engine_task, req.mode, overrides)
+    return {"status": "starting", "mode": req.mode, "overrides": overrides}
 
 
 @app.post("/api/engine/stop")
@@ -311,6 +325,7 @@ async def engine_status():
     engine = get_engine()
     if not engine:
         return {"running": False, "broker": None, "positions": 0}
+    selection_status = engine.get_engine_status()
     return {
         "running": engine._running,
         "broker": engine._primary_broker_name,
@@ -322,6 +337,7 @@ async def engine_status():
         "last_replication_error": engine._last_replication_error,
         "kill_switch": engine.risk._kill_switch,
         "trading_allowed": engine.risk.is_trading_allowed,
+        **selection_status,
     }
 
 
