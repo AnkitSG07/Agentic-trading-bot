@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from core.engine import get_engine, set_engine, TradingEngine
 from core.replay_schema import ReplayRunCreateRequest
 from data.stock_selector import SelectorConfig, StockSelector
+from data.stock_universe import get_cached_nse_equity_symbols, load_nse_equity_symbols
 from database.repository import (
     AgentDecisionRepository, DailySummaryRepository,
     PositionRepository, RiskEventRepository, TradeRepository,
@@ -971,6 +972,16 @@ class ReplaySelectionRequest(BaseModel):
 def _selector_candidate_universe(symbols: list[str] | None) -> list[str]:
     if symbols:
         return [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+    engine = get_engine()
+    if engine:
+        cached_symbols = get_cached_nse_equity_symbols(engine)
+        if cached_symbols:
+            return cached_symbols
+
+        loaded_symbols = load_nse_equity_symbols(getattr(engine, "_instrument_cache", {}))
+        if loaded_symbols:
+            return loaded_symbols
+            
     from core.engine import DEFAULT_WATCHLIST
     return list(DEFAULT_WATCHLIST)
 
