@@ -12,6 +12,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
+import math
 from typing import Literal, Optional
 
 import pandas as pd
