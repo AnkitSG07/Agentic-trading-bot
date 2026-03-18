@@ -2145,7 +2145,7 @@ export default function TradingDashboard() {
     }
   }, []);
 
-  const loadSimulation = useCallback(async () => {
+  const loadSimulation = useCallback(async (options = {}) => {
     setSimState(prev => ({ ...prev, loading: true, error: "", data: prev.data, liveReplay: prev.liveReplay }));
     try {
       if (simState.runId) {
@@ -2157,9 +2157,10 @@ export default function TradingDashboard() {
       }
       const normalizedStartDate = toIsoDateOrNull(simConfig.start_date);
       const normalizedEndDate = toIsoDateOrNull(simConfig.end_date);
+      const resolvedSymbols = normalizeSymbols(options.symbols ?? (simConfig.selection_mode === "auto" ? (simState.selectionSummary?.selected_symbols || []) : simConfig.symbols));
       const payload = {
         ...simConfig,
-        symbols: simConfig.selection_mode === "auto" ? [] : normalizeSymbols(simConfig.symbols),
+        symbols: resolvedSymbols,
         start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
         end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
         ai_every_n_candles: Math.max(1, Math.round(Number(simConfig.ai_every_n_candles || 1))),
@@ -2175,7 +2176,7 @@ export default function TradingDashboard() {
     } catch (e) {
       setSimState(prev => ({ ...prev, loading: false, error: toUiError(e, "Replay failed"), data: null, liveReplay: null, runStatus: "failed" }));
     }
-  }, [pollReplayRun, simConfig, simState.runId]);
+  }, [pollReplayRun, simConfig, simState.runId, simState.selectionSummary]);
 
   const backfillAndRun = useCallback(async () => {
     const normalizedStartDate = toIsoDateOrNull(simConfig.start_date);
@@ -2215,7 +2216,7 @@ export default function TradingDashboard() {
       const out = await res.json();
       if (!res.ok) throw new Error(extractErrorMessage(out?.detail) || "Backfill failed");
       if (Array.isArray(out?.failures) && out.failures.length) throw new Error(`Backfill: ${extractErrorMessage(out.failures[0]?.error) || "some symbols failed"}`);
-      await loadSimulation();
+      await loadSimulation({ symbols });
     } catch (e) { setSimState(prev => ({ ...prev, error: toUiError(e, "Backfill failed"), data: null, liveReplay: null })); }
     finally { setSimBackfilling(false); }
   }, [loadSimulation, simConfig]);
