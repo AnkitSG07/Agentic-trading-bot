@@ -90,3 +90,23 @@ def test_fallback_quantity_honors_absolute_order_cap():
 
     assert len(signals) == 1
     assert signals[0].quantity == 3
+
+
+def test_fallback_quantity_uses_watchlist_ltp_and_still_honors_absolute_cap():
+    agent = TradingAgent({"max_capital_per_trade_pct": 50, "min_trade_quantity": 1, "max_order_value_absolute": 2400})
+    decision = {
+        "signals": [
+            {
+                "action": "BUY",
+                "symbol": "RELIANCE",
+                "quantity": 0,
+                "confidence": 0.9,
+                "risk_reward": 2.0,
+            }
+        ]
+    }
+
+    signals = agent._parse_signals(decision, _ctx(capital=100000, ltp=800))
+
+    assert len(signals) == 1
+    assert signals[0].quantity == 3
