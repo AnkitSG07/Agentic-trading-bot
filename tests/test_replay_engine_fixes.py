@@ -168,9 +168,30 @@ async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_un
         {"fetch_window": staticmethod(fake_fetch_window)},
     )
 
+    class _Quote:
+        def __init__(self, ltp):
+            self.ltp = ltp
+
+    class _Broker:
+        async def get_quote(self, instruments):
+            prices = {"CHEAP": 48, "MIDCAP": 96, "EXPENSIVE": 2500, "NOHISTORY": 105}
+            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
+
+    class _Instrument:
+        def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
+            self.symbol = symbol
+            self.exchange = exchange
+            self.instrument_type = instrument_type
+
     engine = types.SimpleNamespace(
+        primary_broker=_Broker(),
         _nse_equity_symbols_cache=["CHEAP", "MIDCAP", "EXPENSIVE", "NOHISTORY"],
-        _instrument_cache={},
+        _instrument_cache={symbol: _Instrument(symbol) for symbol in ["CHEAP", "MIDCAP", "EXPENSIVE", "NOHISTORY"]},
+        min_stock_price=10,
+        max_stock_price=5000,
+        min_avg_daily_volume=1000,
+        min_avg_daily_turnover=100000,
+        max_auto_pick_symbols=2,
     )
     monkeypatch.setattr("core.server.get_engine", lambda: engine)
 
@@ -188,6 +209,287 @@ async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_un
     assert result["selected_symbols"] == ["CHEAP", "MIDCAP"]
     assert all(item["symbol"] != "NOHISTORY" for item in result["recommendations"])
     assert all(item["estimated_cost"] <= 1000 for item in result["recommendations"])
+
+
+
+@pytest.mark.asyncio
+async def test_budget_selection_rejects_invalid_budget(monkeypatch):
+    monkeypatch.setattr("core.server.get_engine", lambda: None)
+
+    from core.server import ReplaySelectionRequest, _resolve_budget_selection
+
+    with pytest.raises(Exception) as exc_info:
+        await _resolve_budget_selection(ReplaySelectionRequest(
+            symbols=["AAA"],
+            budget_cap=0,
+            max_auto_symbols=2,
+            exchange="NSE",
+            timeframe="day",
+        ))
+
+    assert exc_info.value.status_code == 400
+    assert "Invalid budget" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_budget_selection_distinguishes_no_affordable_live_universe(monkeypatch):
+    class _Quote:
+        def __init__(self, ltp):
+            self.ltp = ltp
+
+    class _Broker:
+        async def get_quote(self, instruments):
+            return {inst.symbol: _Quote(ltp=5000) for inst in instruments}
+
+    class _Instrument:
+        def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
+            self.symbol = symbol
+            self.exchange = exchange
+            self.instrument_type = instrument_type
+
+    engine = types.SimpleNamespace(
+        primary_broker=_Broker(),
+        _instrument_cache={"EXPENSIVE": _Instrument("EXPENSIVE")},
+        _nse_equity_symbols_cache=["EXPENSIVE"],
+        min_stock_price=10,
+        max_stock_price=10000,
+        min_avg_daily_volume=1000,
+        min_avg_daily_turnover=100000,
+        max_auto_pick_symbols=5,
+    )
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
+
+    from core.server import ReplaySelectionRequest, _resolve_budget_selection
+
+    with pytest.raises(Exception) as exc_info:
+        await _resolve_budget_selection(ReplaySelectionRequest(
+            symbols=[],
+            budget_cap=100,
+            max_auto_symbols=1,
+            exchange="NSE",
+            timeframe="day",
+        ))
+
+    assert exc_info.value.status_code == 400
+    assert "No affordable instruments found from live universe data" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_budget_selection_can_pick_from_live_universe_before_backfill(monkeypatch):
+    fetch_calls = []
+
+    async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
+        fetch_calls.append(list(symbols))
+        return []
+
+    class _Quote:
+        def __init__(self, ltp):
+            self.ltp = ltp
+
+    class _Broker:
+        async def get_quote(self, instruments):
+            prices = {"AFFORD": 95, "MID": 210, "EXPENSIVE": 5000}
+            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
+
+    class _Instrument:
+        def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
+            self.symbol = symbol
+            self.exchange = exchange
+            self.instrument_type = instrument_type
+
+    sys.modules["database.repository"].HistoricalCandleRepository = type(
+        "_FreshSelectionHistoricalRepo",
+        (),
+        {"fetch_window": staticmethod(fake_fetch_window)},
+    )
+
+    engine = types.SimpleNamespace(
+        primary_broker=_Broker(),
+        _instrument_cache={
+            "AFFORD": _Instrument("AFFORD"),
+            "MID": _Instrument("MID"),
+            "EXPENSIVE": _Instrument("EXPENSIVE"),
+        },
+        _nse_equity_symbols_cache=["AFFORD", "MID", "EXPENSIVE"],
+        min_stock_price=10,
+        max_stock_price=10000,
+        min_avg_daily_volume=1000,
+        min_avg_daily_turnover=100000,
+        max_auto_pick_symbols=2,
+    )
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
+
+    from core.server import ReplaySelectionRequest, _resolve_budget_selection
+
+    result = await _resolve_budget_selection(ReplaySelectionRequest(
+        symbols=[],
+        budget_cap=500,
+        max_auto_symbols=2,
+        exchange="NSE",
+        timeframe="day",
+    ))
+
+    assert fetch_calls == [["AFFORD", "MID"]]
+    assert result["selected_symbols"] == ["AFFORD", "MID"]
+    assert result["historical_candidate_symbols"] == []
+    assert all(item["selection_source"] == "live_universe" for item in result["recommendations"])
+
+
+def test_backfill_and_run_flow_succeeds_when_symbols_are_selected_before_replay_backfill(monkeypatch):
+    historical_calls = []
+
+    async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
+        historical_calls.append(list(symbols))
+        if symbols == ["AFFORD", "MID"]:
+            rows = []
+            for symbol, base in [("AFFORD", 95), ("MID", 210)]:
+                for i in range(25):
+                    rows.append({
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "timeframe": timeframe,
+                        "timestamp": f"2024-01-{i+1:02d}T00:00:00",
+                        "open": base + i,
+                        "high": base + i,
+                        "low": base + i,
+                        "close": base + i,
+                        "volume": 250000,
+                    })
+            return rows
+        return []
+
+    async def fake_create_and_start_replay(config, payload):
+        return {"run_id": "run-fresh-1", "status": "queued", "payload": payload}
+
+    class _Quote:
+        def __init__(self, ltp):
+            self.ltp = ltp
+
+    class _Broker:
+        async def get_quote(self, instruments):
+            prices = {"AFFORD": 95, "MID": 210, "EXPENSIVE": 5000}
+            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
+
+    class _Instrument:
+        def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
+            self.symbol = symbol
+            self.exchange = exchange
+            self.instrument_type = instrument_type
+
+    sys.modules["database.repository"].HistoricalCandleRepository = type(
+        "_FreshRunHistoricalRepo",
+        (),
+        {"fetch_window": staticmethod(fake_fetch_window)},
+    )
+    fake_loader = types.ModuleType("config.loader")
+    fake_loader.load_config = lambda: {"app": {}}
+    sys.modules["config.loader"] = fake_loader
+    fake_replay_engine = types.ModuleType("core.replay_engine")
+    fake_replay_engine.create_and_start_replay = fake_create_and_start_replay
+    sys.modules["core.replay_engine"] = fake_replay_engine
+
+    engine = types.SimpleNamespace(
+        primary_broker=_Broker(),
+        _instrument_cache={
+            "AFFORD": _Instrument("AFFORD"),
+            "MID": _Instrument("MID"),
+            "EXPENSIVE": _Instrument("EXPENSIVE"),
+        },
+        _nse_equity_symbols_cache=["AFFORD", "MID", "EXPENSIVE"],
+        min_stock_price=10,
+        max_stock_price=10000,
+        min_avg_daily_volume=1000,
+        min_avg_daily_turnover=100000,
+        max_auto_pick_symbols=2,
+    )
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
+
+    client = TestClient(app)
+    selection_response = client.post("/api/replay/select-symbols", json={
+        "selection_mode": "auto",
+        "symbols": [],
+        "budget_cap": 500,
+        "max_auto_symbols": 2,
+        "exchange": "NSE",
+        "timeframe": "day",
+    })
+    assert selection_response.status_code == 200
+    selected_symbols = selection_response.json()["selected_symbols"]
+    assert selected_symbols == ["AFFORD", "MID"]
+
+    run_response = client.post("/api/replay/runs", json={
+        "selection_mode": "auto",
+        "symbols": selected_symbols,
+        "budget_cap": 500,
+        "max_auto_symbols": 2,
+        "exchange": "NSE",
+        "timeframe": "day",
+    })
+
+    assert run_response.status_code == 200
+    body = run_response.json()
+    assert body["payload"]["symbols"] == ["AFFORD", "MID"]
+    assert historical_calls[0] == ["AFFORD", "MID"]
+    assert historical_calls[-1] == ["AFFORD", "MID"]
+
+
+def test_replay_run_reports_missing_history_after_backfill(monkeypatch):
+    async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
+        return []
+
+    async def fake_create_and_start_replay(config, payload):
+        return {"run_id": "run-fresh-2", "status": "queued", "payload": payload}
+
+    sys.modules["database.repository"].HistoricalCandleRepository = type(
+        "_NoHistoryRepo",
+        (),
+        {"fetch_window": staticmethod(fake_fetch_window)},
+    )
+    fake_loader = types.ModuleType("config.loader")
+    fake_loader.load_config = lambda: {"app": {}}
+    sys.modules["config.loader"] = fake_loader
+    fake_replay_engine = types.ModuleType("core.replay_engine")
+    fake_replay_engine.create_and_start_replay = fake_create_and_start_replay
+    sys.modules["core.replay_engine"] = fake_replay_engine
+
+    class _Quote:
+        def __init__(self, ltp):
+            self.ltp = ltp
+
+    class _Broker:
+        async def get_quote(self, instruments):
+            prices = {"AAA": 90, "BBB": 130, "CCC": 1200}
+            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
+
+    class _Instrument:
+        def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
+            self.symbol = symbol
+            self.exchange = exchange
+            self.instrument_type = instrument_type
+
+    engine = types.SimpleNamespace(
+        primary_broker=_Broker(),
+        _instrument_cache={symbol: _Instrument(symbol) for symbol in ["AAA", "BBB", "CCC"]},
+        _nse_equity_symbols_cache=["AAA", "BBB", "CCC"],
+        min_stock_price=10,
+        max_stock_price=5000,
+        min_avg_daily_volume=1000,
+        min_avg_daily_turnover=100000,
+        max_auto_pick_symbols=2,
+    )
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
+
+    client = TestClient(app)
+    response = client.post("/api/replay/runs", json={
+        "selection_mode": "manual",
+        "symbols": ["AFFORD"],
+        "exchange": "NSE",
+        "timeframe": "day",
+    })
+
+    assert response.status_code == 400
+    assert "No historical candles found after backfill" in response.json()["detail"]
+
 
 def test_replay_route_supports_auto_mode_selection(monkeypatch):
     async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
@@ -221,6 +523,33 @@ def test_replay_route_supports_auto_mode_selection(monkeypatch):
     fake_replay_engine = types.ModuleType("core.replay_engine")
     fake_replay_engine.create_and_start_replay = fake_create_and_start_replay
     sys.modules["core.replay_engine"] = fake_replay_engine
+
+    class _Quote:
+        def __init__(self, ltp):
+            self.ltp = ltp
+
+    class _Broker:
+        async def get_quote(self, instruments):
+            prices = {"AAA": 90, "BBB": 130, "CCC": 1200}
+            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
+
+    class _Instrument:
+        def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
+            self.symbol = symbol
+            self.exchange = exchange
+            self.instrument_type = instrument_type
+
+    engine = types.SimpleNamespace(
+        primary_broker=_Broker(),
+        _instrument_cache={symbol: _Instrument(symbol) for symbol in ["AAA", "BBB", "CCC"]},
+        _nse_equity_symbols_cache=["AAA", "BBB", "CCC"],
+        min_stock_price=10,
+        max_stock_price=5000,
+        min_avg_daily_volume=1000,
+        min_avg_daily_turnover=100000,
+        max_auto_pick_symbols=2,
+    )
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
 
     client = TestClient(app)
     response = client.post("/api/replay/runs", json={
