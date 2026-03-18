@@ -41,7 +41,12 @@ class NSEDataFeed:
         self._pcr_cache: dict[str, float] = {}
         self._oi_cache: dict[str, dict] = {}
 
-    async def _get_client(self) -> httpx.AsyncClient:
+    async def _get_client(self, force_refresh: bool = False) -> httpx.AsyncClient:
+        if force_refresh and self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+            self._session_valid = False
+            
         if not self._client or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 headers=NSE_HEADERS,
@@ -53,8 +58,42 @@ class NSEDataFeed:
                 await self._client.get(f"{NSE_BASE}/", timeout=10)
                 self._session_valid = True
             except Exception:
-                pass
+                self._session_valid = False
         return self._client
+
+    async def _request_json(self, url: str, *, timeout: int = 10, retries: int = 2) -> dict:
+        last_error: Optional[Exception] = None
+        for attempt in range(retries):
+            try:
+                client = await self._get_client(force_refresh=(attempt > 0))
+                resp = await client.get(url, timeout=timeout)
+                resp.raise_for_status()
+                return self._safe_json(resp)
+            except (httpx.ReadTimeout, httpx.HTTPStatusError) as exc:
+                last_error = exc
+                logger.warning(
+                    "NSE request failed | url=%s attempt=%s/%s type=%s detail=%r",
+                    url,
+                    attempt + 1,
+                    retries,
+                    type(exc).__name__,
+                    exc,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "NSE request failed | url=%s attempt=%s/%s type=%s detail=%r",
+                    url,
+                    attempt + 1,
+                    retries,
+                    type(exc).__name__,
+                    exc,
+                )
+                break
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"NSE request failed without exception for {url}")
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
@@ -68,14 +107,11 @@ class NSEDataFeed:
         Returns dict with strikePrices, CE/PE OI, IV data.
         """
         try:
-            client = await self._get_client()
             url = f"{NSE_BASE}/api/option-chain-indices?symbol={symbol}"
             if symbol not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
                 url = f"{NSE_BASE}/api/option-chain-equities?symbol={symbol}"
 
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = self._safe_json(resp)
+            data = await self._request_json(url)
 
             chain = self._parse_option_chain(data, symbol)
             self._oi_cache[symbol] = chain
@@ -206,10 +242,7 @@ class NSEDataFeed:
     async def get_india_vix(self) -> float:
         """Fetch current India VIX from NSE."""
         try:
-            client = await self._get_client()
-            resp = await client.get(f"{NSE_BASE}/api/allIndices")
-            resp.raise_for_status()
-            data = self._safe_json(resp)
+            data = await self._request_json(f"{NSE_BASE}/api/allIndices")
             for index in data.get("data", []):
                 if index.get("index") == "INDIA VIX":
                     return float(index.get("last", 14.0))
@@ -222,10 +255,7 @@ class NSEDataFeed:
     async def get_index_data(self) -> dict:
         """Get NIFTY, BANKNIFTY, VIX in one call."""
         try:
-            client = await self._get_client()
-            resp = await client.get(f"{NSE_BASE}/api/allIndices")
-            resp.raise_for_status()
-            data = self._safe_json(resp)
+            data = await self._request_json(f"{NSE_BASE}/api/allIndices")
 
             result = {"nifty": 0.0, "banknifty": 0.0, "vix": 14.0, "finnifty": 0.0}
             name_map = {
