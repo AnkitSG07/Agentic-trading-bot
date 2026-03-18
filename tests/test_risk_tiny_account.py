@@ -43,5 +43,6 @@ async def test_tiny_account_mode_enforces_stricter_spend_limit():
     )
 
     assert result.approved is True
-    assert result.adjusted_quantity == 7
+    assert result.adjusted_quantity == 5
+    assert "tiny-account caps applied" in result.reason
     assert "quantity adjusted" in result.reason
