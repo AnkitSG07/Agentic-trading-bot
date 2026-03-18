@@ -57,9 +57,12 @@ const toIsoDateOrNull = (value) => {
 };
 
 const normalizeSymbols = (value) => {
+  if (Array.isArray(value)) return value.map(s => String(s || "").trim().toUpperCase()).filter(Boolean);
   if (typeof value !== "string") return [];
   return value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
 };
+
+const formatRupees = (value) => `₹${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
 // ─── THEME ───────────────────────────────────────────────────────────────────
 const DARK = {
@@ -1212,7 +1215,9 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
   const { isMobile } = useBreakpoint();
   const [liveSimRunning, setLiveSimRunning] = useState(false);
   const [liveSimPaused, setLiveSimPaused] = useState(false);
-  const selectedSymbols = useMemo(() => normalizeSymbols(simConfig.symbols), [simConfig.symbols]);
+  const resolvedRecommendations = simState.selectionSummary?.recommendations || [];
+  const autoSelectedSymbols = useMemo(() => resolvedRecommendations.map(item => item.symbol).filter(Boolean), [resolvedRecommendations]);
+  const selectedSymbols = useMemo(() => (simConfig.selection_mode === "auto" ? autoSelectedSymbols : normalizeSymbols(simConfig.symbols)), [autoSelectedSymbols, simConfig.selection_mode, simConfig.symbols]);
   const symbolPool = selectedSymbols.length ? selectedSymbols : SIM_SYMBOLS;
   const [chartSymbol, setChartSymbol] = useState(() => selectedSymbols[0] || SIM_SYMBOLS[0]);
 
@@ -1855,10 +1860,21 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
           }
         />
         <div style={{ padding: "14px 16px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: 10, marginBottom: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: 10, marginBottom: 10 }}>
+            <select value={simConfig.selection_mode} onChange={e => setSimConfig(p => ({ ...p, selection_mode: e.target.value }))} style={inputStyle}>
+              <option value="manual">Manual symbols</option>
+              <option value="auto">Auto-pick by budget</option>
+            </select>
+            {simConfig.selection_mode === "manual" ? (
+              <input type="text" placeholder="Symbols (comma-separated)" value={simConfig.symbols} onChange={e => setSimConfig(p => ({ ...p, symbols: e.target.value }))} style={inputStyle} />
+            ) : (
+              <>
+                <input type="number" min="1" placeholder="Budget cap (₹)" value={simConfig.budget_cap} onChange={e => setSimConfig(p => ({ ...p, budget_cap: Number(e.target.value || 0) }))} style={inputStyle} />
+                <input type="number" min="1" max="25" placeholder="Max auto symbols" value={simConfig.max_auto_symbols} onChange={e => setSimConfig(p => ({ ...p, max_auto_symbols: Math.max(1, Math.min(25, Math.round(Number(e.target.value || 1)))) }))} style={inputStyle} />
+              </>
+            )}
             {[
-              { placeholder: "Symbols (comma-separated)", key: "symbols", type: "text" },
-              { placeholder: "Start date", key: "start_date", type: "date" },
+                            { placeholder: "Start date", key: "start_date", type: "date" },
               { placeholder: "End date", key: "end_date", type: "date" },
               { placeholder: "Initial capital", key: "initial_capital", type: "number" },
               { placeholder: "Fee %", key: "fee_pct", type: "number", step: "0.0001" },
@@ -1880,6 +1896,13 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
             ))}
           </div>
 
+          {simConfig.selection_mode === "auto" && (
+            <div style={{ background: T.accentDim, border: `1px solid ${T.accent}30`, borderLeft: `3px solid ${T.accent}`, borderRadius: 3, padding: "10px 14px", marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: T.text, marginBottom: 4, fontFamily: "'Share Tech Mono', monospace" }}>AI auto-pick mode</div>
+              <div style={{ fontSize: 10, color: T.textMuted }}>Enter a rupee budget and the backend will rank affordable symbols, estimate quantity, cost, and potential profit before replay starts.</div>
+            </div>
+          )}
+
           {simBackfilling && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8, fontFamily: "'Share Tech Mono', monospace" }}>Backfilling historical candles…</div>}
           {simState.loading && (
             <div style={{ marginBottom: 8 }}>
@@ -1894,6 +1917,33 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
                   </div>
                 </>
               )}
+            </div>
+          )}
+
+          {simState.selectionSummary?.selected_symbols?.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>Selected symbols: {simState.selectionSummary.selected_symbols.join(", ")}</div>
+                {simState.selectionSummary?.budget_cap ? <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>Budget {formatRupees(simState.selectionSummary.budget_cap)}</div> : null}
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {simState.selectionSummary.recommendations.map((item) => (
+                  <div key={item.symbol} style={{ border: `1px solid ${T.border}`, background: T.bg, padding: "10px 12px", borderRadius: 3 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1.2fr repeat(5, 1fr)", gap: 8, alignItems: "center" }}>
+                      <div>
+                        <div style={{ fontSize: 11, color: T.text, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" }}>{item.symbol}</div>
+                        <div style={{ fontSize: 9, color: T.textMuted }}>Score {Number(item.score || 0).toFixed(2)}</div>
+                      </div>
+                      <div style={{ fontSize: 10, color: T.textSub }}>LTP <strong style={{ color: T.text }}>{formatRupees(item.ltp)}</strong></div>
+                      <div style={{ fontSize: 10, color: T.textSub }}>Qty <strong style={{ color: T.text }}>{item.estimated_qty}</strong></div>
+                      <div style={{ fontSize: 10, color: T.textSub }}>Cost <strong style={{ color: T.text }}>{formatRupees(item.estimated_cost)}</strong></div>
+                      <div style={{ fontSize: 10, color: item.estimated_profit_rupees >= 0 ? T.green : T.red }}>Est. profit <strong>{formatRupees(item.estimated_profit_rupees)}</strong></div>
+                      <div style={{ fontSize: 10, color: T.textSub }}>Return <strong style={{ color: T.text }}>{Number(item.expected_return_pct || 0).toFixed(2)}%</strong></div>
+                    </div>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginTop: 6 }}>{item.reason}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -1974,9 +2024,9 @@ export default function TradingDashboard() {
   const [uiPrimarySelection, setUiPrimarySelection] = useState("dhan");
   const [brokerPrefMessage, setBrokerPrefMessage] = useState("");
   const [savingBrokerPref, setSavingBrokerPref] = useState(false);
-  const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null, liveReplay: null });
+  const [simState, setSimState] = useState({ loading: false, error: "", data: null, runId: "", runStatus: "idle", progress: null, liveReplay: null, selectionSummary: null });
   const [simBackfilling, setSimBackfilling] = useState(false);
-  const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 500000, fee_pct: 0.0003, slippage_pct: 0.0005, ai_every_n_candles: 5, confidence_threshold: 0.5 });
+  const [simConfig, setSimConfig] = useState({ symbols: "RELIANCE,TCS", selection_mode: "manual", budget_cap: 1000, max_auto_symbols: 3, timeframe: "day", exchange: "NSE", start_date: "2024-01-01", end_date: "2024-12-31", initial_capital: 500000, fee_pct: 0.0003, slippage_pct: 0.0005, ai_every_n_candles: 5, confidence_threshold: 0.5 });
 
   const { data: ordersData, refetch: refetchOrders } = useAPI("/api/orders", 10000);
   const { data: analyticsData } = useAPI("/api/analytics/performance?days=30", 60000);
@@ -2079,11 +2129,11 @@ export default function TradingDashboard() {
       const statusRes = await fetch(`${API_BASE}/api/replay/runs/${runId}`);
       const status = await statusRes.json();
       if (!statusRes.ok) throw new Error(extractErrorMessage(status?.detail) || "Status failed");
-      setSimState(prev => ({ ...prev, runStatus: status.status || prev.runStatus, progress: status?.metrics?.progress || null, liveReplay: status?.metrics?.live || prev.liveReplay }));
+      setSimState(prev => ({ ...prev, runStatus: status.status || prev.runStatus, progress: status?.metrics?.progress || null, liveReplay: status?.metrics?.live || prev.liveReplay, selectionSummary: status?.config?.selection_summary || prev.selectionSummary }));
       if (status.status === "completed") {
         const r = await fetch(`${API_BASE}/api/replay/runs/${runId}/results`);
         const result = await r.json();
-        setSimState(prev => ({ ...prev, loading: false, error: "", data: { ...result, status }, runId, runStatus: "completed", progress: status?.metrics?.progress || null, liveReplay: status?.metrics?.live || prev.liveReplay }));
+        setSimState(prev => ({ ...prev, loading: false, error: "", data: { ...result, status }, runId, runStatus: "completed", progress: status?.metrics?.progress || null, liveReplay: status?.metrics?.live || prev.liveReplay, selectionSummary: status?.config?.selection_summary || prev.selectionSummary }));
         return;
       }
       if (status.status === "failed") throw new Error(extractErrorMessage(status.error) || "Replay failed");
@@ -2109,16 +2159,18 @@ export default function TradingDashboard() {
       const normalizedEndDate = toIsoDateOrNull(simConfig.end_date);
       const payload = {
         ...simConfig,
-        symbols: normalizeSymbols(simConfig.symbols),
+        symbols: simConfig.selection_mode === "auto" ? [] : normalizeSymbols(simConfig.symbols),
         start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
         end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
         ai_every_n_candles: Math.max(1, Math.round(Number(simConfig.ai_every_n_candles || 1))),
         confidence_threshold: Math.max(0.3, Math.min(0.95, Number(simConfig.confidence_threshold || 0.5))),
-
+        budget_cap: Number(simConfig.budget_cap || 0),
+        max_auto_symbols: Math.max(1, Math.min(25, Math.round(Number(simConfig.max_auto_symbols || 1)))),
       };
       const startRes = await fetch(`${API_BASE}/api/replay/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const started = await startRes.json();
       if (!startRes.ok) throw new Error(extractErrorMessage(started?.detail) || "Unable to start replay");
+      setSimState(prev => ({ ...prev, selectionSummary: started.selection_summary || prev.selectionSummary }));
       await pollReplayRun(started.run_id);
     } catch (e) {
       setSimState(prev => ({ ...prev, loading: false, error: toUiError(e, "Replay failed"), data: null, liveReplay: null, runStatus: "failed" }));
@@ -2126,13 +2178,32 @@ export default function TradingDashboard() {
   }, [pollReplayRun, simConfig, simState.runId]);
 
   const backfillAndRun = useCallback(async () => {
-    const symbols = normalizeSymbols(simConfig.symbols);
-    if (!symbols.length) { setSimState(prev => ({ ...prev, error: "Add at least one symbol." })); return; }
+    const normalizedStartDate = toIsoDateOrNull(simConfig.start_date);
+    const normalizedEndDate = toIsoDateOrNull(simConfig.end_date);
+    let symbols = normalizeSymbols(simConfig.symbols);
     setSimBackfilling(true);
     setSimState(prev => ({ ...prev, error: "", liveReplay: null, data: null, progress: null }));
     try {
-      const normalizedStartDate = toIsoDateOrNull(simConfig.start_date);
-      const normalizedEndDate = toIsoDateOrNull(simConfig.end_date);
+      if (simConfig.selection_mode === "auto") {
+        if (Number(simConfig.budget_cap || 0) <= 0) throw new Error("Enter a valid budget in rupees.");
+        const selectPayload = {
+          symbols: [],
+          exchange: simConfig.exchange,
+          timeframe: simConfig.timeframe,
+          start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
+          end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
+          budget_cap: Number(simConfig.budget_cap || 0),
+          max_auto_symbols: Math.max(1, Math.min(25, Math.round(Number(simConfig.max_auto_symbols || 1)))),
+          fee_pct: Number(simConfig.fee_pct || 0),
+          slippage_pct: Number(simConfig.slippage_pct || 0),
+        };
+        const selectRes = await fetch(`${API_BASE}/api/replay/select-symbols`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(selectPayload) });
+        const selection = await selectRes.json();
+        if (!selectRes.ok) throw new Error(extractErrorMessage(selection?.detail) || "Unable to auto-pick symbols");
+        symbols = selection.selected_symbols || [];
+        setSimState(prev => ({ ...prev, selectionSummary: selection }));
+      }
+      if (!symbols.length) throw new Error(simConfig.selection_mode === "auto" ? "No affordable symbols found." : "Add at least one symbol.");
       const payload = {
         symbols,
         exchange: simConfig.exchange,
