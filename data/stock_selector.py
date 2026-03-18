@@ -11,6 +11,7 @@ class SelectorConfig:
     min_stock_price: float = 50.0
     max_stock_price: float = 5000.0
     min_avg_daily_volume: float = 100000.0
+    min_avg_daily_turnover: float = 5000000.0
     max_auto_pick_symbols: int = 10
 
 
@@ -44,9 +45,12 @@ class StockSelector:
 
         ltp = float(clean["close"].iloc[-1])
         avg_volume_20d = float(clean["volume"].tail(20).mean())
+        avg_turnover_20d = float((clean["close"].tail(20).astype(float) * clean["volume"].tail(20).astype(float)).mean())
         if ltp < float(self.config.min_stock_price) or ltp > float(self.config.max_stock_price):
             return None
         if avg_volume_20d < float(self.config.min_avg_daily_volume):
+            return None
+        if avg_turnover_20d < float(self.config.min_avg_daily_turnover):
             return None
 
         close = clean["close"].astype(float)
@@ -56,8 +60,17 @@ class StockSelector:
         sma_20 = float(close.tail(20).mean())
         trend_bonus = 1.5 if ltp > sma_10 > sma_20 else (0.75 if ltp > sma_20 else -1.0)
         liquidity_score = min(avg_volume_20d / max(float(self.config.min_avg_daily_volume), 1.0), 5.0)
+        trend_quality = self._trend_quality(close)
 
-        score = round((momentum_20 * 0.45) + (momentum_5 * 0.25) + (trend_bonus * 10.0) + (liquidity_score * 5.0), 2)
+        score = round(
+            (momentum_20 * 0.40)
+            + (momentum_5 * 0.20)
+            + (trend_bonus * 10.0)
+            + (liquidity_score * 5.0)
+            + (trend_quality * 12.0),
+            2,
+        )
+
         reasons = []
         if momentum_20 > 0:
             reasons.append(f"20d momentum {momentum_20:.2f}%")
@@ -66,6 +79,8 @@ class StockSelector:
         if ltp > sma_10 > sma_20:
             reasons.append("price above 10d/20d trend")
         reasons.append(f"20d avg volume {avg_volume_20d:,.0f}")
+        reasons.append(f"20d avg turnover ₹{avg_turnover_20d:,.0f}")
+        reasons.append(f"trend quality {trend_quality:.2f}")
 
         return {
             "symbol": symbol,
@@ -73,6 +88,8 @@ class StockSelector:
             "rank": 0,
             "ltp": round(ltp, 2),
             "avg_volume_20d": round(avg_volume_20d, 2),
+            "avg_turnover_20d": round(avg_turnover_20d, 2),
+            "trend_quality": round(trend_quality, 4),
             "reason": "; ".join(reasons),
         }
 
@@ -81,3 +98,18 @@ class StockSelector:
         if previous == 0:
             return 0.0
         return ((current - previous) / previous) * 100.0
+
+    @staticmethod
+    def _trend_quality(close: pd.Series) -> float:
+        if len(close) < 10:
+            return 0.0
+        abs_returns = close.pct_change().dropna().abs()
+        if abs_returns.empty:
+            return 0.0
+        direction = abs(float(close.iloc[-1] - close.iloc[0]))
+        path = float(close.diff().abs().dropna().sum())
+        if path <= 0:
+            return 0.0
+        efficiency = max(0.0, min(direction / path, 1.0))
+        smoothness = 1.0 / (1.0 + float(abs_returns.std(ddof=0) * 100))
+        return round((efficiency * 0.7) + (smoothness * 0.3), 4)
