@@ -304,6 +304,7 @@ class TradingAgent:
             min(100.0, float(config.get("max_capital_per_trade_pct", 5.0))),
         )
         self.min_trade_quantity: int = max(1, int(config.get("min_trade_quantity", 1)))
+        self.max_order_value_absolute = config.get("max_order_value_absolute")
         # FIX 1: Clamp and validate confidence_threshold at boot, not just in review_strategy.
         # Bad config values (0.01, 2, "high", None) are caught here before any trade runs.
         self.confidence_threshold: float = self._validated_confidence_threshold(
@@ -1203,6 +1204,8 @@ Position: {json.dumps(position, indent=2)}
 
         capital = Decimal(str(max(ctx.available_capital, 0.0)))
         per_trade_budget = capital * Decimal(str(self.max_capital_per_trade_pct / 100.0))
+        if self.max_order_value_absolute is not None:
+            per_trade_budget = min(per_trade_budget, Decimal(str(self.max_order_value_absolute)))
         if per_trade_budget <= 0:
             return 0
 
