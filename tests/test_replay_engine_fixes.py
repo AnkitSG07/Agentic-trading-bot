@@ -111,6 +111,84 @@ def test_replay_request_accepts_confidence_override_and_auto_mode_budget():
     assert auto_req.symbols == []
 
 
+
+
+def test_selector_candidate_universe_prefers_loaded_instrument_cache(monkeypatch):
+    class _Instrument:
+        def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
+            self.symbol = symbol
+            self.exchange = exchange
+            self.instrument_type = instrument_type
+
+    engine = types.SimpleNamespace(
+        _nse_equity_symbols_cache=["CHEAP", "MIDCAP", "RELIANCE"],
+        _instrument_cache={
+            "CHEAP": _Instrument("CHEAP"),
+            "MIDCAP": _Instrument("MIDCAP"),
+            "RELIANCE": _Instrument("RELIANCE"),
+        },
+    )
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
+
+    from core.server import _selector_candidate_universe
+
+    assert _selector_candidate_universe([]) == ["CHEAP", "MIDCAP", "RELIANCE"]
+
+
+def test_selector_candidate_universe_falls_back_to_default_watchlist(monkeypatch):
+    monkeypatch.setattr("core.server.get_engine", lambda: None)
+
+    from core.server import _selector_candidate_universe
+
+    assert _selector_candidate_universe([]) == ["AAA", "BBB", "CCC"]
+
+
+@pytest.mark.asyncio
+async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_universe(monkeypatch):
+    async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
+        rows = []
+        for symbol, base in [("CHEAP", 48), ("MIDCAP", 96), ("EXPENSIVE", 2500)]:
+            for i in range(25):
+                rows.append({
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "timeframe": timeframe,
+                    "timestamp": f"2024-01-{i+1:02d}T00:00:00",
+                    "open": base + i,
+                    "high": base + i,
+                    "low": base + i,
+                    "close": base + i,
+                    "volume": 200000,
+                })
+        return rows
+
+    sys.modules["database.repository"].HistoricalCandleRepository = type(
+        "_FakeHistoricalCandleRepository",
+        (),
+        {"fetch_window": staticmethod(fake_fetch_window)},
+    )
+
+    engine = types.SimpleNamespace(
+        _nse_equity_symbols_cache=["CHEAP", "MIDCAP", "EXPENSIVE", "NOHISTORY"],
+        _instrument_cache={},
+    )
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
+
+    from core.server import ReplaySelectionRequest, _resolve_budget_selection
+
+    result = await _resolve_budget_selection(ReplaySelectionRequest(
+        symbols=[],
+        budget_cap=1000,
+        max_auto_symbols=2,
+        exchange="NSE",
+        timeframe="day",
+    ))
+
+    assert result["candidate_symbols"] == ["CHEAP", "MIDCAP", "EXPENSIVE", "NOHISTORY"]
+    assert result["selected_symbols"] == ["CHEAP", "MIDCAP"]
+    assert all(item["symbol"] != "NOHISTORY" for item in result["recommendations"])
+    assert all(item["estimated_cost"] <= 1000 for item in result["recommendations"])
+
 def test_replay_route_supports_auto_mode_selection(monkeypatch):
     async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
         rows = []
