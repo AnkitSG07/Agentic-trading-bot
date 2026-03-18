@@ -1,3 +1,5 @@
+import logging
+
 import pandas as pd
 
 from core.engine import TradingEngine
@@ -60,16 +62,28 @@ def test_auto_pick_mode_uses_broader_universe_not_only_watchlist():
         "BBB": pd.DataFrame({"open": [95] * 30, "high": [95] * 30, "low": [95] * 30, "close": [95] * 29 + [94], "volume": [5000] * 30}),
         "CCC": _frame(200, volume=9000),
         "DDD": pd.DataFrame({"open": [50] * 30, "high": [50] * 30, "low": [50] * 30, "close": [50] * 30, "volume": [2000] * 30}),
+        "EEE": _frame(300, volume=8000),
     }
     engine._refresh_selection()
 
     status = engine.get_engine_status()
     assert status["selection_mode"] == "auto_pick"
-    assert set(status["active_symbols"]) == {"CCC", "AAA"}
-    assert {item["symbol"] for item in status["ranked_candidates"]} >= {"CCC", "AAA"}
+    assert set(status["candidate_universe_symbols"]) >= {"AAA", "BBB", "CCC", "DDD", "EEE"}
+    assert len(status["active_symbols"]) == 2
+    assert "CCC" in status["active_symbols"]
+    assert any(symbol not in engine.configured_watchlist_symbols for symbol in status["active_symbols"])
+    assert len(status["ranked_candidates"]) > len(status["active_symbols"])
+    assert {item["symbol"] for item in status["ranked_candidates"]} >= {"CCC", "AAA", "EEE"}
     assert "CCC" not in engine.configured_watchlist_symbols
 
 
-def test_invalid_selection_mode_falls_back_to_watchlist():
-    engine = TradingEngine(_config("bad_mode"))
+def test_invalid_selection_mode_falls_back_to_watchlist_with_warning(caplog):
+    with caplog.at_level(logging.WARNING):
+        engine = TradingEngine(_config("bad_mode"))
+
+    status = engine.get_engine_status()
     assert engine.selection_mode == "watchlist"
+    assert status["selection_mode_requested"] == "bad_mode"
+    assert status["selection_mode_warning"] is not None
+    assert "Invalid selection_mode 'bad_mode'" in status["selection_mode_warning"]
+    assert "Invalid selection_mode 'bad_mode'" in caplog.text
