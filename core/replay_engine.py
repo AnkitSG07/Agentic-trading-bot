@@ -24,6 +24,8 @@ class ReplayConfig:
     initial_capital: float = 100000
     fee_pct: float = 0.0003
     slippage_pct: float = 0.0005
+    latency_slippage_bps: float = 2.0
+    partial_fill_probability: float = 0.15
     ai_every_n_candles: int = 1
     confidence_threshold: float | None = None
     
@@ -185,12 +187,19 @@ class ReplayEngine:
                     if not s.is_actionable or not signal_candle:
                         continue
                     price = Decimal(str(signal_candle["close"]))
-                    exec_price = price * (Decimal("1") + Decimal(str(cfg.slippage_pct if s.action in (SignalAction.BUY, SignalAction.COVER) else -cfg.slippage_pct)))
+                    dynamic_slippage_pct = _estimate_replay_slippage_pct(signal_candle, cfg)
+                    exec_price = price * (
+                        Decimal("1")
+                        + Decimal(str(dynamic_slippage_pct if s.action in (SignalAction.BUY, SignalAction.COVER) else -dynamic_slippage_pct))
+                    )
                     funds = Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash)
                     check = await self.risk.check_pre_trade(s.symbol, s.action.value, s.quantity, exec_price, s.stop_loss, open_positions, funds)
                     if not check.approved:
                         continue
-                    qty = Decimal(str(check.adjusted_quantity or s.quantity or 1))
+                    requested_qty = Decimal(str(check.adjusted_quantity or s.quantity or 1))
+                    qty = _simulate_partial_fill(requested_qty, idx, ts, s.symbol, cfg)
+                    if qty <= 0:
+                        continue
                     fee = exec_price * qty * Decimal(str(cfg.fee_pct))
                     action = s.action.value
                     fee_remaining = fee
@@ -261,7 +270,21 @@ class ReplayEngine:
                             # SELL without long inventory does nothing.
                             continue
 
-                    trades.append({"run_id": run_id, "timestamp": ts, "symbol": s.symbol, "exchange": cfg.exchange, "action": action, "quantity": int(qty), "price": float(exec_price), "fees": float(fee), "slippage_pct": cfg.slippage_pct, "pnl": float(trade_pnl), "realized": realized, "rationale": s.rationale})
+                    trades.append({
+                        "run_id": run_id,
+                        "timestamp": ts,
+                        "symbol": s.symbol,
+                        "exchange": cfg.exchange,
+                        "action": action,
+                        "quantity": int(qty),
+                        "requested_quantity": int(requested_qty),
+                        "price": float(exec_price),
+                        "fees": float(fee),
+                        "slippage_pct": dynamic_slippage_pct,
+                        "pnl": float(trade_pnl),
+                        "realized": realized,
+                        "rationale": s.rationale,
+                    })
 
                 equity = cash
                 for symbol, p in positions.items():
@@ -361,6 +384,30 @@ def _entry_fee_allocation(position: dict, close_qty: Decimal) -> Decimal:
     ratio = min(Decimal("1"), close_qty / qty)
     return entry_fees * ratio
 
+
+def _estimate_replay_slippage_pct(candle: dict, cfg: ReplayConfig) -> float:
+    base = float(cfg.slippage_pct)
+    open_px = float(candle.get("open") or candle.get("close") or 0.0)
+    high_px = float(candle.get("high") or candle.get("close") or open_px)
+    low_px = float(candle.get("low") or candle.get("close") or open_px)
+    close_px = float(candle.get("close") or open_px or 1.0)
+    volume = max(float(candle.get("volume") or 0.0), 1.0)
+    range_pct = abs(high_px - low_px) / max(close_px, 1.0)
+    liquidity_penalty = min(0.003, 25000.0 / volume)
+    latency_penalty = float(cfg.latency_slippage_bps) / 10000.0
+    open_gap_penalty = abs(close_px - open_px) / max(open_px, 1.0) * 0.05
+    return round(base + (range_pct * 0.10) + liquidity_penalty + latency_penalty + open_gap_penalty, 6)
+
+
+def _simulate_partial_fill(requested_qty: Decimal, idx: int, ts: datetime, symbol: str, cfg: ReplayConfig) -> Decimal:
+    qty_int = int(requested_qty)
+    if qty_int <= 1:
+        return Decimal(str(max(qty_int, 0)))
+    seed = (idx + int(ts.timestamp()) + sum(ord(ch) for ch in symbol)) % 100
+    threshold = int(float(cfg.partial_fill_probability) * 100)
+    if seed >= threshold:
+        return Decimal(str(qty_int))
+    return Decimal(str(max(1, math.floor(qty_int * 0.6))))
 
 def _ema(values: list[float], period: int) -> list[float]:
     if not values:
