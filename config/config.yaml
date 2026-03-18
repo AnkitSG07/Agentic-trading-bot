@@ -103,7 +103,18 @@ engine:
   max_stock_price: 5000
   max_auto_pick_symbols: 10
   min_avg_daily_volume: 100000
-  
+  min_avg_daily_turnover: 5000000
+  session_profiles:
+    opening:
+      selection_multiplier: 0.7
+      risk_cap_multiplier: 0.7
+    mid_session:
+      selection_multiplier: 1.0
+      risk_cap_multiplier: 1.0
+    closing:
+      selection_multiplier: 0.6
+      risk_cap_multiplier: 0.8
+      
 ## ─── RISK MANAGEMENT ────────────────────────────────────────
 risk:
   max_capital_per_trade_pct: 5.0      # Max 5% of capital per trade
