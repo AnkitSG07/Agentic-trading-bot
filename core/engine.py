@@ -124,7 +124,9 @@ class TradingEngine:
         self.tracker = ActivePositionTracker()
 
         engine_cfg = config.get("engine", {})
-        self.selection_mode = self._validated_selection_mode(engine_cfg.get("selection_mode", "watchlist"))
+        self.selection_mode_requested = str(engine_cfg.get("selection_mode", "watchlist") or "watchlist")
+        self.selection_mode_warning = ""
+        self.selection_mode = self._validated_selection_mode(self.selection_mode_requested)
         self.configured_watchlist_symbols = self._normalize_symbols(engine_cfg.get("watchlist_symbols", DEFAULT_WATCHLIST))
         self.min_stock_price = float(engine_cfg.get("min_stock_price", 50) or 50)
         self.max_stock_price = float(engine_cfg.get("max_stock_price", 5000) or 5000)
@@ -193,17 +195,19 @@ class TradingEngine:
                 normalized.append(value)
         return normalized or list(DEFAULT_WATCHLIST)
 
-    @staticmethod
-    def _validated_selection_mode(raw_mode: object) -> str:
+    def _validated_selection_mode(self, raw_mode: object) -> str:
         mode = str(raw_mode or "watchlist").strip().lower()
         if mode not in VALID_SELECTION_MODES:
-            logger.warning("Invalid selection_mode '%s'; falling back to watchlist", raw_mode)
+            self.selection_mode_warning = f"Invalid selection_mode '{raw_mode}'; falling back to watchlist"
+            logger.warning(self.selection_mode_warning)
             return "watchlist"
+        self.selection_mode_warning = ""
         return mode
 
     def apply_runtime_overrides(self, overrides: dict | None = None) -> None:
         overrides = overrides or {}
         if "selection_mode" in overrides:
+            self.selection_mode_requested = str(overrides.get("selection_mode") or "watchlist")
             self.selection_mode = self._validated_selection_mode(overrides.get("selection_mode"))
         if "watchlist_symbols" in overrides:
             self.configured_watchlist_symbols = self._normalize_symbols(overrides.get("watchlist_symbols"))
@@ -232,12 +236,25 @@ class TradingEngine:
                     setattr(self.risk.config, key, value)
                     if key == "max_order_value_absolute":
                         self.agent.max_order_value_absolute = value
+            self._refresh_selection()
 
     def _build_candidate_universe(self) -> list[str]:
         if self.selection_mode == "watchlist":
             return list(self.configured_watchlist_symbols)
-        cache_symbols = [s for s in self._instrument_cache.keys() if s and not s.startswith("NIFTY")]
-        return cache_symbols or list(self.configured_watchlist_symbols)
+
+        candidate_symbols: list[str] = []
+        for source in (
+            self._instrument_cache.keys(),
+            self._ohlcv_frames.keys(),
+            self.configured_watchlist_symbols,
+        ):
+            for symbol in source:
+                normalized = str(symbol or "").strip().upper()
+                if not normalized or normalized.startswith("NIFTY") or normalized in candidate_symbols:
+                    continue
+                candidate_symbols.append(normalized)
+
+        return candidate_symbols or list(self.configured_watchlist_symbols)
 
     def _refresh_selection(self) -> None:
         self._candidate_universe_symbols = self._build_candidate_universe()
@@ -252,7 +269,10 @@ class TradingEngine:
     def get_engine_status(self) -> dict:
         return {
             "selection_mode": self.selection_mode,
+            "selection_mode_requested": self.selection_mode_requested,
+            "selection_mode_warning": self.selection_mode_warning or None,
             "active_symbols": list(self._selected_symbols),
+            "candidate_universe_symbols": list(self._candidate_universe_symbols),
             "ranked_candidates": list(self._latest_ranked_candidates),
             "configured_watchlist_symbols": list(self.configured_watchlist_symbols),
         }
@@ -1081,6 +1101,7 @@ class TradingEngine:
         logger.info(f"✅ OHLCV: {len(self._ohlcv_frames)} symbols | active={len(self._selected_symbols)}")
 
     async def _refresh_ohlcv(self) -> None:
+        previous_selected_symbols = list(self._selected_symbols)
         now = datetime.now(IST)
         from_date = now - timedelta(days=2)
         data_broker = self._select_data_broker("ohlcv")
@@ -1099,6 +1120,9 @@ class TradingEngine:
             except Exception:
                 pass
         self._refresh_selection()
+        if previous_selected_symbols != self._selected_symbols and self._running:
+            logger.info("🔄 Active symbol set changed from %s to %s", previous_selected_symbols, self._selected_symbols)
+            await self._subscribe_market_data()
 
     async def _get_watchlist_indicators(self) -> list[dict]:
         result = []
