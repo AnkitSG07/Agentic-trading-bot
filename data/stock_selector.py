@@ -35,6 +35,42 @@ class StockSelector:
             item["rank"] = idx
         return candidates
 
+    def select_affordable_candidates(
+        self,
+        frames: dict[str, pd.DataFrame],
+        budget_cap: float,
+        max_symbols: int | None = None,
+        symbols: Iterable[str] | None = None,
+        fee_pct: float = 0.0003,
+        slippage_pct: float = 0.0005,
+    ) -> list[dict]:
+        max_items = max_symbols or self.config.max_auto_pick_symbols
+        ranked = self.rank_candidates(frames, symbols=symbols)
+        selected: list[dict] = []
+        allowance_multiplier = 1.0 + max(float(fee_pct), 0.0) + max(float(slippage_pct), 0.0) + 0.002
+
+        for item in ranked:
+            effective_price = float(item["ltp"]) * allowance_multiplier
+            qty = int(float(budget_cap) // effective_price)
+            if qty <= 0:
+                continue
+            estimated_cost = round(qty * effective_price, 2)
+            expected_return_pct = self._expected_return_pct(item)
+            estimated_profit = round(estimated_cost * expected_return_pct / 100.0, 2)
+            selected.append({
+                **item,
+                "estimated_qty": qty,
+                "estimated_cost": estimated_cost,
+                "expected_return_pct": expected_return_pct,
+                "estimated_profit_rupees": estimated_profit,
+                "budget_cap": round(float(budget_cap), 2),
+                "allowance_multiplier": round(allowance_multiplier, 6),
+                "reason": f'{item["reason"]}; est return {expected_return_pct:.2f}% on ₹{estimated_cost:,.2f}',
+            })
+            if len(selected) >= max_items:
+                break
+        return selected
+
     def _score_symbol(self, symbol: str, df: pd.DataFrame | None) -> dict | None:
         if df is None or df.empty or "close" not in df.columns or "volume" not in df.columns or len(df) < 20:
             return None
@@ -90,8 +126,21 @@ class StockSelector:
             "avg_volume_20d": round(avg_volume_20d, 2),
             "avg_turnover_20d": round(avg_turnover_20d, 2),
             "trend_quality": round(trend_quality, 4),
+            "momentum_5": round(momentum_5, 4),
+            "momentum_20": round(momentum_20, 4),
+            "trend_bonus": round(trend_bonus, 4),
             "reason": "; ".join(reasons),
         }
+
+    @staticmethod
+    def _expected_return_pct(item: dict) -> float:
+        raw = (
+            max(float(item.get("momentum_20") or 0.0), -10.0) * 0.18
+            + max(float(item.get("momentum_5") or 0.0), -10.0) * 0.10
+            + max(float(item.get("trend_bonus") or 0.0), -2.0) * 1.35
+            + max(float(item.get("trend_quality") or 0.0), 0.0) * 2.5
+        )
+        return round(max(1.0, min(raw, 12.0)), 2)
 
     @staticmethod
     def _safe_pct_change(current: float, previous: float) -> float:
