@@ -14,10 +14,12 @@ import {
 } from "lucide-react";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const isProduction = window.location.hostname !== "localhost";
-const API_BASE = import.meta.env.VITE_API_BASE ??
-  (isProduction ? "https://agentic-trading-bot-188e.onrender.com" : "http://localhost:8000");
-const WS_URL = import.meta.env.VITE_WS_URL ?? API_BASE.replace(/^http/, "ws") + "/ws";
+const isLocalHostname = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+const configuredApiBase = (import.meta.env.VITE_API_BASE || "").trim();
+const API_BASE = configuredApiBase || (isLocalHostname ? "" : "https://agentic-trading-bot-188e.onrender.com");
+const WS_URL = (import.meta.env.VITE_WS_URL || "").trim() || (API_BASE ? API_BASE.replace(/^http/, "ws") : window.location.origin.replace(/^http/, "ws")) + "/ws";
+const API_BASE_SOURCE = configuredApiBase ? "VITE_API_BASE" : (isLocalHostname ? "local Vite proxy (/api -> http://localhost:8000)" : "production fallback");
+const IS_REMOTE_API = Boolean(API_BASE) && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(API_BASE);
 const REPLAY_POLL_TIMEOUT_SECONDS = Number(import.meta.env.VITE_REPLAY_POLL_TIMEOUT_SECONDS ?? 1800);
 const SIM_SOURCE = "NSE historical candles + AI decision/risk pipeline";
 
@@ -2036,6 +2038,16 @@ export default function TradingDashboard() {
   const { data: brokerPreferenceData, refetch: refetchBrokerPreference } = useAPI("/api/settings/broker-preference", 5000);
 
   useEffect(() => {
+    console.info("[dashboard] API routing", {
+      apiBase: API_BASE || window.location.origin,
+      apiBaseSource: API_BASE_SOURCE,
+      wsUrl: WS_URL,
+      viteApiBase: configuredApiBase || "(unset)",
+      usingRemoteApi: IS_REMOTE_API,
+    });
+  }, []);
+
+  useEffect(() => {
     if (!liveData?.pnl) return;
     setLastUpdate(new Date());
     setEngineRunning(liveData.engine_running || false);
@@ -2400,6 +2412,40 @@ export default function TradingDashboard() {
         </div>
       </header>
 
+      <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px 0" : "12px 20px 0", position: "relative", zIndex: 1 }}>
+        <div style={{
+          background: IS_REMOTE_API ? `${T.amber}10` : `${T.green}10`,
+          border: `1px solid ${IS_REMOTE_API ? T.amber : T.green}45`,
+          borderRadius: 4,
+          padding: isMobile ? "8px 10px" : "10px 12px",
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 10,
+          alignItems: "center",
+          boxShadow: T.shadow,
+          marginBottom: 10,
+        }}>
+          <span style={{ fontSize: 9, letterSpacing: 1.8, textTransform: "uppercase", color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}>
+            API Route Debug
+          </span>
+          <Mono size={11} color={IS_REMOTE_API ? T.amber : T.green}>
+            {API_BASE || `${window.location.origin} (via proxy)`}
+          </Mono>
+          <span style={{ fontSize: 10, color: T.textSub }}>Source: {API_BASE_SOURCE}</span>
+          <span style={{ fontSize: 10, color: T.textSub }}>WS: {WS_URL}</span>
+          {isLocalHostname && !configuredApiBase && (
+            <span style={{ fontSize: 10, color: T.textMuted }}>
+              Local dev defaults to the Vite proxy for `http://localhost:8000`.
+            </span>
+          )}
+          {isLocalHostname && configuredApiBase && IS_REMOTE_API && (
+            <span style={{ fontSize: 10, color: T.amber }}>
+              Warning: local UI is explicitly targeting a remote API via `VITE_API_BASE`.
+            </span>
+          )}
+        </div>
+      </div>
+  
       {/* ── ALERTS ── */}
       <div style={{ maxWidth: 1800, margin: "0 auto", padding: isMobile ? "10px 12px 0" : "12px 20px 0", position: "relative", zIndex: 1 }}>
         {replicationEnabled && replicationStatus === "partial_failure" && (
