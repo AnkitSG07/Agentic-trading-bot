@@ -1901,7 +1901,7 @@ function SimulatorTab({ T, simState, simConfig, setSimConfig, loadSimulation, ba
           {simConfig.selection_mode === "auto" && (
             <div style={{ background: T.accentDim, border: `1px solid ${T.accent}30`, borderLeft: `3px solid ${T.accent}`, borderRadius: 3, padding: "10px 14px", marginBottom: 10 }}>
               <div style={{ fontSize: 11, color: T.text, marginBottom: 4, fontFamily: "'Share Tech Mono', monospace" }}>AI auto-pick mode</div>
-              <div style={{ fontSize: 10, color: T.textMuted }}>Enter a rupee budget and the backend will rank affordable symbols, estimate quantity, cost, and potential profit before replay starts.</div>
+              <div style={{ fontSize: 10, color: T.textMuted }}>Enter a rupee budget and the backend will rank symbols using historical prices from the selected replay period, then estimate quantity, cost, and potential profit before replay starts.</div>
             </div>
           )}
 
