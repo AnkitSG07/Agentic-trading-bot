@@ -1010,6 +1010,24 @@ def _validated_budget_cap(raw_budget: float | None) -> float:
     return budget
 
 
+def _bounded_live_quote_symbols(symbols: list[str]) -> list[str]:
+    engine = get_engine()
+    if not symbols:
+        return []
+
+    configured_cap = getattr(engine, "max_live_quote_symbols", None) if engine else None
+    default_cap = 250
+    cap = int(configured_cap or default_cap)
+    if cap <= 0 or len(symbols) <= cap:
+        return list(symbols)
+    bounded = [str(symbol).strip().upper() for symbol in symbols[:cap] if str(symbol).strip()]
+    logger.warning(
+        "Bounding replay live-quote universe from %s to %s symbols to reduce memory/request pressure.",
+        len(symbols),
+        len(bounded),
+    )
+    return bounded
+
 async def _fetch_universe_quotes(symbols: list[str], exchange: str) -> dict[str, dict]:
     engine = get_engine()
     if not engine or not symbols:
@@ -1125,7 +1143,10 @@ async def _fetch_candidate_history(
 
 async def _resolve_budget_selection(req: ReplaySelectionRequest | ReplayRunCreateRequest) -> dict:
     budget_cap = _validated_budget_cap(getattr(req, "budget_cap", None))
-    symbols = _selector_candidate_universe(getattr(req, "symbols", None))
+    raw_symbols = getattr(req, "symbols", None)
+    symbols = _selector_candidate_universe(raw_symbols)
+    if not raw_symbols:
+        symbols = _bounded_live_quote_symbols(symbols)
     config = _selection_config()
     max_auto_symbols = int(getattr(req, "max_auto_symbols", config.max_auto_pick_symbols) or config.max_auto_pick_symbols)
     fee_pct = float(getattr(req, "fee_pct", 0.0003) or 0.0003)
