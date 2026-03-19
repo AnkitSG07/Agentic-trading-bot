@@ -10,7 +10,7 @@ import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeVar
 from urllib.parse import parse_qs, urlparse
 
 import pyotp
@@ -23,6 +23,8 @@ from brokers.base import (
 
 logger = logging.getLogger("broker.zerodha")
 
+QUOTE_BATCH_SIZE = 100
+T = TypeVar("T")
 
 # ─── TYPE MAPS ──────────────────────────────────────────────────────────────
 
@@ -183,32 +185,70 @@ class ZerodhaBroker(BaseBroker):
 
     # ── Market Data ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _chunked(items: list[T], size: int) -> list[list[T]]:
+        if size <= 0:
+            return [items]
+        return [items[i:i + size] for i in range(0, len(items), size)]
+
+    @staticmethod
+    def _is_edge_block_response(error: Exception) -> bool:
+        message = str(error or "").lower()
+        return (
+            "unknown content-type" in message
+            and "text/html" in message
+        ) or "just a moment" in message or "enable javascript and cookies to continue" in message
+
     async def get_quote(self, instruments: list[Instrument]) -> dict[str, Quote]:
         """Fetch LTP + full market depth for instruments."""
         try:
-            kite_symbols = [
-                f"{KITE_EXCHANGE_MAP[inst.exchange]}:{inst.symbol}"
-                for inst in instruments
-            ]
-            raw = await asyncio.to_thread(self.kite.quote, kite_symbols)
             quotes = {}
-            for inst in instruments:
-                key = f"{KITE_EXCHANGE_MAP[inst.exchange]}:{inst.symbol}"
-                if key in raw:
-                    d = raw[key]
-                    ohlc = d.get("ohlc", {})
-                    quotes[inst.symbol] = Quote(
-                        instrument=inst,
-                        ltp=Decimal(str(d["last_price"])),
-                        open=Decimal(str(ohlc.get("open", 0))),
-                        high=Decimal(str(ohlc.get("high", 0))),
-                        low=Decimal(str(ohlc.get("low", 0))),
-                        close=Decimal(str(ohlc.get("close", 0))),
-                        volume=d.get("volume", 0),
-                        oi=d.get("oi", 0),
-                        bid=Decimal(str(d.get("depth", {}).get("buy", [{}])[0].get("price", 0))),
-                        ask=Decimal(str(d.get("depth", {}).get("sell", [{}])[0].get("price", 0))),
-                    )
+            instrument_batches = self._chunked(instruments, QUOTE_BATCH_SIZE)
+            if len(instrument_batches) > 1:
+                logger.info(
+                    "Fetching Zerodha quotes in %s batches (batch_size=%s total=%s)",
+                    len(instrument_batches),
+                    QUOTE_BATCH_SIZE,
+                    len(instruments),
+                )
+
+            for batch_index, batch in enumerate(instrument_batches, start=1):
+                kite_symbols = [
+                    f"{KITE_EXCHANGE_MAP[inst.exchange]}:{inst.symbol}"
+                    for inst in batch
+                ]
+                try:
+                    raw = await asyncio.to_thread(self.kite.quote, kite_symbols)
+                except Exception as batch_error:
+                    if self._is_edge_block_response(batch_error):
+                        logger.error(
+                            "Zerodha quote request blocked by upstream edge protection "
+                            "(batch=%s/%s symbols=%s). Returning partial quotes. Error: %s",
+                            batch_index,
+                            len(instrument_batches),
+                            len(batch),
+                            batch_error,
+                        )
+                        break
+                    raise
+
+                for inst in batch:
+                    key = f"{KITE_EXCHANGE_MAP[inst.exchange]}:{inst.symbol}"
+                    if key in raw:
+                        d = raw[key]
+                        ohlc = d.get("ohlc", {})
+                        quotes[inst.symbol] = Quote(
+                            instrument=inst,
+                            ltp=Decimal(str(d["last_price"])),
+                            open=Decimal(str(ohlc.get("open", 0))),
+                            high=Decimal(str(ohlc.get("high", 0))),
+                            low=Decimal(str(ohlc.get("low", 0))),
+                            close=Decimal(str(ohlc.get("close", 0))),
+                            volume=d.get("volume", 0),
+                            oi=d.get("oi", 0),
+                            bid=Decimal(str(d.get("depth", {}).get("buy", [{}])[0].get("price", 0))),
+                            ask=Decimal(str(d.get("depth", {}).get("sell", [{}])[0].get("price", 0))),
+                        )
             return quotes
         except Exception as e:
             logger.error(f"get_quote error: {e}")
