@@ -149,3 +149,13 @@ def test_legacy_market_namespace_still_drives_selection_config():
     assert engine.max_stock_price == 2000
     assert engine.max_auto_pick_symbols == 3
     assert engine.min_avg_daily_volume == 2000
+
+
+def test_auto_pick_preload_subset_is_bounded_and_keeps_watchlist_first():
+    engine = TradingEngine(_config("auto_pick"))
+    engine.max_preload_ohlcv_symbols = 4
+    engine.configured_watchlist_symbols = ["AAA", "BBB"]
+    engine._selected_symbols = ["CCC"]
+    engine._candidate_universe_symbols = ["DDD", "EEE", "FFF", "GGG"]
+
+    assert engine._preload_symbol_subset() == ["AAA", "BBB", "CCC", "DDD"]
