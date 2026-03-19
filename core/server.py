@@ -1121,6 +1121,59 @@ def _frames_from_candles(candles: list[dict]) -> dict[str, pd.DataFrame]:
     return {symbol: pd.DataFrame(rows) for symbol, rows in frames.items()}
 
 
+def _historical_affordable_candidates(
+    frames: dict[str, pd.DataFrame],
+    symbols: list[str],
+    budget_cap: float,
+    fee_pct: float,
+    slippage_pct: float,
+    config: SelectorConfig,
+    max_auto_symbols: int,
+) -> tuple[list[dict], list[dict]]:
+    selector = StockSelector(SelectorConfig(
+        min_stock_price=config.min_stock_price,
+        max_stock_price=config.max_stock_price,
+        min_avg_daily_volume=config.min_avg_daily_volume,
+        min_avg_daily_turnover=config.min_avg_daily_turnover,
+        max_auto_pick_symbols=max_auto_symbols,
+    ))
+    ranked_selection = selector.select_affordable_candidates(
+        frames,
+        budget_cap=budget_cap,
+        max_symbols=max_auto_symbols,
+        symbols=symbols,
+        fee_pct=fee_pct,
+        slippage_pct=slippage_pct,
+    )
+    affordable: list[dict] = []
+    for position, symbol in enumerate(symbols):
+        frame = frames.get(symbol)
+        if frame is None or frame.empty or "close" not in frame.columns:
+            continue
+        close_series = pd.to_numeric(frame["close"], errors="coerce").dropna()
+        if close_series.empty:
+            continue
+        reference_close = float(close_series.iloc[-1])
+        allowance_multiplier = 1.0 + max(float(fee_pct), 0.0) + max(float(slippage_pct), 0.0) + 0.002
+        qty = int(float(budget_cap) // (reference_close * allowance_multiplier))
+        if qty <= 0:
+            continue
+        estimated_cost = round(qty * reference_close * allowance_multiplier, 2)
+        affordable.append({
+            "symbol": symbol,
+            "ltp": round(reference_close, 2),
+            "estimated_qty": qty,
+            "estimated_cost": estimated_cost,
+            "budget_cap": round(float(budget_cap), 2),
+            "allowance_multiplier": round(allowance_multiplier, 6),
+            "reason": f"Affordable from historical close in requested replay window @ ₹{reference_close:,.2f}",
+            "historical_price_available": True,
+            "historical_universe_rank": position + 1,
+            "price_source": "historical_close",
+        })
+    affordable.sort(key=lambda item: (item["ltp"], item["symbol"]))
+    return affordable, ranked_selection
+
 async def _fetch_candidate_history(
     candidate_symbols: list[str],
     exchange: str,
@@ -1152,13 +1205,7 @@ async def _resolve_budget_selection(req: ReplaySelectionRequest | ReplayRunCreat
     fee_pct = float(getattr(req, "fee_pct", 0.0003) or 0.0003)
     slippage_pct = float(getattr(req, "slippage_pct", 0.0005) or 0.0005)
 
-    live_quotes = await _fetch_universe_quotes(symbols, req.exchange)
-    affordable_live = _live_affordable_candidates(symbols, live_quotes, budget_cap, fee_pct, slippage_pct, config)
-    if not affordable_live:
-        raise HTTPException(400, f"No affordable instruments found from live universe data within budget ₹{budget_cap:,.2f}.")
-
-    candidate_limit = max(max_auto_symbols, min(len(affordable_live), max(max_auto_symbols * 4, 25)))
-    candidate_subset = [item["symbol"] for item in affordable_live[:candidate_limit]]
+    candidate_subset = list(symbols)
     candles = await _fetch_candidate_history(
         candidate_subset,
         req.exchange,
@@ -1168,32 +1215,32 @@ async def _resolve_budget_selection(req: ReplaySelectionRequest | ReplayRunCreat
     )
     data_frames = _frames_from_candles(candles)
 
-    selector = StockSelector(SelectorConfig(
-        min_stock_price=config.min_stock_price,
-        max_stock_price=config.max_stock_price,
-        min_avg_daily_volume=config.min_avg_daily_volume,
-        min_avg_daily_turnover=config.min_avg_daily_turnover,
-        max_auto_pick_symbols=max_auto_symbols,
-    ))
-    ranked_selection = selector.select_affordable_candidates(
+    affordable_historical, ranked_selection = _historical_affordable_candidates(
         data_frames,
-        budget_cap=budget_cap,
-        max_symbols=max_auto_symbols,
-        symbols=candidate_subset,
-        fee_pct=fee_pct,
-        slippage_pct=slippage_pct,
+        candidate_subset,
+        budget_cap,
+        fee_pct,
+        slippage_pct,
+        config,
+        max_auto_symbols,
     )
+    if not affordable_historical:
+        raise HTTPException(
+            400,
+            f"No affordable instruments found from historical prices within selected period and budget ₹{budget_cap:,.2f}.",
+        )
 
-    selected = ranked_selection or affordable_live[:max_auto_symbols]
+    selected = ranked_selection or affordable_historical[:max_auto_symbols]
     selected_symbols = [item["symbol"] for item in selected]
     historical_coverage = sorted(data_frames.keys())
 
     recommendations = []
-    live_by_symbol = {item["symbol"]: item for item in affordable_live}
+    historical_by_symbol = {item["symbol"]: item for item in affordable_historical}
     for rank, item in enumerate(selected, start=1):
-        merged = {**live_by_symbol.get(item["symbol"], {}), **item}
+        merged = {**historical_by_symbol.get(item["symbol"], {}), **item}
         merged["rank"] = rank
-        merged["selection_source"] = "historical_ranking" if item["symbol"] in historical_coverage and ranked_selection else "live_universe"
+        merged["selection_source"] = "historical_ranking" if item["symbol"] in historical_coverage and ranked_selection else "historical_window"
+        merged.setdefault("price_source", "historical_close")
         recommendations.append(merged)
 
     return {
