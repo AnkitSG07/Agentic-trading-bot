@@ -1199,6 +1199,11 @@ async def backfill_history(req: HistoricalBackfillRequest):
     from datetime import datetime, timedelta
     from data.historical_data import BackfillRequest, backfill_historical_data
 
+    logger.info(
+        "Historical backfill API request symbols=%s exchange=%s timeframe=%s start_date=%s end_date=%s request_count=%s",
+        req.symbols, req.exchange, req.timeframe, req.start_date, req.end_date, len(req.symbols),
+    )
+
     start = (req.start_date or (datetime.utcnow() - timedelta(days=365))).date()
     end = (req.end_date or datetime.utcnow()).date()
     jobs = [BackfillRequest(symbol=s.upper(), exchange=req.exchange, timeframe=req.timeframe, start_date=start, end_date=end) for s in req.symbols]
