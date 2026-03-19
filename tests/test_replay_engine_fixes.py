@@ -143,6 +143,14 @@ def test_selector_candidate_universe_falls_back_to_default_watchlist(monkeypatch
     assert _selector_candidate_universe([]) == ["AAA", "BBB", "CCC"]
 
 
+def test_bounded_live_quote_symbols_caps_auto_derived_universe(monkeypatch):
+    engine = types.SimpleNamespace(max_live_quote_symbols=3)
+    monkeypatch.setattr("core.server.get_engine", lambda: engine)
+
+    from core.server import _bounded_live_quote_symbols
+
+    assert _bounded_live_quote_symbols(["AAA", "BBB", "CCC", "DDD", "EEE"]) == ["AAA", "BBB", "CCC"]
+
 @pytest.mark.asyncio
 async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_universe(monkeypatch):
     async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
