@@ -152,6 +152,14 @@ class TradingEngine:
         self.min_stock_price = float(engine_cfg.get("min_stock_price", 50) or 50)
         self.max_stock_price = float(engine_cfg.get("max_stock_price", 5000) or 5000)
         self.max_auto_pick_symbols = int(engine_cfg.get("max_auto_pick_symbols", 10) or 10)
+        self.max_live_quote_symbols = int(
+            engine_cfg.get("max_live_quote_symbols", max(self.max_auto_pick_symbols * 25, 250))
+            or max(self.max_auto_pick_symbols * 25, 250)
+        )
+        self.max_preload_ohlcv_symbols = int(
+            engine_cfg.get("max_preload_ohlcv_symbols", max(self.max_auto_pick_symbols * 10, 50))
+            or max(self.max_auto_pick_symbols * 10, 50)
+        )
         self.min_avg_daily_volume = float(engine_cfg.get("min_avg_daily_volume", 100000) or 100000)
         self.min_avg_daily_turnover = float(engine_cfg.get("min_avg_daily_turnover", 5000000) or 5000000)
         self.session_profiles = {**DEFAULT_SESSION_PROFILES, **config.get("engine", {}).get("session_profiles", {})}
@@ -339,6 +347,27 @@ class TradingEngine:
             self._selected_symbols = selected or list(self.configured_watchlist_symbols)
         else:
             self._selected_symbols = list(self.configured_watchlist_symbols)
+
+    def _preload_symbol_subset(self) -> list[str]:
+        candidates = self._candidate_universe_symbols or list(self.configured_watchlist_symbols)
+        if self.selection_mode != "auto_pick":
+            return list(candidates)
+
+        max_symbols = max(1, int(self.max_preload_ohlcv_symbols or 0))
+        preload_symbols: list[str] = []
+        for source in (
+            self.configured_watchlist_symbols,
+            self._selected_symbols,
+            candidates,
+        ):
+            for symbol in source:
+                normalized = str(symbol or "").strip().upper()
+                if not normalized or normalized in preload_symbols:
+                    continue
+                preload_symbols.append(normalized)
+                if len(preload_symbols) >= max_symbols:
+                    return preload_symbols
+        return preload_symbols
 
     def get_engine_status(self) -> dict:
         return {
@@ -1219,7 +1248,18 @@ class TradingEngine:
         now = datetime.now(IST)
         from_date = now - timedelta(days=120)
         data_broker = self._select_data_broker("ohlcv")
-        for symbol in self._candidate_universe_symbols:
+        preload_symbols = self._preload_symbol_subset()
+        if self.selection_mode == "auto_pick" and len(preload_symbols) < len(self._candidate_universe_symbols):
+            logger.info(
+                "Preloading bounded OHLCV subset for auto-pick (%s/%s symbols)",
+                len(preload_symbols),
+                len(self._candidate_universe_symbols),
+            )
+        retained_symbols = set(preload_symbols)
+        for symbol in list(self._ohlcv_frames.keys()):
+            if symbol not in retained_symbols:
+                self._ohlcv_frames.pop(symbol, None)
+        for symbol in preload_symbols:
             try:
                 inst = await self._get_instrument_for_broker(symbol, data_broker)
                 candles = await data_broker.get_ohlcv(inst, "day", from_date, now)
