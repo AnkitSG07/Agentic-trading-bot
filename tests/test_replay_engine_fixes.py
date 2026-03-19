@@ -152,7 +152,7 @@ def test_bounded_live_quote_symbols_caps_auto_derived_universe(monkeypatch):
     assert _bounded_live_quote_symbols(["AAA", "BBB", "CCC", "DDD", "EEE"]) == ["AAA", "BBB", "CCC"]
 
 @pytest.mark.asyncio
-async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_universe(monkeypatch):
+async def test_budget_selection_can_pick_low_priced_symbols_from_historical_window(monkeypatch):
     async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
         rows = []
         for symbol, base in [("CHEAP", 48), ("MIDCAP", 96), ("EXPENSIVE", 2500)]:
@@ -176,15 +176,6 @@ async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_un
         {"fetch_window": staticmethod(fake_fetch_window)},
     )
 
-    class _Quote:
-        def __init__(self, ltp):
-            self.ltp = ltp
-
-    class _Broker:
-        async def get_quote(self, instruments):
-            prices = {"CHEAP": 48, "MIDCAP": 96, "EXPENSIVE": 2500, "NOHISTORY": 105}
-            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
-
     class _Instrument:
         def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
             self.symbol = symbol
@@ -192,7 +183,6 @@ async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_un
             self.instrument_type = instrument_type
 
     engine = types.SimpleNamespace(
-        primary_broker=_Broker(),
         _nse_equity_symbols_cache=["CHEAP", "MIDCAP", "EXPENSIVE", "NOHISTORY"],
         _instrument_cache={symbol: _Instrument(symbol) for symbol in ["CHEAP", "MIDCAP", "EXPENSIVE", "NOHISTORY"]},
         min_stock_price=10,
@@ -217,6 +207,7 @@ async def test_budget_selection_can_pick_low_priced_symbols_from_broader_dhan_un
     assert result["selected_symbols"] == ["CHEAP", "MIDCAP"]
     assert all(item["symbol"] != "NOHISTORY" for item in result["recommendations"])
     assert all(item["estimated_cost"] <= 1000 for item in result["recommendations"])
+    assert all(item["price_source"] == "historical_close" for item in result["recommendations"])
 
 
 
@@ -240,14 +231,28 @@ async def test_budget_selection_rejects_invalid_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_budget_selection_distinguishes_no_affordable_live_universe(monkeypatch):
-    class _Quote:
-        def __init__(self, ltp):
-            self.ltp = ltp
+async def test_budget_selection_distinguishes_no_affordable_historical_window(monkeypatch):
+    async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
+        rows = []
+        for i in range(25):
+            rows.append({
+                "symbol": "EXPENSIVE",
+                "exchange": exchange,
+                "timeframe": timeframe,
+                "timestamp": f"2024-01-{i+1:02d}T00:00:00",
+                "open": 5000 + i,
+                "high": 5000 + i,
+                "low": 5000 + i,
+                "close": 5000 + i,
+                "volume": 200000,
+            })
+        return rows
 
-    class _Broker:
-        async def get_quote(self, instruments):
-            return {inst.symbol: _Quote(ltp=5000) for inst in instruments}
+    sys.modules["database.repository"].HistoricalCandleRepository = type(
+        "_ExpensiveOnlyHistoricalRepo",
+        (),
+        {"fetch_window": staticmethod(fake_fetch_window)},
+    )
 
     class _Instrument:
         def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
@@ -256,7 +261,6 @@ async def test_budget_selection_distinguishes_no_affordable_live_universe(monkey
             self.instrument_type = instrument_type
 
     engine = types.SimpleNamespace(
-        primary_broker=_Broker(),
         _instrument_cache={"EXPENSIVE": _Instrument("EXPENSIVE")},
         _nse_equity_symbols_cache=["EXPENSIVE"],
         min_stock_price=10,
@@ -279,25 +283,30 @@ async def test_budget_selection_distinguishes_no_affordable_live_universe(monkey
         ))
 
     assert exc_info.value.status_code == 400
-    assert "No affordable instruments found from live universe data" in exc_info.value.detail
+    assert "No affordable instruments found from historical prices within selected period" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
-async def test_budget_selection_can_pick_from_live_universe_before_backfill(monkeypatch):
+async def test_budget_selection_uses_historical_window_even_when_live_quotes_are_unavailable(monkeypatch):
     fetch_calls = []
 
     async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
         fetch_calls.append(list(symbols))
-        return []
-
-    class _Quote:
-        def __init__(self, ltp):
-            self.ltp = ltp
-
-    class _Broker:
-        async def get_quote(self, instruments):
-            prices = {"AFFORD": 95, "MID": 210, "EXPENSIVE": 5000}
-            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
+        rows = []
+        for symbol, base in [("AFFORD", 95), ("MID", 210), ("EXPENSIVE", 5000)]:
+            for i in range(25):
+                rows.append({
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "timeframe": timeframe,
+                    "timestamp": f"2024-01-{i+1:02d}T00:00:00",
+                    "open": base + i,
+                    "high": base + i,
+                    "low": base + i,
+                    "close": base + i,
+                    "volume": 250000,
+                })
+        return rows
 
     class _Instrument:
         def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
@@ -312,7 +321,6 @@ async def test_budget_selection_can_pick_from_live_universe_before_backfill(monk
     )
 
     engine = types.SimpleNamespace(
-        primary_broker=_Broker(),
         _instrument_cache={
             "AFFORD": _Instrument("AFFORD"),
             "MID": _Instrument("MID"),
@@ -337,10 +345,10 @@ async def test_budget_selection_can_pick_from_live_universe_before_backfill(monk
         timeframe="day",
     ))
 
-    assert fetch_calls == [["AFFORD", "MID"]]
+    assert fetch_calls == [["AFFORD", "MID", "EXPENSIVE"]]
     assert result["selected_symbols"] == ["AFFORD", "MID"]
-    assert result["historical_candidate_symbols"] == []
-    assert all(item["selection_source"] == "live_universe" for item in result["recommendations"])
+    assert result["historical_candidate_symbols"] == ["AFFORD", "EXPENSIVE", "MID"]
+    assert all(item["selection_source"] == "historical_ranking" for item in result["recommendations"])
 
 
 def test_backfill_and_run_flow_succeeds_when_symbols_are_selected_before_replay_backfill(monkeypatch):
@@ -369,15 +377,6 @@ def test_backfill_and_run_flow_succeeds_when_symbols_are_selected_before_replay_
     async def fake_create_and_start_replay(config, payload):
         return {"run_id": "run-fresh-1", "status": "queued", "payload": payload}
 
-    class _Quote:
-        def __init__(self, ltp):
-            self.ltp = ltp
-
-    class _Broker:
-        async def get_quote(self, instruments):
-            prices = {"AFFORD": 95, "MID": 210, "EXPENSIVE": 5000}
-            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
-
     class _Instrument:
         def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
             self.symbol = symbol
@@ -397,7 +396,6 @@ def test_backfill_and_run_flow_succeeds_when_symbols_are_selected_before_replay_
     sys.modules["core.replay_engine"] = fake_replay_engine
 
     engine = types.SimpleNamespace(
-        primary_broker=_Broker(),
         _instrument_cache={
             "AFFORD": _Instrument("AFFORD"),
             "MID": _Instrument("MID"),
@@ -460,15 +458,6 @@ def test_replay_run_reports_missing_history_after_backfill(monkeypatch):
     fake_replay_engine.create_and_start_replay = fake_create_and_start_replay
     sys.modules["core.replay_engine"] = fake_replay_engine
 
-    class _Quote:
-        def __init__(self, ltp):
-            self.ltp = ltp
-
-    class _Broker:
-        async def get_quote(self, instruments):
-            prices = {"AAA": 90, "BBB": 130, "CCC": 1200}
-            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
-
     class _Instrument:
         def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
             self.symbol = symbol
@@ -476,7 +465,6 @@ def test_replay_run_reports_missing_history_after_backfill(monkeypatch):
             self.instrument_type = instrument_type
 
     engine = types.SimpleNamespace(
-        primary_broker=_Broker(),
         _instrument_cache={symbol: _Instrument(symbol) for symbol in ["AAA", "BBB", "CCC"]},
         _nse_equity_symbols_cache=["AAA", "BBB", "CCC"],
         min_stock_price=10,
@@ -532,15 +520,6 @@ def test_replay_route_supports_auto_mode_selection(monkeypatch):
     fake_replay_engine.create_and_start_replay = fake_create_and_start_replay
     sys.modules["core.replay_engine"] = fake_replay_engine
 
-    class _Quote:
-        def __init__(self, ltp):
-            self.ltp = ltp
-
-    class _Broker:
-        async def get_quote(self, instruments):
-            prices = {"AAA": 90, "BBB": 130, "CCC": 1200}
-            return {inst.symbol: _Quote(ltp=prices[inst.symbol]) for inst in instruments if inst.symbol in prices}
-
     class _Instrument:
         def __init__(self, symbol, exchange="NSE", instrument_type="EQ"):
             self.symbol = symbol
@@ -548,7 +527,6 @@ def test_replay_route_supports_auto_mode_selection(monkeypatch):
             self.instrument_type = instrument_type
 
     engine = types.SimpleNamespace(
-        primary_broker=_Broker(),
         _instrument_cache={symbol: _Instrument(symbol) for symbol in ["AAA", "BBB", "CCC"]},
         _nse_equity_symbols_cache=["AAA", "BBB", "CCC"],
         min_stock_price=10,
