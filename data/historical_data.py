@@ -413,7 +413,13 @@ class NSEHistoricalFetcher:
     def fetch_daily_with_meta(self, symbol: str, start: date, end: date) -> tuple[list[dict], FetchMeta]:
         errors: dict[str, str] = {}
 
+        logger.info(
+            "Historical provider waterfall start symbol=%s start_date=%s end_date=%s allow_fallback=%s max_attempts=%s",
+            symbol.upper(), start, end, self._allow_fallback, self._max_attempts,
+        )
+
         # 1. NSE — best quality but blocked on cloud datacenter IPs
+        logger.info("Historical provider attempt symbol=%s provider=nse", symbol.upper())
         try:
             candles, attempts = self._fetch_nse_with_retries(symbol=symbol, start=start, end=end)
             return candles, FetchMeta(provider="nse", attempts=attempts, used_fallback=False)
@@ -425,6 +431,7 @@ class NSEHistoricalFetcher:
             raise RuntimeError(f"provider=nse error={errors['nse']}")
 
         # 2. yfinance — works locally; also blocked on datacenter IPs
+        logger.info("Historical provider attempt symbol=%s provider=yfinance", symbol.upper())
         try:
             candles = self._fetch_from_yfinance(symbol=symbol, start=start, end=end)
             logger.warning("Fallback to yfinance symbol=%s", symbol.upper())
@@ -434,6 +441,7 @@ class NSEHistoricalFetcher:
             logger.warning("Historical fallback failed symbol=%s provider=yfinance cause=%s", symbol.upper(), exc)
 
         # 3. Yahoo raw HTTP — same IP restrictions as yfinance
+        logger.info("Historical provider attempt symbol=%s provider=yahoo_raw", symbol.upper())
         try:
             candles = self._fetch_from_yahoo_raw(symbol=symbol, start=start, end=end)
             if candles:
@@ -445,6 +453,7 @@ class NSEHistoricalFetcher:
             logger.warning("Historical fallback failed symbol=%s provider=yahoo_raw cause=%s", symbol.upper(), exc)
 
         # 4. Stooq — free CSV, no auth, usually passes cloud IP checks
+        logger.info("Historical provider attempt symbol=%s provider=stooq", symbol.upper())
         try:
             candles = self._fetch_from_stooq(symbol=symbol, start=start, end=end)
             logger.warning("Fallback to stooq symbol=%s", symbol.upper())
@@ -454,6 +463,7 @@ class NSEHistoricalFetcher:
             logger.warning("Historical fallback failed symbol=%s provider=stooq cause=%s", symbol.upper(), exc)
 
         # 5. Alpha Vantage — reliable on cloud with free API key
+        logger.info("Historical provider attempt symbol=%s provider=alphavantage", symbol.upper())
         try:
             candles = self._fetch_from_alphavantage(symbol=symbol, start=start, end=end)
             logger.warning("Fallback to alphavantage symbol=%s", symbol.upper())
@@ -487,6 +497,8 @@ class NSEHistoricalFetcher:
 async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> dict:
     from database.repository import HistoricalCandleRepository
 
+    requests_list = list(requests_iter)
+  
     cfg = load_config().get("historical", {})
     fetcher = NSEHistoricalFetcher(
         allow_fallback=bool(cfg.get("allow_fallback", True)),
@@ -504,13 +516,27 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
         "symbols_fallback_used": 0,
     }
 
-    for req in requests_iter:
+    logger.info(
+        "Historical backfill started symbols=%s exchange=%s timeframe=%s start_date=%s end_date=%s request_count=%s",
+        [req.symbol.upper() for req in requests_list],
+        sorted({req.exchange for req in requests_list}) if requests_list else [],
+        sorted({req.timeframe for req in requests_list}) if requests_list else [],
+        min((req.start_date for req in requests_list), default=None),
+        max((req.end_date for req in requests_list), default=None),
+        len(requests_list),
+    )
+
+    for req in requests_list:
         metrics["symbols_total"] += 1
         if req.timeframe != "day":
             metrics["symbols_failed"] += 1
             failures.append({"symbol": req.symbol, "error": "only day timeframe currently supported"})
             continue
         try:
+            logger.info(
+                "Historical backfill symbol start symbol=%s exchange=%s timeframe=%s start_date=%s end_date=%s",
+                req.symbol.upper(), req.exchange, req.timeframe, req.start_date, req.end_date,
+            )
             candles, meta = await asyncio.to_thread(
                 fetcher.fetch_daily_with_meta, req.symbol, req.start_date, req.end_date
             )
@@ -523,8 +549,16 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
                 metrics["symbols_retried"] += 1
             if meta.used_fallback:
                 metrics["symbols_fallback_used"] += 1
+            logger.info(
+                "Historical backfill symbol complete symbol=%s status=success candles=%s provider=%s attempts=%s used_fallback=%s",
+                req.symbol.upper(), len(candles), meta.provider, meta.attempts, meta.used_fallback,
+            )
         except Exception as exc:
             logger.warning("Backfill failed symbol=%s error=%s", req.symbol, exc)
+            logger.info(
+                "Historical backfill symbol complete symbol=%s status=failed error=%s",
+                req.symbol.upper(), exc,
+            )
             metrics["symbols_failed"] += 1
             failures.append({"symbol": req.symbol, "error": str(exc)})
 
