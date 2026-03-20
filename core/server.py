@@ -1275,7 +1275,21 @@ async def backfill_history(req: HistoricalBackfillRequest):
     start = (req.start_date or (datetime.utcnow() - timedelta(days=365))).date()
     end = (req.end_date or datetime.utcnow()).date()
     jobs = [BackfillRequest(symbol=s.upper(), exchange=req.exchange, timeframe=req.timeframe, start_date=start, end_date=end) for s in req.symbols]
-    return await backfill_historical_data(jobs)
+    result = await backfill_historical_data(jobs)
+
+    # When some symbols succeed and some fail, treat it as a partial success.
+    # Only report `failures` when ALL symbols failed (inserted == 0).
+    # Move partial failures to `warnings` so the frontend doesn't block on them.
+    inserted = result.get("inserted", 0)
+    raw_failures = result.get("failures", [])
+    if inserted > 0 and raw_failures:
+        result["warnings"] = raw_failures
+        result["failures"] = []
+        logger.info(
+            "Backfill partial success: %s candles inserted, %s symbols failed (moved to warnings)",
+            inserted, len(raw_failures),
+        )
+    return result
 
 
 
