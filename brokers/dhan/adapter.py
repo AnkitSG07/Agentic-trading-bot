@@ -167,7 +167,7 @@ class DhanBroker(BaseBroker):
     async def _fetch_raw_ohlcv(
         self, instrument: Instrument, interval: str,
         from_date: datetime, to_date: datetime
-    ) -> list[dict]:
+    ) -> dict:
         dhan_interval = DHAN_INTERVAL_MAP.get(interval)
         if dhan_interval is None:
             raise ValueError(
@@ -210,7 +210,6 @@ class DhanBroker(BaseBroker):
                 to_date=to_date.strftime("%Y-%m-%d"),
             )
 
-        if resp.get("status") != "success":
             logger.warning(
                 "Dhan OHLCV request failed | symbol=%s requested_interval=%s translated_interval=%s response=%s",
                 instrument.symbol,
@@ -218,23 +217,57 @@ class DhanBroker(BaseBroker):
                 dhan_interval,
                 resp,
             )
-            return []
+            return {}
 
-        return resp.get("data", [])
+        data = resp.get("data", {})
+        if isinstance(data, list):
+            return {}  # Sometimes empty response is []
+        return data
 
     @staticmethod
-    def _parse_ohlcv_rows(rows: list[dict]) -> list[OHLCV]:
-        return [
-            OHLCV(
-                timestamp=datetime.strptime(c["start_Time"], "%Y-%m-%d %H:%M:%S"),
-                open=Decimal(str(c["open"])),
-                high=Decimal(str(c["high"])),
-                low=Decimal(str(c["low"])),
-                close=Decimal(str(c["close"])),
-                volume=int(c.get("volume", 0)),
-            )
-            for c in rows
-        ]
+    def _parse_ohlcv_rows(rows: dict) -> list[OHLCV]:
+        if not rows or not isinstance(rows, dict) or "start_Time" not in rows:
+            return []
+
+        starts = rows.get("start_Time", [])
+        opens = rows.get("open", [])
+        highs = rows.get("high", [])
+        lows = rows.get("low", [])
+        closes = rows.get("close", [])
+        volumes = rows.get("volume", [])
+
+        parsed = []
+        for i in range(len(starts)):
+            try:
+                t_val = starts[i]
+                if isinstance(t_val, (int, float)):
+                    dt = datetime.fromtimestamp(float(t_val))
+                elif isinstance(t_val, str):
+                    t_val = t_val.strip()
+                    if "-" in t_val and ":" in t_val:
+                        dt = datetime.strptime(t_val, "%Y-%m-%d %H:%M:%S")
+                    elif "-" in t_val:
+                        dt = datetime.strptime(t_val, "%Y-%m-%d")
+                    else:
+                        dt = datetime.fromisoformat(t_val)
+                else:
+                    continue
+
+                parsed.append(
+                    OHLCV(
+                        timestamp=dt,
+                        open=Decimal(str(opens[i])),
+                        high=Decimal(str(highs[i])),
+                        low=Decimal(str(lows[i])),
+                        close=Decimal(str(closes[i])),
+                        volume=int(volumes[i]) if i < len(volumes) else 0,
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Dhan parse error at index {i}: {e}")
+                continue
+
+        return parsed
 
     @staticmethod
     def _aggregate_ohlcv(candles: list[OHLCV], bucket_size: timedelta) -> list[OHLCV]:
