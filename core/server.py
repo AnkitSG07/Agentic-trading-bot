@@ -1279,6 +1279,14 @@ async def backfill_history(req: HistoricalBackfillRequest):
 
 
 
+@app.get("/api/replay/candidate-universe")
+async def replay_candidate_universe():
+    """Return the candidate universe symbols for auto-pick mode."""
+    symbols = _selector_candidate_universe(None)
+    symbols = _bounded_live_quote_symbols(symbols)
+    return {"symbols": symbols}
+
+
 @app.post("/api/replay/select-symbols")
 async def select_replay_symbols(req: ReplaySelectionRequest):
     return await _resolve_budget_selection(req)
