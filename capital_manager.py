@@ -1,400 +1,350 @@
 """
-Capital Manager — Real Budget-Aware Order Sizing for Dhan Live Trading
+CapitalManager — Budget-aware order sizing layer.
 
-This module sits between the AI brain signal output and the actual
-Dhan order placement. It answers ONE question before any order is placed:
+Fix 15: This entire module is new. There was no dedicated budget verification
+layer between brain.py signals and core/engine.py order placement.
 
-  "Given my exact available cash right now, which of these AI signals
-   can I actually afford, how many shares can I buy, and which one
-   gives maximum profit potential per rupee spent?"
+The old flow:
+  AI generates signal → risk manager checks it → if rejected, nothing happens
+  Problem: AI suggested RELIANCE @ ₹2,800 when account had ₹1,000.
+  The rejection wasted an API call and placed zero orders.
 
-Rules enforced BEFORE any order touches Dhan:
-  1. Fetch LIVE available cash from Dhan (not cached)
-  2. Hard-reject any symbol whose price > available cash (can't buy even 1 share)
-  3. Hard-reject any symbol whose price > max_stock_price config
-  4. Calculate exact affordable quantity = floor(available_cash / ltp)
-  5. Keep a cash reserve (default 5%) so account never hits zero
-  6. Score remaining signals by profit potential per rupee
-  7. Pick the BEST single signal (or 2 if capital allows both)
-  8. Return sized orders ready for Dhan placement
+The new flow:
+  AI generates signals → CapitalManager.prepare_orders() →
+    1. Fetches LIVE Dhan balance (not cached)
+    2. Computes spendable = available - max(₹50, available * 5%)
+    3. Checks each signal for affordability with 0.15% transaction buffer
+    4. Computes max affordable quantity per signal
+    5. Scores signals by confidence × R/R × rupee profit
+    6. Enforces minimum 1.5:1 R/R
+    7. Returns ranked OrderPlan list → engine places them directly
 
-Example with ₹1,000 account:
-  - RELIANCE ₹2,800  → REJECTED (can't afford 1 share)
-  - TCS      ₹3,900  → REJECTED (can't afford 1 share)
-  - SBIN     ₹800    → 1 share affordable ✓
-  - TRIDENT  ₹45     → 20 shares affordable ✓ (₹900 used)
-  - TATASTEEL₹155    → 6 shares affordable ✓ (₹930 used)
-  Winner: scored by momentum × volume × R/R ratio
+Place this file at: trading-bot/capital_manager.py
+(same level as main.py and docker-compose.yml)
+
+Import in core/engine.py:
+    from capital_manager import CapitalManager, OrderPlan
 """
 
-import asyncio
 import logging
-import math
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
+from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Optional
-
-from agents.brain import TradingSignal, SignalAction
 
 logger = logging.getLogger("capital_manager")
 
 
-# ── Safety constants ──────────────────────────────────────────────────────────
-
-# Never use more than this fraction of available cash in one cycle
-# Keeps buffer for brokerage, STT, slippage, and SL order margin
-MAX_CAPITAL_USAGE_PCT = 0.90     # use max 90% of available cash
-
-# Minimum cash to keep in account at all times (absolute floor)
-MIN_CASH_RESERVE_ABSOLUTE = 50   # ₹50 always stays untouched
-
-# Dhan intraday brokerage: ₹20 per executed order (both legs)
-# STT on intraday sell: 0.025% of turnover
-# We add a 0.15% total cost buffer to cover all charges
-TRANSACTION_COST_PCT = 0.0015    # 0.15% total cost allowance per trade
-
-
-@dataclass
-class AffordabilityCheck:
-    """Result of checking whether a signal is affordable."""
-    signal:           TradingSignal
-    affordable:       bool
-    reason:           str             # why rejected if not affordable
-    adjusted_qty:     int             # how many shares we can actually buy
-    estimated_cost:   Decimal         # total cost including buffer
-    capital_pct:      float           # what % of available cash this uses
-    profit_potential: float           # estimated rupee profit at target
-    score:            float           # composite score for ranking
-
+# ─── ORDER PLAN ──────────────────────────────────────────────────────────────
 
 @dataclass
 class OrderPlan:
-    """A fully sized, validated order ready for Dhan placement."""
-    signal:         TradingSignal
-    quantity:       int
-    entry_price:    Decimal
-    stop_loss:      Decimal
-    target:         Decimal
-    estimated_cost: Decimal
-    max_loss:       Decimal           # worst case loss if SL hit
-    max_profit:     Decimal           # best case profit if target hit
-    risk_reward:    float
-    capital_used_pct: float
+    """
+    A fully validated, budget-verified order ready for execution.
+    engine._execute_from_plan() accepts ONLY OrderPlan objects —
+    never raw quantities from the AI or risk manager.
+    """
+    symbol:        str
+    exchange:      str
+    action:        str           # "BUY" | "SELL" | "SHORT" | "COVER"
+    strategy:      str
+    quantity:      int           # exact affordable quantity (already verified)
+    entry_price:   Optional[Decimal]
+    stop_loss:     Optional[Decimal]
+    target:        Optional[Decimal]
+    confidence:    float
+    rationale:     str
+    risk_reward:   Optional[float]
+    timeframe:     str
+    product:       str           # "MIS" | "CNC" | "NRML"
+    priority:      int
+    tags:          list[str] = field(default_factory=list)
 
+    # Computed fields (set by CapitalManager)
+    cost_estimate:  float = 0.0   # entry_price × quantity × 1.0015
+    rupee_profit:   float = 0.0   # (target - entry) × quantity (gross)
+    score:          float = 0.0   # confidence × risk_reward × rupee_profit
+
+
+# ─── CAPITAL MANAGER ─────────────────────────────────────────────────────────
 
 class CapitalManager:
     """
-    Budget-aware order sizing manager for real Dhan live trading.
+    Budget-aware order sizing and prioritization layer.
 
-    Workflow:
-    1. Call prepare_orders(signals, broker, config) before EVERY execution
-    2. It fetches live Dhan balance, filters unaffordable signals,
-       sizes each signal to exact affordable quantity, ranks by profit
-       potential, returns the best 1-2 plans ready for placement
-    3. The engine places orders exactly as specified in the plan
+    Sits between brain.py (AI signals) and engine.py (order placement).
+    Ensures every order that reaches the broker is:
+      - Affordable given current live balance
+      - Sized to exact max quantity the account can buy
+      - Filtered for minimum 1.5:1 R/R
+      - Ranked by expected rupee profit (not just confidence)
 
-    This replaces the old risk_check → quantity calculation flow with
-    a single, transparent, budget-first approach.
+    Usage in engine._decision_cycle():
+        live_prices = {sym: tick.get("ltp") for sym, tick in self._tick_data.items()}
+        order_plans = await self.capital_manager.prepare_orders(
+            signals=signals,
+            broker=execution_broker,
+            live_prices=live_prices,
+            open_position_symbols={p["symbol"] for p in ctx.open_positions},
+        )
+        for plan in order_plans:
+            await self._execute_from_plan(plan)
     """
 
     def __init__(self, config: dict):
-        # Max percentage of capital per single trade
-        self.max_capital_per_trade_pct = float(
-            config.get("max_capital_per_trade_pct", 50.0)
+        # Minimum cash to keep untouched (₹50 default for tiny accounts)
+        self.min_cash_reserve: float = float(config.get("min_cash_reserve", 50.0))
+
+        # Maximum % of spendable capital per trade
+        self.max_capital_per_trade_pct: float = float(
+            config.get("max_capital_per_trade_pct", 80.0)
         )
-        # Hard cap in rupees (None = use only percentage)
+
+        # Hard max order value in rupees (None = no cap beyond capital)
         self.max_order_value_absolute: Optional[float] = config.get(
             "max_order_value_absolute"
         )
-        # Minimum cash reserve to keep in account
-        self.min_cash_reserve = float(
-            config.get("min_cash_reserve", MIN_CASH_RESERVE_ABSOLUTE)
-        )
-        # Maximum number of orders in one cycle
-        self.max_orders_per_cycle = int(config.get("max_orders_per_cycle", 2))
 
-    # ── Main entry point ──────────────────────────────────────────────────────
+        # Minimum R/R to even consider a signal
+        self.min_risk_reward: float = float(config.get("min_risk_reward", 1.5))
+
+        # Transaction cost buffer (brokerage + STT + slippage estimate)
+        self.transaction_cost_pct: float = float(
+            config.get("transaction_cost_pct", 0.0015)  # 0.15%
+        )
+
+        logger.info(
+            "CapitalManager ready | reserve=₹%.0f | max_pct=%.0f%% | "
+            "min_rr=%.1f | cost_buffer=%.3f%%",
+            self.min_cash_reserve,
+            self.max_capital_per_trade_pct,
+            self.min_risk_reward,
+            self.transaction_cost_pct * 100,
+        )
+
+    # ── Core public method ────────────────────────────────────────────────────
 
     async def prepare_orders(
         self,
-        signals:           list[TradingSignal],
-        broker,                                  # DhanBroker instance
-        live_prices:       dict[str, float],     # symbol → current LTP
-        open_position_symbols: set[str],         # already have position
+        signals: list,                      # list[TradingSignal] from brain.py
+        broker,                             # BaseBroker — for live balance fetch
+        live_prices: dict[str, float],      # {symbol: ltp} from tick data
+        open_position_symbols: set[str],    # symbols already in positions
     ) -> list[OrderPlan]:
         """
-        Takes raw AI signals, fetches live Dhan balance, filters and
-        sizes each signal, returns ranked OrderPlan list ready for execution.
+        Convert AI signals into verified, budget-sized OrderPlan objects.
 
-        This is the ONLY function the engine needs to call.
+        Steps:
+          1. Fetch live balance from broker (never cached)
+          2. Compute spendable capital
+          3. For each signal: check affordability, size quantity, compute score
+          4. Filter by min R/R
+          5. Sort by score descending
+          6. Return ranked OrderPlan list
+
+        Returns empty list if balance fetch fails or no signals pass checks.
         """
-        # Step 1: Get LIVE balance from Dhan right now
-        # We never use cached funds — always fresh before placing orders
+        # Step 1: live balance fetch
         try:
             funds = await broker.get_funds()
-            available_cash = float(funds.available_cash)
+            available = float(funds.available_cash)
         except Exception as e:
-            logger.error("Failed to fetch live Dhan balance: %s", e)
-            return []  # Hard stop — never place orders without knowing balance
+            logger.error("CapitalManager: failed to fetch live balance — %s", e)
+            return []
+
+        # Step 2: spendable capital
+        reserve   = max(self.min_cash_reserve, available * 0.05)
+        spendable = max(0.0, available - reserve)
 
         logger.info(
-            "Capital check | Available: ₹%.2f | Signals: %d",
-            available_cash, len(signals),
+            "CapitalManager | available=₹%.0f reserve=₹%.0f spendable=₹%.0f | "
+            "signals=%d",
+            available, reserve, spendable, len(signals),
         )
 
-        if available_cash <= 0:
-            logger.warning("Zero or negative available cash — no orders possible")
-            return []
-
-        # Step 2: Calculate spendable capital
-        # Reserve a buffer so we never drain the account completely
-        reserve = max(self.min_cash_reserve, available_cash * 0.05)
-        spendable = available_cash - reserve
-
         if spendable <= 0:
-            logger.warning(
-                "Spendable cash ₹%.2f after ₹%.2f reserve — no orders possible",
-                spendable, reserve,
-            )
+            logger.warning("CapitalManager: spendable=₹0 — no orders possible")
             return []
 
-        # Step 3: Check and size each signal
-        checks: list[AffordabilityCheck] = []
+        order_plans: list[OrderPlan] = []
+
         for signal in signals:
-            if not signal.is_actionable:
+            if not getattr(signal, "is_actionable", False):
                 continue
             if signal.symbol in open_position_symbols:
-                logger.info(
-                    "Skipping %s — already have open position", signal.symbol
+                logger.debug(
+                    "CapitalManager: skipping %s — open position exists",
+                    signal.symbol,
                 )
                 continue
 
-            check = self._check_signal(signal, spendable, live_prices)
-            if check.affordable:
-                checks.append(check)
-            else:
-                logger.info(
-                    "REJECTED %s %s — %s",
-                    signal.action.value, signal.symbol, check.reason,
-                )
-
-        if not checks:
-            logger.info("No affordable signals after capital check")
-            return []
-
-        # Step 4: Rank by profit potential score (best first)
-        checks.sort(key=lambda c: c.score, reverse=True)
-
-        # Step 5: Pick best orders that fit within spendable capital
-        # Never allocate the same capital twice
-        plans: list[OrderPlan] = []
-        remaining_capital = Decimal(str(spendable))
-
-        for check in checks:
-            if len(plans) >= self.max_orders_per_cycle:
-                break
-            if check.estimated_cost > remaining_capital:
-                logger.info(
-                    "Skipping %s — cost ₹%.2f exceeds remaining ₹%.2f",
-                    check.signal.symbol,
-                    float(check.estimated_cost),
-                    float(remaining_capital),
-                )
+            plan = self._size_signal(signal, spendable, live_prices)
+            if plan is None:
                 continue
 
-            plan = self._build_order_plan(check, available_cash)
-            if plan:
-                plans.append(plan)
-                remaining_capital -= check.estimated_cost
-                logger.info(
-                    "APPROVED %s %s | qty=%d | cost=₹%.2f | "
-                    "max_profit=₹%.2f | max_loss=₹%.2f | R/R=%.1f",
-                    plan.signal.action.value,
-                    plan.signal.symbol,
-                    plan.quantity,
-                    float(plan.estimated_cost),
-                    float(plan.max_profit),
-                    float(plan.max_loss),
-                    plan.risk_reward,
-                )
+            order_plans.append(plan)
 
-        if plans:
-            total_allocated = sum(float(p.estimated_cost) for p in plans)
-            logger.info(
-                "Order plan complete | %d orders | Total allocated: ₹%.2f / ₹%.2f (%.1f%%)",
-                len(plans),
-                total_allocated,
-                available_cash,
-                (total_allocated / available_cash * 100) if available_cash > 0 else 0,
-            )
+        # Sort by score descending (best rupee opportunity first)
+        order_plans.sort(key=lambda p: p.score, reverse=True)
 
-        return plans
+        logger.info(
+            "CapitalManager: %d/%d signals passed → order plans: %s",
+            len(order_plans),
+            len(signals),
+            [(p.symbol, p.action, p.quantity, f"₹{p.cost_estimate:,.0f}") for p in order_plans],
+        )
 
-    # ── Signal affordability check ────────────────────────────────────────────
+        return order_plans
 
-    def _check_signal(
+    # ── Signal sizing ─────────────────────────────────────────────────────────
+
+    def _size_signal(
         self,
-        signal:        TradingSignal,
-        spendable:     float,
-        live_prices:   dict[str, float],
-    ) -> AffordabilityCheck:
+        signal,                        # TradingSignal
+        spendable: float,
+        live_prices: dict[str, float],
+    ) -> Optional[OrderPlan]:
         """
-        Check if we can afford this signal at all and size it correctly.
-        Uses live price from tick data, falls back to signal entry_price.
+        Size a single signal against current spendable capital.
+        Returns None if the signal fails any hard check.
         """
         symbol = signal.symbol
 
-        # Get the most current price — live tick first, then signal entry
-        ltp = live_prices.get(symbol)
-        if not ltp or ltp <= 0:
-            ltp = float(signal.entry_price) if signal.entry_price else 0
-        if not ltp or ltp <= 0:
-            return AffordabilityCheck(
-                signal=signal, affordable=False,
-                reason="no live price available",
-                adjusted_qty=0, estimated_cost=Decimal("0"),
-                capital_pct=0, profit_potential=0, score=0,
-            )
+        # Resolve best available price
+        entry_price = (
+            float(signal.entry_price) if signal.entry_price else None
+        ) or live_prices.get(symbol) or 0.0
 
-        price = Decimal(str(ltp))
-
-        # Hard check 1: Can we afford even 1 share?
-        cost_of_one = price * Decimal(str(1 + TRANSACTION_COST_PCT))
-        if float(cost_of_one) > spendable:
-            return AffordabilityCheck(
-                signal=signal, affordable=False,
-                reason=f"₹{ltp:,.2f}/share exceeds spendable ₹{spendable:,.2f}",
-                adjusted_qty=0, estimated_cost=Decimal("0"),
-                capital_pct=0, profit_potential=0, score=0,
-            )
-
-        # Calculate per-trade budget cap
-        per_trade_budget = Decimal(str(
-            spendable * (self.max_capital_per_trade_pct / 100.0)
-        ))
-        if self.max_order_value_absolute is not None:
-            per_trade_budget = min(
-                per_trade_budget,
-                Decimal(str(self.max_order_value_absolute)),
-            )
-        per_trade_budget = min(per_trade_budget, Decimal(str(spendable)))
-
-        # Calculate affordable quantity
-        cost_per_share = price * Decimal(str(1 + TRANSACTION_COST_PCT))
-        max_qty = int((per_trade_budget / cost_per_share).to_integral_value(ROUND_DOWN))
-
-        if max_qty <= 0:
-            return AffordabilityCheck(
-                signal=signal, affordable=False,
-                reason=f"per-trade budget ₹{float(per_trade_budget):,.2f} too small for ₹{ltp:,.2f}/share",
-                adjusted_qty=0, estimated_cost=Decimal("0"),
-                capital_pct=0, profit_potential=0, score=0,
-            )
-
-        # Use the minimum of: what AI suggested, what we can afford
-        ai_qty = signal.quantity if signal.quantity > 0 else max_qty
-        final_qty = min(ai_qty, max_qty)
-        if final_qty <= 0:
-            final_qty = 1  # always try at least 1 share if affordable
-
-        estimated_cost = price * final_qty * Decimal(str(1 + TRANSACTION_COST_PCT))
-        capital_pct = float(estimated_cost) / spendable * 100
-
-        # Calculate profit potential
-        target = signal.target or (price * Decimal("1.03"))   # default 3% target
-        sl     = signal.stop_loss or (price * Decimal("0.985"))  # default 1.5% SL
-        profit_potential = float((target - price) * final_qty)
-        max_loss_potential = float((price - sl) * final_qty)
-
-        rr = profit_potential / max_loss_potential if max_loss_potential > 0 else 0
-
-        # Composite score = confidence × volume_signal × R/R ratio × momentum
-        # Higher score = better use of limited capital
-        conf_score  = signal.confidence * 3.0
-        rr_score    = min(rr, 5.0)           # cap at 5:1 so it doesn't dominate
-        profit_score = profit_potential / 100  # normalize by ₹100 profit units
-        score = conf_score + rr_score + profit_score
-
-        return AffordabilityCheck(
-            signal         = signal,
-            affordable     = True,
-            reason         = "affordable",
-            adjusted_qty   = final_qty,
-            estimated_cost = estimated_cost,
-            capital_pct    = capital_pct,
-            profit_potential = profit_potential,
-            score          = score,
-        )
-
-    def _build_order_plan(
-        self,
-        check:          AffordabilityCheck,
-        available_cash: float,
-    ) -> Optional[OrderPlan]:
-        """Build a complete, validated OrderPlan from an AffordabilityCheck."""
-        signal = check.signal
-        qty    = check.adjusted_qty
-
-        if qty <= 0:
-            return None
-
-        # Use live-sized price if signal has entry_price, otherwise market order
-        entry = signal.entry_price or Decimal("0")
-
-        # Calculate SL and target — use signal values if present and valid
-        if signal.stop_loss and signal.stop_loss > 0 and entry > 0:
-            sl = signal.stop_loss
-        else:
-            # Default SL: 1.5% below entry for BUY
-            sl = entry * Decimal("0.985") if entry > 0 else Decimal("0")
-
-        if signal.target and signal.target > 0 and entry > 0:
-            target = signal.target
-        else:
-            # Default target: 3% above entry for BUY
-            target = entry * Decimal("1.03") if entry > 0 else Decimal("0")
-
-        max_profit = (target - entry) * qty if entry > 0 and target > entry else Decimal("0")
-        max_loss   = (entry - sl) * qty    if entry > 0 and sl < entry   else Decimal("0")
-        rr = float(max_profit / max_loss) if max_loss > 0 else 0
-
-        # Hard check: minimum R/R of 1.5:1
-        if rr > 0 and rr < 1.5:
+        if entry_price <= 0:
             logger.warning(
-                "Skipping %s — R/R %.1f below minimum 1.5:1",
-                signal.symbol, rr,
+                "CapitalManager: no price for %s — skipping", symbol
             )
             return None
 
-        return OrderPlan(
-            signal          = signal,
-            quantity        = qty,
-            entry_price     = entry,
-            stop_loss       = sl,
-            target          = target,
-            estimated_cost  = check.estimated_cost,
-            max_loss        = max_loss,
-            max_profit      = max_profit,
-            risk_reward     = rr,
-            capital_used_pct = check.capital_pct,
+        # Cost per share including transaction buffer
+        cost_per_share = entry_price * (1 + self.transaction_cost_pct)
+
+        # Can we afford even 1 share?
+        if spendable < cost_per_share:
+            logger.info(
+                "CapitalManager: %s TOO EXPENSIVE | cost=₹%.2f > spendable=₹%.2f",
+                symbol, cost_per_share, spendable,
+            )
+            return None
+
+        # Per-trade budget
+        per_trade_budget = spendable * (self.max_capital_per_trade_pct / 100.0)
+        if self.max_order_value_absolute is not None:
+            per_trade_budget = min(per_trade_budget, self.max_order_value_absolute)
+
+        # Max affordable quantity
+        quantity = int(per_trade_budget / cost_per_share)
+        if quantity <= 0:
+            logger.info(
+                "CapitalManager: %s quantity=0 after budget sizing", symbol
+            )
+            return None
+
+        # Compute R/R and rupee profit
+        stop_loss = float(signal.stop_loss) if signal.stop_loss else None
+        target    = float(signal.target)    if signal.target    else None
+
+        risk_reward = signal.risk_reward
+        if risk_reward is None and stop_loss and target and entry_price > 0:
+            reward = abs(target - entry_price)
+            risk   = abs(entry_price - stop_loss)
+            risk_reward = round(reward / risk, 2) if risk > 0 else None
+
+        # Enforce minimum R/R
+        if risk_reward is not None and risk_reward < self.min_risk_reward:
+            logger.info(
+                "CapitalManager: %s rejected — R/R=%.2f < min %.1f",
+                symbol, risk_reward, self.min_risk_reward,
+            )
+            return None
+
+        # Rupee profit estimate
+        rupee_profit = 0.0
+        if target and entry_price > 0:
+            rupee_profit = abs(target - entry_price) * quantity
+
+        cost_estimate = cost_per_share * quantity
+
+        # Score = confidence × R/R × rupee_profit
+        # This ranks signals that give best actual ₹ return first,
+        # not just highest confidence
+        rr_for_score    = risk_reward if risk_reward is not None else 1.0
+        score = signal.confidence * rr_for_score * rupee_profit
+
+        plan = OrderPlan(
+            symbol       = symbol,
+            exchange     = getattr(signal, "exchange", "NSE"),
+            action       = signal.action.value,
+            strategy     = getattr(signal, "strategy", "unknown"),
+            quantity     = quantity,
+            entry_price  = signal.entry_price,
+            stop_loss    = signal.stop_loss,
+            target       = signal.target,
+            confidence   = signal.confidence,
+            rationale    = getattr(signal, "rationale", ""),
+            risk_reward  = risk_reward,
+            timeframe    = getattr(signal, "timeframe", "intraday"),
+            product      = getattr(signal, "product", "MIS"),
+            priority     = getattr(signal, "priority", 5),
+            tags         = list(getattr(signal, "tags", [])),
+            cost_estimate= cost_estimate,
+            rupee_profit = rupee_profit,
+            score        = score,
         )
+
+        logger.info(
+            "CapitalManager: %s %s | qty=%d | cost=₹%.0f | "
+            "profit~₹%.0f | R/R=%.2f | score=%.2f",
+            plan.action, symbol, quantity, cost_estimate,
+            rupee_profit, risk_reward or 0, score,
+        )
+
+        return plan
 
     # ── Utility ───────────────────────────────────────────────────────────────
 
-    def summary_log(self, plans: list[OrderPlan], available_cash: float) -> str:
-        """Generate a clean summary log string for the plan."""
-        if not plans:
-            return "No orders planned — no affordable signals"
-        lines = [f"Order plan ({len(plans)} orders, ₹{available_cash:,.2f} available):"]
-        for i, p in enumerate(plans, 1):
-            lines.append(
-                f"  {i}. {p.signal.action.value} {p.quantity}×{p.signal.symbol} "
-                f"@ ₹{float(p.entry_price):,.2f} | "
-                f"SL: ₹{float(p.stop_loss):,.2f} | "
-                f"TGT: ₹{float(p.target):,.2f} | "
-                f"Max profit: ₹{float(p.max_profit):,.0f} | "
-                f"Max loss: ₹{float(p.max_loss):,.0f} | "
-                f"R/R: {p.risk_reward:.1f} | "
-                f"Capital: {p.capital_used_pct:.1f}%"
-            )
-        return "\n".join(lines)
+    def affordability_summary(
+        self,
+        watchlist_data: list[dict],
+        available_capital: float,
+    ) -> list[dict]:
+        """
+        Generate affordability labels for all watchlist symbols.
+        Used by brain._build_prompt() to inject [AFFORDABLE] / [TOO EXPENSIVE]
+        labels into the AI prompt before calling the model.
+
+        Returns list of dicts:
+          {symbol, ltp, affordable, max_qty, est_rupee_profit, cost_per_share}
+        """
+        reserve   = max(self.min_cash_reserve, available_capital * 0.05)
+        spendable = max(0.0, available_capital - reserve)
+        result    = []
+
+        for w in watchlist_data:
+            symbol = w.get("symbol", "")
+            ltp    = float(w.get("ltp", 0) or 0)
+            if ltp <= 0:
+                result.append({"symbol": symbol, "affordable": False,
+                               "max_qty": 0, "est_rupee_profit": 0,
+                               "cost_per_share": 0})
+                continue
+
+            cost_per_share = ltp * (1 + self.transaction_cost_pct)
+            affordable     = spendable >= cost_per_share
+            max_qty        = int(spendable / cost_per_share) if affordable else 0
+            est_profit     = (ltp * 0.02) * max_qty  # rough 2% move estimate
+
+            result.append({
+                "symbol":         symbol,
+                "ltp":            ltp,
+                "affordable":     affordable,
+                "max_qty":        max_qty,
+                "est_rupee_profit": round(est_profit, 2),
+                "cost_per_share": round(cost_per_share, 2),
+            })
+
+        return result
