@@ -529,7 +529,7 @@ class TradingAgent:
         msg = str(err).lower()
         return any(t in msg for t in (
             "429", "rate limit", "too many requests", "quota", "resource_exhausted",
-            "503", "unavailable", "high demand", "overloaded", "server error",
+            "503", "unavailable", "high demand", "overloaded", "server error", "402",
         ))
 
     def _is_unsupported_system_instruction_error(self, err: Exception) -> bool:
