@@ -173,7 +173,7 @@ class NSEHistoricalFetcher:
 
     def _fetch_nse_with_retries(self, symbol: str, start: date, end: date) -> tuple[list[dict], int]:
         retryable = {
-            HTTPStatus.FORBIDDEN, HTTPStatus.TOO_MANY_REQUESTS,
+            HTTPStatus.TOO_MANY_REQUESTS,
             HTTPStatus.BAD_GATEWAY, HTTPStatus.SERVICE_UNAVAILABLE,
             HTTPStatus.GATEWAY_TIMEOUT, HTTPStatus.INTERNAL_SERVER_ERROR,
         }
@@ -506,6 +506,8 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
         base_delay_seconds=float(cfg.get("base_delay_seconds", 1.0)),
     )
     max_attempts = int(cfg.get("max_attempts", 5))
+    min_cached_candles = int(cfg.get("min_cached_candles", 20))
+    inter_symbol_delay = float(cfg.get("inter_symbol_delay", 1.5))
     total = 0
     failures: list[dict] = []
     metrics: dict[str, int] = {
@@ -514,6 +516,7 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
         "symbols_failed": 0,
         "symbols_retried": 0,
         "symbols_fallback_used": 0,
+        "symbols_cached": 0,
     }
 
     logger.info(
@@ -526,12 +529,38 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
         len(requests_list),
     )
 
+    fetched_count = 0
     for req in requests_list:
         metrics["symbols_total"] += 1
         if req.timeframe != "day":
             metrics["symbols_failed"] += 1
             failures.append({"symbol": req.symbol, "error": "only day timeframe currently supported"})
             continue
+
+        # Skip symbols that already have sufficient data cached in the DB.
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            _start = _dt.combine(req.start_date, _dt.min.time(), tzinfo=_tz.utc) if req.start_date else None
+            _end = _dt.combine(req.end_date, _dt.max.time(), tzinfo=_tz.utc) if req.end_date else None
+            existing = await HistoricalCandleRepository.fetch_window(
+                [req.symbol.upper()], req.exchange, req.timeframe, _start, _end,
+            )
+            if len(existing) >= min_cached_candles:
+                logger.info(
+                    "Historical backfill symbol skipped (cached) symbol=%s existing_candles=%s",
+                    req.symbol.upper(), len(existing),
+                )
+                metrics["symbols_cached"] += 1
+                metrics["symbols_success"] += 1
+                total += len(existing)
+                continue
+        except Exception:
+            pass  # If DB check fails, proceed with fetch.
+
+        # Rate-limit: add delay between provider requests to avoid 429s.
+        if fetched_count > 0 and inter_symbol_delay > 0:
+            await asyncio.sleep(inter_symbol_delay)
+
         try:
             logger.info(
                 "Historical backfill symbol start symbol=%s exchange=%s timeframe=%s start_date=%s end_date=%s",
@@ -542,6 +571,7 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
             )
             await HistoricalCandleRepository.upsert_many(candles)
             total += len(candles)
+            fetched_count += 1
             metrics["symbols_success"] += 1
             provider_key = f"provider_{meta.provider}_success"
             metrics[provider_key] = metrics.get(provider_key, 0) + 1
@@ -559,16 +589,18 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
                 "Historical backfill symbol complete symbol=%s status=failed error=%s",
                 req.symbol.upper(), exc,
             )
+            fetched_count += 1
             metrics["symbols_failed"] += 1
             failures.append({"symbol": req.symbol, "error": str(exc)})
 
     logger.info(
         "Historical backfill summary inserted=%s failures=%s "
         "symbols_total=%s symbols_success=%s symbols_failed=%s "
-        "symbols_retried=%s symbols_fallback_used=%s max_attempts=%s providers=%s",
+        "symbols_retried=%s symbols_fallback_used=%s symbols_cached=%s max_attempts=%s providers=%s",
         total, len(failures),
         metrics["symbols_total"], metrics["symbols_success"], metrics["symbols_failed"],
-        metrics["symbols_retried"], metrics["symbols_fallback_used"], max_attempts,
+        metrics["symbols_retried"], metrics["symbols_fallback_used"], metrics.get("symbols_cached", 0),
+        max_attempts,
         {k: v for k, v in metrics.items() if k.startswith("provider_")},
     )
     return {"inserted": total, "failures": failures, "metrics": metrics}
