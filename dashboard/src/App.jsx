@@ -2217,7 +2217,14 @@ export default function TradingDashboard() {
         const bfRes = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(backfillPayload) });
         const bfOut = await bfRes.json();
         if (!bfRes.ok) throw new Error(extractErrorMessage(bfOut?.detail) || "Backfill failed");
-        if (Array.isArray(bfOut?.failures) && bfOut.failures.length) throw new Error(`Backfill: ${extractErrorMessage(bfOut.failures[0]?.error) || "some symbols failed"}`);
+        // Partial failures are OK — some symbols may not be available from any provider.
+        // Only fail if zero candles were inserted (complete failure).
+        if ((bfOut?.inserted || 0) === 0 && Array.isArray(bfOut?.failures) && bfOut.failures.length) {
+          throw new Error(`Backfill: all symbols failed — ${extractErrorMessage(bfOut.failures[0]?.error) || "no data providers returned data"}`);
+        }
+        if (Array.isArray(bfOut?.failures) && bfOut.failures.length) {
+          console.warn(`Backfill: ${bfOut.failures.length} symbol(s) failed, ${bfOut.inserted || 0} candles inserted. Continuing with available data.`, bfOut.failures);
+        }
 
         // Step 3: Now select symbols from backfilled data
         const selectPayload = {
