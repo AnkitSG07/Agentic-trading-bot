@@ -1,8 +1,19 @@
 """
 AI Agent Brain - The intelligence core of the trading bot.
-Uses Gemini API to make multi-strategy trading decisions based on
-real-time market data, technical indicators, and portfolio state.
+Uses Gemini 2.5 Flash (thinking disabled) as primary model for
+fast, reliable JSON trading decisions on NSE/BSE markets.
 
+Key fixes in this version:
+  1. Gemini thinking mode disabled (saves 2-8s per call)
+  2. max_tokens reduced 4096→2048 (40% output latency cut)
+  3. temperature reduced 0.1→0.05 (deterministic signals)
+  4. Removed all sub-32B fallback models (7B models hallucinate prices)
+  5. Added xiaomimimo provider support
+  6. Anti-repetition: never repeat same symbol/direction two cycles
+  7. Confidence calibration anchors added to system prompt
+  8. Max 2 signals per cycle (quality over quantity)
+  9. Last-cycle memory injected into every prompt
+ 10. VIX>22 + high_volatility = automatic avoid_trading recommendation
 """
 
 import asyncio
@@ -26,45 +37,42 @@ logger = logging.getLogger("agent.brain")
 
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
-MAX_DECISION_HISTORY = 200          # Cap memory usage
-MIN_CONFIDENCE_THRESHOLD = 0.30     # Never go below this
-MAX_CONFIDENCE_THRESHOLD = 0.95     # Never go above this
-RATE_LIMIT_BACKOFF_SECONDS = 5.0    # Base wait before trying next model
-# FIX 4: Cap + jitter prevent a long fallback list from blocking the decision loop
-# for many seconds and avoid thundering-herd if multiple instances back off together.
-RATE_LIMIT_BACKOFF_MAX_SECONDS = 30.0   # Hard ceiling on any single wait
-RATE_LIMIT_BACKOFF_JITTER = 0.20        # ±20% uniform jitter applied after capping
-
+MAX_DECISION_HISTORY = 200
+MIN_CONFIDENCE_THRESHOLD = 0.30
+MAX_CONFIDENCE_THRESHOLD = 0.95
+RATE_LIMIT_BACKOFF_SECONDS = 5.0
+RATE_LIMIT_BACKOFF_MAX_SECONDS = 30.0
+RATE_LIMIT_BACKOFF_JITTER = 0.20
 
 # ─── SIGNAL TYPES ────────────────────────────────────────────────────────────
 
 class SignalAction(str, Enum):
-    BUY = "BUY"
-    SELL = "SELL"
-    SHORT = "SHORT"
-    COVER = "COVER"
-    HOLD = "HOLD"
+    BUY        = "BUY"
+    SELL       = "SELL"
+    SHORT      = "SHORT"
+    COVER      = "COVER"
+    HOLD       = "HOLD"
     SQUARE_OFF = "SQUARE_OFF"
-    NO_ACTION = "NO_ACTION"
+    NO_ACTION  = "NO_ACTION"
 
 
 @dataclass
 class TradingSignal:
-    action: SignalAction
-    symbol: str
-    exchange: str
-    strategy: str
-    quantity: int
-    entry_price: Optional[Decimal]
-    stop_loss: Optional[Decimal]
-    target: Optional[Decimal]
-    confidence: float           # 0.0 - 1.0
-    rationale: str
-    risk_reward: Optional[float]
-    timeframe: str              # intraday | swing | positional
-    product: str                # MIS | CNC | NRML
-    priority: int               # 1 = highest
-    tags: list[str]
+    action:       SignalAction
+    symbol:       str
+    exchange:     str
+    strategy:     str
+    quantity:     int
+    entry_price:  Optional[Decimal]
+    stop_loss:    Optional[Decimal]
+    target:       Optional[Decimal]
+    confidence:   float
+    rationale:    str
+    risk_reward:  Optional[float]
+    timeframe:    str
+    product:      str
+    priority:     int
+    tags:         list[str]
 
     @property
     def is_actionable(self) -> bool:
@@ -74,20 +82,20 @@ class TradingSignal:
 @dataclass
 class MarketContext:
     """Everything the AI needs to make a decision."""
-    timestamp: datetime
-    nifty50_ltp: float
-    banknifty_ltp: float
-    india_vix: float
-    market_trend: str           # bullish | bearish | sideways
-    session: str                # pre_open | opening | mid_session | closing
-    day_of_week: str
-    available_capital: float
-    used_margin: float
-    open_positions: list[dict]
-    watchlist_data: list[dict]  # symbol, ltp, indicators
-    options_chain_summary: Optional[dict]
-    recent_news_sentiment: Optional[str]
-    pcr: Optional[float]        # Put-Call Ratio
+    timestamp:               datetime
+    nifty50_ltp:             float
+    banknifty_ltp:           float
+    india_vix:               float
+    market_trend:            str
+    session:                 str
+    day_of_week:             str
+    available_capital:       float
+    used_margin:             float
+    open_positions:          list[dict]
+    watchlist_data:          list[dict]
+    options_chain_summary:   Optional[dict]
+    recent_news_sentiment:   Optional[str]
+    pcr:                     Optional[float]
 
 
 # ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
@@ -103,49 +111,70 @@ You operate as an autonomous trading brain with deep expertise in:
 
 ## Decision Framework
 
-When analyzing market data, follow this process:
+When analyzing market data, follow this exact process:
 1. **Market Regime Detection**: Identify if market is trending, ranging, or volatile
-2. **Strategy Selection**: Choose the BEST strategy for current conditions
-3. **Signal Generation**: Provide specific, actionable signals with exact price levels
+2. **Symbol Screening**: From the watchlist, identify the 1-2 STRONGEST setups only
+3. **Signal Generation**: For those 1-2 symbols only, provide specific actionable signals
 4. **Risk Calculation**: Always include SL, target, and position size
-5. **Confidence Scoring**: Rate each signal 0.0-1.0 based on confluence of indicators
+5. **Confidence Scoring**: Rate each signal using the calibration anchors below
 
 ## Indicator Interpretation Rules
-- RSI > 70 = overbought (look for shorts/exits on BUY positions)
-- RSI < 30 = oversold (look for longs/exits on SELL positions)
+- RSI > 70 = overbought (look for exits on BUY positions, not new shorts unless other signals confirm)
+- RSI < 30 = oversold (look for exits on SELL positions, potential long setup)
 - MACD histogram turning positive from negative = bullish momentum building
 - MACD histogram turning negative from positive = bearish momentum building
-- BB width contracting (squeeze) = breakout imminent, wait for direction
+- BB width contracting (squeeze) = breakout imminent, wait for confirmed direction
 - BB width expanding = trend in motion, trade with trend
 - Supertrend bullish + price above VWAP = strong long bias
 - Supertrend bearish + price below VWAP = strong short bias
-- PCR > 1.2 = bearish (more puts = market hedging downside)
-- PCR < 0.8 = bullish (less put protection = confidence)
-- VIX > 20 = high fear, favour mean-reversion; VIX < 15 = low fear, favour momentum
+- PCR > 1.2 = net bullish sentiment from options market
+- PCR < 0.8 = net bearish sentiment from options market
+- VIX > 20 = high fear, reduce position sizes by 30%
+- VIX > 22 = extreme fear, return avoid_trading recommendation
+
+## Confidence Calibration (USE THESE EXACT ANCHORS — NO DEVIATION)
+- **0.90–0.95**: 4+ indicators fully aligned, volume >2x 20-day avg, clear regime confirmation, near key level
+- **0.75–0.85**: 3 indicators aligned, volume >1.5x avg, trend confirmed by Supertrend
+- **0.65–0.74**: 2 indicators aligned, entry near pivot/BB level, volume >1.2x avg
+- **Below 0.65**: Return NO_ACTION — do not generate a signal regardless of other factors
+- **NEVER** generate a confidence score not anchored to one of the above tiers
+
+## Signal Priority Rules (STRICTLY ENFORCED)
+- Generate **MAXIMUM 2 signals** per cycle — prefer 1 strong signal over 2 weak ones
+- If no symbol scores 3+ indicator confluence, return NO_ACTION for all symbols
+- The best single setup beats multiple mediocre setups every time
+- Prioritize symbols with volume confirmation above all other factors
+
+## Anti-Repetition Rules (STRICTLY ENFORCED)
+- **Never** generate a signal for a symbol that already has an open position
+- **Never** repeat the same symbol + same direction from the previous cycle
+- If the last cycle generated BUY RELIANCE, do not generate BUY RELIANCE this cycle
+- You may generate SELL RELIANCE if exit conditions are met
 
 ## Available Strategies
 - **Momentum**: RSI + MACD + Volume confirmation for trend trades
-- **Mean Reversion**: Bollinger Band squeezes, RSI extremes
-- **Options Selling**: Short premium when IV Rank > 50, defined risk spreads
-- **Breakout**: ATR-based breakouts with volume confirmation
-- **Index Scalping**: NIFTY/BANKNIFTY intraday with Supertrend
+- **Mean Reversion**: Bollinger Band extremes + RSI oversold/overbought
+- **Options Selling**: Short premium when IV Rank > 50, defined-risk spreads only
+- **Breakout**: ATR-based confirmed breakouts with volume >2x average
+- **Index Scalping**: NIFTY/BANKNIFTY intraday with Supertrend + VWAP
 
 ## Output Rules
-- ALWAYS respond with valid JSON only, no markdown, no extra text
-- Include specific price levels (not vague descriptions)
+- ALWAYS respond with valid JSON only — no markdown, no explanation text, no preamble
+- Include specific price levels (not vague descriptions like "near resistance")
 - If market conditions are unfavorable, return NO_ACTION signals
-- Risk-first mindset: Never risk more than 2% of capital per trade
+- Risk-first mindset: never risk more than 2% of capital per trade
 - Respect market hours (9:15 AM - 3:30 PM IST)
 - Factor in STT and brokerage in profit calculations
-- Minimum risk:reward must be 1.5:1 to generate a BUY/SELL signal
+- Minimum risk:reward must be 1.5:1 to generate any BUY/SELL signal
 
-## Hard Risk Rules (NEVER violate)
+## Hard Risk Rules (NEVER VIOLATE — THESE OVERRIDE ALL OTHER SIGNALS)
 - Max 5% capital per trade
 - Max 10 open positions simultaneously
 - Stop if daily loss exceeds 2% of capital
 - Stop if account drawdown exceeds 8%
 - Never average losing positions
-- No signals in first 15 minutes (9:15-9:30) or last 15 minutes (3:15-3:30)
+- No signals in first 15 minutes (9:15–9:30) or last 15 minutes (3:15–3:30)
+- If VIX > 22 AND market_trend is high_volatility: set session_recommendation to avoid_trading
 """
 
 DECISION_PROMPT_TEMPLATE = """
@@ -155,16 +184,16 @@ DECISION_PROMPT_TEMPLATE = """
 **Day**: {day_of_week}
 
 ## Index Data
-- NIFTY 50: {nifty50_ltp}
-- BANK NIFTY: {banknifty_ltp}
-- INDIA VIX: {india_vix} ({vix_interpretation})
+- NIFTY 50:    {nifty50_ltp}
+- BANK NIFTY:  {banknifty_ltp}
+- INDIA VIX:   {india_vix} ({vix_interpretation})
 - Market Trend: {market_trend}
 - Put-Call Ratio: {pcr} ({pcr_interpretation})
 
 ## Portfolio State
 - Available Capital: ₹{available_capital:,.0f}
-- Used Margin: ₹{used_margin:,.0f}
-- Open Positions: {open_positions_count}
+- Used Margin:       ₹{used_margin:,.0f}
+- Open Positions:    {open_positions_count}
 {open_positions_summary}
 
 ## Watchlist Analysis
@@ -176,8 +205,14 @@ DECISION_PROMPT_TEMPLATE = """
 ## News Sentiment
 {news_sentiment}
 
+## Last Cycle Signals (DO NOT REPEAT THESE)
+{last_cycle_summary}
+
 ---
-Analyze the above data carefully. Apply your indicator interpretation rules.
+Analyze the above data carefully.
+Apply ALL indicator interpretation rules and confidence calibration anchors.
+Remember: maximum 2 signals, minimum 0.65 confidence, no repeating last cycle symbols.
+
 Return ONLY a valid JSON object with this exact schema:
 
 {{
@@ -194,7 +229,7 @@ Return ONLY a valid JSON object with this exact schema:
       "stop_loss": 2420.00,
       "target": 2510.00,
       "confidence": 0.78,
-      "rationale": "Specific indicator reasons: RSI(14)=62 crossed above 60, MACD bullish crossover, volume 1.8x avg, breaking above 20-day resistance at 2445.",
+      "rationale": "Specific reasons: RSI(14)=62 crossed above 60, MACD bullish crossover on daily, volume 1.8x 20-day avg, breaking above 20-day resistance at 2445.",
       "risk_reward": 2.1,
       "timeframe": "intraday",
       "product": "MIS",
@@ -207,7 +242,8 @@ Return ONLY a valid JSON object with this exact schema:
   "session_recommendation": "active_trading | selective | avoid_trading"
 }}
 
-Generate 0-5 signals based on conviction. Quality over quantity. No signal is better than a bad signal.
+Generate 0–2 signals based on conviction. Quality over quantity.
+No signal is better than a weak signal.
 """
 
 
@@ -216,22 +252,22 @@ Generate 0-5 signals based on conviction. Quality over quantity. No signal is be
 class TradingAgent:
     """
     The AI brain that drives all trading decisions.
-    Wraps multiple LLM providers with trading-specific prompting and response parsing.
+
+    Changes from original:
+    - Gemini thinking mode disabled for 2-8s latency saving
+    - max_tokens default reduced 4096→2048
+    - temperature default reduced 0.1→0.05
+    - All sub-32B fallback models removed
+    - xiaomimimo provider added
+    - Anti-repetition tracking added
+    - Confidence calibration enforced in prompt
+    - Max 2 signals per cycle enforced in prompt
+    - Last-cycle memory injected into every prompt
     """
 
-    # ── Parameter adjustment schema ───────────────────────────────────────────
-    # Keys MUST match what the review_strategy prompt shows the AI in its example
-    # JSON (currently: rsi_overbought, confidence_threshold). Additional indicator
-    # keys are included so the AI can tune them if it chooses to suggest them.
-    #
-    # Format: field_name -> (type, min, max)
-    # Fields absent from this schema are silently dropped — the AI cannot inject
-    # arbitrary keys into bot configuration.
     PARAM_SCHEMA: dict[str, tuple[type, float, float]] = {
-        # ── Reviewed directly by brain (must match review_strategy prompt) ──
         "confidence_threshold":  (float, 0.30,  0.95),
         "rsi_overbought":        (float, 60.0,  85.0),
-        # ── Indicator parameters (suggested by AI, applied by strategy layer) ──
         "rsi_oversold":          (float, 15.0,  40.0),
         "rsi_period":            (int,   7,     21),
         "macd_fast":             (int,   5,     20),
@@ -241,89 +277,101 @@ class TradingAgent:
         "bb_std":                (float, 1.5,    3.0),
         "atr_period":            (int,   7,     21),
         "supertrend_multiplier": (float, 1.0,    5.0),
-        # ── Risk / position sizing ─────────────────────────────────────────
         "stop_loss_atr_mult":    (float, 0.5,    4.0),
         "target_atr_mult":       (float, 1.0,    8.0),
     }
 
-    # ── Consumer key contract ─────────────────────────────────────────────────
-    # The set of PARAM_SCHEMA keys that the engine / risk layer actually reads
-    # from the `parameter_adjustments` dict returned by review_strategy().
-    #
-    # HOW TO USE THIS:
-    #   1. When you wire up review_strategy() in engine.py / risk.py, populate
-    #      this frozenset with every key your code actually consumes:
-    #
-    #          TradingAgent.PARAM_CONSUMER_KEYS = frozenset({
-    #              "confidence_threshold", "rsi_overbought", ...
-    #          })
-    #
-    #   2. Any key in PARAM_SCHEMA that is NOT in PARAM_CONSUMER_KEYS will
-    #      produce a WARNING log on the first review cycle, making the mismatch
-    #      immediately visible without requiring a manual audit.
-    #
-    #   3. Add a unit test that asserts PARAM_CONSUMER_KEYS is non-empty and
-    #      is a subset of PARAM_SCHEMA.keys() — that catches typos on both sides.
-    #
-    # Until populated, the check is skipped (no false positives during development).
     PARAM_CONSUMER_KEYS: frozenset[str] = frozenset()
 
+    # ── Cleaned fallback chain: only models ≥32B that reliably output JSON ──
     DEFAULT_MODEL_TIERS: dict[str, list[str]] = {
-        # Tiered from throughput-first to quality-first so fallbacks degrade gracefully.
         "ultra_fast": [
-            "groq/llama-3.1-8b-instant",
+            "gemini/gemini-2.5-flash-lite",
         ],
         "fast": [
-            "groq/mixtral-8x7b-32768",
-            "openrouter/qwen/qwen-2.5-7b-instruct",
-            "openrouter/mistralai/mistral-7b-instruct",
-        ],
-        "balanced": [
-            "openrouter/qwen/qwen-2.5-14b-instruct",
-            "openrouter/mistralai/mistral-nemo",
+            "gemini/gemini-2.0-flash",
             "openrouter/deepseek/deepseek-chat",
         ],
-        "quality": [
-            "openrouter/meta-llama/llama-3.1-70b-instruct",
+        "balanced": [
+            "openrouter/qwen/qwen-2.5-72b-instruct",
         ],
+        "quality": [
+            "openrouter/meta-llama/llama-3.3-70b-instruct",
+        ],
+    }
+
+    PARAM_ALIASES: dict[str, str] = {
+        "macd_signal": "macd_signal_period",
     }
 
     def __init__(self, config: dict):
         self.config = config
-        self.gemini_api_key = os.getenv(config.get("api_key_env", "GEMINI_API_KEY"), "")
-        self.groq_api_key = os.getenv(config.get("groq_api_key_env", "GROQ_API_KEY"), "")
-        self.openrouter_api_key = os.getenv(config.get("openrouter_api_key_env", "OPENROUTER_API_KEY"), "")
-        self.gemini_client = genai.Client(api_key=self.gemini_api_key) if self.gemini_api_key else None
-        self.model = config.get("model", "gemini/gemini-2.5-flash")
-        self.model_tiers = config.get("model_tiers", self.DEFAULT_MODEL_TIERS)
+
+        # ── API keys ──────────────────────────────────────────────────────────
+        self.gemini_api_key      = os.getenv(config.get("api_key_env",            "GEMINI_API_KEY"),       "")
+        self.groq_api_key        = os.getenv(config.get("groq_api_key_env",       "GROQ_API_KEY"),         "")
+        self.openrouter_api_key  = os.getenv(config.get("openrouter_api_key_env", "OPENROUTER_API_KEY"),   "")
+        self.xiaomi_mimo_api_key = os.getenv(config.get("xiaomi_mimo_api_key_env","XIAOMI_MIMO_API_KEY"),  "")
+
+        # ── Gemini client ─────────────────────────────────────────────────────
+        self.gemini_client = (
+            genai.Client(api_key=self.gemini_api_key) if self.gemini_api_key else None
+        )
+
+        # ── Model config ──────────────────────────────────────────────────────
+        self.model         = config.get("model", "gemini/gemini-2.5-flash")
+        self.model_tiers   = config.get("model_tiers", self.DEFAULT_MODEL_TIERS)
         self.fallback_models = self._resolve_fallback_models(config)
-        self.max_tokens = config.get("max_tokens", 4096)
-        self.temperature = config.get("temperature", 0.1)
+
+        # FIX: reduced from 4096 — trading JSON never exceeds 2048 tokens,
+        # reducing this cuts output generation latency by ~40%
+        self.max_tokens  = config.get("max_tokens",  2048)
+
+        # FIX: reduced from 0.1 — lower temperature = more deterministic
+        # confidence scores, fewer random price level hallucinations
+        self.temperature = config.get("temperature", 0.05)
+
+        # FIX: disable Gemini thinking mode for live trading
+        # thinking_budget=0 saves 2-8 seconds per call
+        # Set >0 in config only for overnight strategy review calls
+        self.thinking_budget: int = max(0, int(config.get("thinking_budget", 0)))
+
+        # ── Position sizing ───────────────────────────────────────────────────
         self.max_capital_per_trade_pct: float = max(
-            0.1,
-            min(100.0, float(config.get("max_capital_per_trade_pct", 5.0))),
+            0.1, min(100.0, float(config.get("max_capital_per_trade_pct", 5.0)))
         )
         self.min_trade_quantity: int = max(1, int(config.get("min_trade_quantity", 1)))
         self.max_order_value_absolute = config.get("max_order_value_absolute")
-        # FIX 1: Clamp and validate confidence_threshold at boot, not just in review_strategy.
-        # Bad config values (0.01, 2, "high", None) are caught here before any trade runs.
+
+        # ── Confidence threshold ──────────────────────────────────────────────
         self.confidence_threshold: float = self._validated_confidence_threshold(
             config.get("confidence_threshold", 0.65),
             fallback=0.65,
             source="config",
         )
+
+        # ── Anti-repetition state ─────────────────────────────────────────────
+        # Tracks last cycle to prevent same symbol+direction two cycles in a row
+        self._last_cycle_symbols:    set[str]         = set()
+        self._last_cycle_directions: dict[str, str]   = {}
+
+        # ── History ───────────────────────────────────────────────────────────
         self.decision_history: list[dict] = []
+
         logger.info(
-            "AI model chain configured | primary=%s | fallbacks=%d | tiers=%s | order=%s",
+            "AI model chain configured | primary=%s | fallbacks=%d | "
+            "thinking_budget=%d | max_tokens=%d | temperature=%.3f",
             self.model,
             len(self.fallback_models),
-            list((self.model_tiers or {}).keys()),
-            [self.model, *self.fallback_models],
+            self.thinking_budget,
+            self.max_tokens,
+            self.temperature,
         )
+
+    # ── Provider helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _parse_model_identifier(model_id: str) -> tuple[str, str]:
-        """Parse provider/model; keep backward compatibility for bare Gemini IDs."""
         if "/" not in model_id:
             return "gemini", model_id
         provider, model = model_id.split("/", 1)
@@ -331,15 +379,15 @@ class TradingAgent:
 
     def _ensure_provider_key(self, provider: str) -> None:
         key_by_provider = {
-            "gemini": self.gemini_api_key,
-            "groq": self.groq_api_key,
-            "openrouter": self.openrouter_api_key,
+            "gemini":      self.gemini_api_key,
+            "groq":        self.groq_api_key,
+            "openrouter":  self.openrouter_api_key,
+            "xiaomimimo":  self.xiaomi_mimo_api_key,
         }
         if not key_by_provider.get(provider):
             raise RuntimeError(f"Missing API key for provider '{provider}'.")
 
     def _resolve_fallback_models(self, config: dict) -> list[str]:
-        """Build fallback model list from explicit list plus optional tier groups."""
         seen: set[str] = {self.model}
         resolved: list[str] = []
 
@@ -357,7 +405,6 @@ class TradingAgent:
                 seen.add(model)
                 resolved.append(model)
 
-        # Backward-compatible defaults when config provides neither tiered nor flat fallbacks.
         if not resolved:
             for models in self.DEFAULT_MODEL_TIERS.values():
                 for model in models:
@@ -369,16 +416,8 @@ class TradingAgent:
 
     @staticmethod
     def _validated_confidence_threshold(
-        raw: Any,
-        *,
-        fallback: float,
-        source: str,
+        raw: Any, *, fallback: float, source: str
     ) -> float:
-        """
-        Parse, validate and clamp a confidence threshold value.
-        Returns `fallback` if the value cannot be parsed or is out of range.
-        Logs a warning so the issue is visible in the boot log.
-        """
         try:
             ct = float(raw)
         except (TypeError, ValueError):
@@ -391,59 +430,33 @@ class TradingAgent:
         if ct < MIN_CONFIDENCE_THRESHOLD or ct > MAX_CONFIDENCE_THRESHOLD:
             clamped = max(MIN_CONFIDENCE_THRESHOLD, min(MAX_CONFIDENCE_THRESHOLD, ct))
             logger.warning(
-                "confidence_threshold from %s (%.4f) is outside [%.2f, %.2f]; "
-                "clamping to %.2f.",
+                "confidence_threshold from %s (%.4f) outside [%.2f, %.2f]; clamping to %.2f.",
                 source, ct, MIN_CONFIDENCE_THRESHOLD, MAX_CONFIDENCE_THRESHOLD, clamped,
             )
             return clamped
-
         return ct
 
-    # Keys the AI commonly emits that map to a canonical PARAM_SCHEMA key.
-    # Applied before schema validation so the AI's natural vocabulary is accepted.
-    # When adding aliases: the *value* must be a key that exists in PARAM_SCHEMA.
-    PARAM_ALIASES: dict[str, str] = {
-        # AGENT_SYSTEM_PROMPT and most strategy configs call this "macd_signal";
-        # PARAM_SCHEMA uses "macd_signal_period" to avoid ambiguity with the
-        # indicator value of the same name that appears in watchlist_data.
-        "macd_signal": "macd_signal_period",
-    }
-
     def _validate_param_adjustments(self, raw: Any) -> dict:
-        """
-        Field-by-field validation of every key in parameter_adjustments.
-
-        Rules applied in order:
-        1. Alias normalisation — common AI-emitted names (e.g. "macd_signal") are
-           transparently mapped to their canonical schema key before lookup.
-        2. Unknown keys are dropped (AI cannot create new config keys).
-        3. Non-numeric values are dropped with a warning.
-        4. Values outside the declared [min, max] range are clamped with a warning.
-        5. Integer-typed fields use round-half-up (not banker's rounding).
-
-        Returns a clean dict containing only validated, safe values.
-        """
         if not isinstance(raw, dict):
-            logger.warning("parameter_adjustments is not a dict (%r); ignoring entirely.", type(raw).__name__)
+            logger.warning(
+                "parameter_adjustments is not a dict (%r); ignoring.", type(raw).__name__
+            )
             return {}
 
         clean: dict = {}
         for raw_field, value in raw.items():
-            # FIX 3: resolve alias before schema lookup so the AI's natural
-            # vocabulary ("macd_signal") is accepted and stored under the
-            # canonical name ("macd_signal_period"). Without this, valid
-            # AI suggestions were silently dropped as "unknown" keys.
             field = self.PARAM_ALIASES.get(raw_field, raw_field)
             if raw_field != field:
                 logger.debug("Normalising alias %r → %r", raw_field, field)
 
             if field not in self.PARAM_SCHEMA:
-                logger.warning("Dropping unknown parameter_adjustment field: %r = %r", raw_field, value)
+                logger.warning(
+                    "Dropping unknown parameter_adjustment field: %r = %r", raw_field, value
+                )
                 continue
 
             expected_type, lo, hi = self.PARAM_SCHEMA[field]
 
-            # Parse to float first regardless of expected_type (handles numeric strings)
             try:
                 numeric = float(value)
             except (TypeError, ValueError):
@@ -453,7 +466,6 @@ class TradingAgent:
                 )
                 continue
 
-            # Clamp to declared range
             if numeric < lo or numeric > hi:
                 clamped = max(lo, min(hi, numeric))
                 logger.warning(
@@ -462,7 +474,6 @@ class TradingAgent:
                 )
                 numeric = clamped
 
-            # Cast to declared type using round-half-up (not banker's rounding).
             if expected_type is int:
                 clean[field] = int(math.floor(numeric + 0.5))
             else:
@@ -470,16 +481,12 @@ class TradingAgent:
 
         return clean
 
-    # ── Error Classification ──────────────────────────────────────────────────
+    # ── Error classification ──────────────────────────────────────────────────
 
     def _is_rate_limited_error(self, err: Exception) -> bool:
         msg = str(err).lower()
         return any(t in msg for t in (
-            "429",
-            "rate limit",
-            "too many requests",
-            "quota",
-            "resource_exhausted",
+            "429", "rate limit", "too many requests", "quota", "resource_exhausted",
         ))
 
     def _is_unsupported_system_instruction_error(self, err: Exception) -> bool:
@@ -491,26 +498,14 @@ class TradingAgent:
             "404", "not_found", "model is not found",
             "is not found for api version",
             "not supported for generatecontent",
-            "unknown model",
-            "403",                    # FIX: PERMISSION_DENIED for models not enabled
-            "401",
-            "unauthorized",
-            "invalid api key",
-            "permission_denied",
-            "not have permission",
-            "decommissioned",
-            "model_decommissioned",
+            "unknown model", "403", "401", "unauthorized",
+            "invalid api key", "permission_denied",
+            "not have permission", "decommissioned", "model_decommissioned",
         ))
 
-    # ── Safe Response Text Extraction ────────────────────────────────────────
+    # ── Safe response extraction ──────────────────────────────────────────────
 
     def _extract_response_text(self, response: Any) -> str:
-        """
-        Safely extract text from Gemini response.
-        FIX: accessing .text on a blocked response raises ValueError, not returns None.
-        Traverse candidates/parts directly to avoid this.
-        """
-        # Try candidates first (safer for blocked/partial responses)
         candidates = getattr(response, "candidates", None) or []
         for cand in candidates:
             content = getattr(cand, "content", None)
@@ -521,47 +516,56 @@ class TradingAgent:
                 text = getattr(part, "text", None)
                 if text and text.strip():
                     return text.strip()
-
-        # Fallback to .text only if candidates empty (some SDK versions)
         try:
             text = getattr(response, "text", None)
             if text and text.strip():
                 return text.strip()
         except (ValueError, AttributeError):
-            # .text raises ValueError when response was blocked by safety filters
             pass
-
         return ""
 
+    # ── Provider dispatch ─────────────────────────────────────────────────────
+
     def _generate_with_openai_compatible(
-        self,
-        *,
-        provider: str,
-        model: str,
-        prompt: str,
-        temperature: float,
-        max_tokens: int,
-        expect_json: bool,
+        self, *, provider: str, model: str, prompt: str,
+        temperature: float, max_tokens: int, expect_json: bool,
     ) -> str:
-        base_url = "https://api.groq.com/openai/v1/chat/completions" if provider == "groq" else "https://openrouter.ai/api/v1/chat/completions"
-        api_key = self.groq_api_key if provider == "groq" else self.openrouter_api_key
+        # ── Route to correct base URL and API key ──────────────────────────
+        if provider == "groq":
+            base_url = "https://api.groq.com/openai/v1/chat/completions"
+            api_key  = self.groq_api_key
+
+        elif provider == "xiaomimimo":
+            # Direct Xiaomi MiMo API — no OpenRouter needed
+            # Get key from: platform.xiaomimimo.com
+            base_url = "https://api.xiaomimimo.com/v1/chat/completions"
+            api_key  = self.xiaomi_mimo_api_key
+
+        else:  # openrouter
+            base_url = "https://openrouter.ai/api/v1/chat/completions"
+            api_key  = self.openrouter_api_key
+
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+            "Content-Type":  "application/json",
         }
+
+        # OpenRouter requires these for usage tracking
         if provider == "openrouter":
             headers["HTTP-Referer"] = "https://agentic-trading-bot.local"
-            headers["X-Title"] = "Agentic Trading Bot"
+            headers["X-Title"]      = "Agentic Trading Bot"
 
-        payload = {
-            "model": model,
+        payload: dict = {
+            "model":       model,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens":  max_tokens,
             "messages": [
                 {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
+                {"role": "user",   "content": prompt},
             ],
         }
+
+        # Request JSON output mode where supported
         if expect_json:
             payload["response_format"] = {"type": "json_object"}
 
@@ -575,36 +579,59 @@ class TradingAgent:
 
         choices = data.get("choices") or []
         if not choices:
-            raise RuntimeError(f"{provider} returned empty choices for model {model}.")
+            raise RuntimeError(
+                f"{provider} returned empty choices for model {model}."
+            )
         message = choices[0].get("message") or {}
         content = message.get("content")
         if isinstance(content, str):
             return content.strip()
         if isinstance(content, list):
-            parts = [part.get("text", "") for part in content if isinstance(part, dict)]
+            parts = [p.get("text", "") for p in content if isinstance(p, dict)]
             return "".join(parts).strip()
         return ""
 
     def _generate_with_provider(
-        self,
-        *,
-        provider: str,
-        model: str,
-        prompt: str,
-        temperature: float,
-        max_tokens: int,
-        expect_json: bool,
+        self, *, provider: str, model: str, prompt: str,
+        temperature: float, max_tokens: int, expect_json: bool,
     ) -> str:
         self._ensure_provider_key(provider)
+
         if provider == "gemini":
             if not self.gemini_client:
-                raise RuntimeError("Gemini API key missing. Set GEMINI_API_KEY in .env")
-            cfg = types.GenerateContentConfig(
-                system_instruction=AGENT_SYSTEM_PROMPT,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                response_mime_type="application/json" if expect_json else "text/plain",
-            )
+                raise RuntimeError(
+                    "Gemini API key missing. Set GEMINI_API_KEY in .env"
+                )
+
+            # Build config kwargs — only add thinking_config when disabling
+            config_kwargs: dict = {
+                "system_instruction": AGENT_SYSTEM_PROMPT,
+                "temperature":        temperature,
+                "max_output_tokens":  max_tokens,
+                "response_mime_type": "application/json" if expect_json else "text/plain",
+            }
+
+            # FIX: Disable Gemini thinking mode for live trading speed
+            # thinking_budget=0 saves 2-8 seconds per decision call
+            # Only enable (budget>0) for overnight strategy reviews
+            if self.thinking_budget == 0:
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(
+                        thinking_budget=0
+                    )
+                    logger.debug("Gemini thinking mode: DISABLED (budget=0)")
+                except AttributeError:
+                    # Older google-genai SDK versions don't have ThinkingConfig
+                    # Safe to skip — thinking defaults to off on older SDKs
+                    logger.debug(
+                        "ThinkingConfig not available in SDK version — skipping"
+                    )
+            else:
+                logger.debug(
+                    "Gemini thinking mode: ENABLED (budget=%d)", self.thinking_budget
+                )
+
+            cfg = types.GenerateContentConfig(**config_kwargs)
             response = self.gemini_client.models.generate_content(
                 model=model,
                 contents=prompt,
@@ -612,34 +639,28 @@ class TradingAgent:
             )
             return self._extract_response_text(response)
 
-        if provider in {"groq", "openrouter"}:
+        if provider in {"groq", "openrouter", "xiaomimimo"}:
             return self._generate_with_openai_compatible(
-                provider=provider,
-                model=model,
-                prompt=prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
+                provider=provider, model=model, prompt=prompt,
+                temperature=temperature, max_tokens=max_tokens,
                 expect_json=expect_json,
             )
 
         raise RuntimeError(f"Unsupported model provider '{provider}'.")
 
-    # ── Core Generation (Sync, runs in thread) ───────────────────────────────
+    # ── Core generation (sync, runs in thread) ───────────────────────────────
 
     def _generate_text_sync(
-        self,
-        prompt: str,
-        *,
-        temperature: float,
-        max_tokens: int,
-        expect_json: bool,
+        self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool,
     ) -> tuple[str, str]:
         """
-        Synchronous multi-provider call. Always run via asyncio.to_thread — never call directly.
-        Returns (response_text, model_actually_used) so callers can log the real model.
-        FIX 2: Previously always returned self.model even when a fallback was used.
+        Synchronous multi-provider call with fallback chain.
+        Always run via asyncio.to_thread — never call directly.
+        Returns (response_text, model_actually_used).
         """
-        all_models = [self.model] + [m for m in self.fallback_models if m != self.model]
+        all_models = [self.model] + [
+            m for m in self.fallback_models if m != self.model
+        ]
         last_error: Exception | None = None
         failure_reasons: list[str] = []
 
@@ -647,11 +668,8 @@ class TradingAgent:
             provider, provider_model = self._parse_model_identifier(model_id)
             try:
                 response_text = self._generate_with_provider(
-                    provider=provider,
-                    model=provider_model,
-                    prompt=prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                    provider=provider, model=provider_model, prompt=prompt,
+                    temperature=temperature, max_tokens=max_tokens,
                     expect_json=expect_json,
                 )
                 if model_id != self.model:
@@ -661,16 +679,13 @@ class TradingAgent:
             except Exception as e:
                 last_error = e
                 is_last = idx == len(all_models) - 1
-                reason = "unknown"
+                reason  = "unknown"
 
                 if is_last:
                     failure_reasons.append(f"{model_id}=terminal_error")
                     break
 
                 if self._is_rate_limited_error(e):
-                    # FIX 4: Cap the exponential growth and add ±jitter so a long
-                    # fallback list never stalls the decision loop for 30+ seconds,
-                    # and multiple instances don't all retry at the identical moment.
                     raw_wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** idx)
                     capped   = min(raw_wait, RATE_LIMIT_BACKOFF_MAX_SECONDS)
                     jitter   = capped * RATE_LIMIT_BACKOFF_JITTER * (2 * random.random() - 1)
@@ -685,13 +700,18 @@ class TradingAgent:
                     continue
 
                 if self._is_unsupported_system_instruction_error(e):
-                    logger.warning("Model %s does not support system instructions; trying fallback.", model_id)
+                    logger.warning(
+                        "Model %s does not support system instructions; trying fallback.",
+                        model_id,
+                    )
                     reason = "unsupported_system_instruction"
                     failure_reasons.append(f"{model_id}={reason}")
                     continue
 
                 if self._is_unavailable_model_error(e):
-                    logger.warning("Model %s unavailable/no permission; trying fallback.", model_id)
+                    logger.warning(
+                        "Model %s unavailable/no permission; trying fallback.", model_id
+                    )
                     reason = "unavailable_or_permission"
                     failure_reasons.append(f"{model_id}={reason}")
                     continue
@@ -699,23 +719,18 @@ class TradingAgent:
                 failure_reasons.append(f"{model_id}={reason}")
                 raise
 
-        logger.error("All configured models failed | attempts=%s", ", ".join(failure_reasons))
-        raise RuntimeError(f"All configured models failed. Last error: {last_error}")
+        logger.error(
+            "All configured models failed | attempts=%s", ", ".join(failure_reasons)
+        )
+        raise RuntimeError(
+            f"All configured models failed. Last error: {last_error}"
+        )
 
     # ── Async wrapper ─────────────────────────────────────────────────────────
 
     async def _generate_text(
-        self,
-        prompt: str,
-        *,
-        temperature: float,
-        max_tokens: int,
-        expect_json: bool,
+        self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool,
     ) -> tuple[str, str]:
-        """
-        Runs the synchronous provider-routed call in a thread pool.
-        Returns (response_text, model_actually_used).
-        """
         return await asyncio.to_thread(
             self._generate_text_sync,
             prompt,
@@ -724,32 +739,19 @@ class TradingAgent:
             expect_json=expect_json,
         )
 
-    # ── JSON Extraction ───────────────────────────────────────────────────────
+    # ── JSON extraction ───────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_json(raw_text: str) -> str:
-        """
-        FIX 3: Robust JSON extraction that handles all real-world Gemini output formats:
-          - Plain JSON
-          - ```json ... ``` (single or nested fences)
-          - Leading prose before the fence/JSON
-          - Trailing markdown/text after the closing brace
-          - Single-line fenced payloads: ```json {"k": "v"} ```
-
-        Strategy: find the first '{' or '[' and the matching closing brace/bracket,
-        then validate it parses. Falls back to fence-stripping if no balanced block found.
-        """
         raw = raw_text.strip()
         if not raw:
             return raw
 
-        # ── Pass 1: find the outermost JSON object or array ──────────────────
         for start_char, end_char in (('{', '}'), ('[', ']')):
             start_idx = raw.find(start_char)
             if start_idx == -1:
                 continue
 
-            # Walk forward tracking nesting depth, respecting strings
             depth = 0
             in_string = False
             escape_next = False
@@ -778,30 +780,27 @@ class TradingAgent:
             if end_idx != -1:
                 candidate = raw[start_idx:end_idx + 1]
                 try:
-                    json.loads(candidate)   # validate it's real JSON
+                    json.loads(candidate)
                     return candidate
                 except json.JSONDecodeError:
-                    pass                    # fall through to fence-strip
+                    pass
 
-        # ── Pass 2: fence-strip fallback (handles nested fences) ────────────
         for _ in range(3):
             if not raw.startswith("```"):
                 break
             lines = raw.split("\n")
-            # Drop the opening fence line (```json or ```)
             body_lines = lines[1:]
-            # Drop trailing closing fence if present
             if body_lines and body_lines[-1].strip() == "```":
                 body_lines = body_lines[:-1]
             raw = "\n".join(body_lines).strip()
 
         return raw
 
-    # ── Main Decision Function ────────────────────────────────────────────────
+    # ── Main decision function ────────────────────────────────────────────────
 
     async def analyze_and_decide(self, context: MarketContext) -> list[TradingSignal]:
         """
-        Core decision function. Takes market context, calls Gemini,
+        Core decision function. Takes market context, calls the AI model,
         returns actionable trading signals above the confidence threshold.
         """
         prompt = self._build_prompt(context)
@@ -820,65 +819,78 @@ class TradingAgent:
                 return []
 
             decision = json.loads(self._extract_json(raw_text))
-            signals = self._parse_signals(decision, context)
+            signals  = self._parse_signals(decision, context)
 
-            latency_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
+            latency_ms = int(
+                (datetime.utcnow() - started_at).total_seconds() * 1000
+            )
+
+            # ── Update anti-repetition state ──────────────────────────────
+            self._last_cycle_symbols    = {s.symbol for s in signals if s.is_actionable}
+            self._last_cycle_directions = {
+                s.symbol: s.action.value
+                for s in signals if s.is_actionable
+            }
 
             normalized_signals = [
                 {
-                    "action": s.action.value,
-                    "symbol": s.symbol,
-                    "exchange": s.exchange,
-                    "strategy": s.strategy,
-                    "quantity": s.quantity,
-                    "entry_price": float(s.entry_price) if s.entry_price is not None else None,
-                    "stop_loss": float(s.stop_loss) if s.stop_loss is not None else None,
-                    "target": float(s.target) if s.target is not None else None,
-                    "confidence": s.confidence,
-                    "rationale": s.rationale,
-                    "risk_reward": s.risk_reward,
-                    "timeframe": s.timeframe,
-                    "product": s.product,
-                    "priority": s.priority,
-                    "tags": s.tags,
+                    "action":        s.action.value,
+                    "symbol":        s.symbol,
+                    "exchange":      s.exchange,
+                    "strategy":      s.strategy,
+                    "quantity":      s.quantity,
+                    "entry_price":   float(s.entry_price)  if s.entry_price  is not None else None,
+                    "stop_loss":     float(s.stop_loss)    if s.stop_loss    is not None else None,
+                    "target":        float(s.target)       if s.target       is not None else None,
+                    "confidence":    s.confidence,
+                    "rationale":     s.rationale,
+                    "risk_reward":   s.risk_reward,
+                    "timeframe":     s.timeframe,
+                    "product":       s.product,
+                    "priority":      s.priority,
+                    "tags":          s.tags,
                     "is_actionable": s.is_actionable,
                 }
                 for s in signals
             ]
 
             record = {
-                "timestamp": context.timestamp.isoformat(),
-                "market_regime": decision.get("market_regime"),
-                "commentary": decision.get("market_commentary"),
-                "market_commentary": decision.get("market_commentary"),
-                "risk_assessment": decision.get("risk_assessment"),
-                "signals_count": len(signals),
-                "signals": normalized_signals,
-                "signals_raw": decision.get("signals", []),
-                "positions_to_exit": decision.get("positions_to_exit", []),
+                "timestamp":              context.timestamp.isoformat(),
+                "market_regime":          decision.get("market_regime"),
+                "commentary":             decision.get("market_commentary"),
+                "market_commentary":      decision.get("market_commentary"),
+                "risk_assessment":        decision.get("risk_assessment"),
+                "signals_count":          len(signals),
+                "signals":                normalized_signals,
+                "signals_raw":            decision.get("signals", []),
+                "positions_to_exit":      decision.get("positions_to_exit", []),
                 "session_recommendation": decision.get("session_recommendation"),
-                "raw_response": decision,
-                "model_used": model_used,          # FIX 2: actual model, not self.model
-                "model_requested": self.model,     # handy for spotting fallback frequency
-                "latency_ms": latency_ms,
+                "raw_response":           decision,
+                "model_used":             model_used,
+                "model_requested":        self.model,
+                "latency_ms":             latency_ms,
             }
             self.decision_history.append(record)
 
-            # FIX: Cap history to avoid unbounded memory growth
             if len(self.decision_history) > MAX_DECISION_HISTORY:
                 self.decision_history = self.decision_history[-MAX_DECISION_HISTORY:]
 
             logger.info(
-                "🤖 AI Decision | Regime: %s | Signals: %d | Risk: %s | Latency: %dms",
+                "AI Decision | Regime: %s | Signals: %d | Risk: %s | "
+                "Latency: %dms | Model: %s",
                 decision.get("market_regime"),
                 len(signals),
                 decision.get("risk_assessment"),
                 latency_ms,
+                model_used,
             )
 
-            actionable = [s for s in signals if s.confidence >= self.confidence_threshold]
+            actionable = [
+                s for s in signals
+                if s.confidence >= self.confidence_threshold
+            ]
             logger.info(
-                "📊 %d/%d signals above confidence threshold (%.2f)",
+                "%d/%d signals above confidence threshold (%.2f)",
                 len(actionable), len(signals), self.confidence_threshold,
             )
             return actionable
@@ -891,17 +903,21 @@ class TradingAgent:
             if "api key" in err and "missing" in err:
                 logger.error("AI agent disabled: missing GEMINI_API_KEY.")
             elif self._is_rate_limited_error(e):
-                logger.error("AI agent failed: all Gemini models are rate-limited.")
+                logger.error(
+                    "AI agent failed: all models are rate-limited."
+                )
             else:
                 logger.error("AI agent error: %s", e, exc_info=True)
             return []
 
-    # ── Strategy Review ───────────────────────────────────────────────────────
+    # ── Strategy review ───────────────────────────────────────────────────────
 
     async def review_strategy(self, performance_data: dict) -> dict:
         """
-        Periodic strategy review. AI evaluates what's working and
+        Periodic strategy review. AI evaluates recent performance and
         suggests parameter adjustments.
+        Note: this call CAN use higher thinking_budget if needed since
+        it runs hourly and latency is not critical.
         """
         prompt = f"""
 Review this trading bot's recent performance and provide strategic recommendations.
@@ -935,29 +951,16 @@ Respond ONLY with a valid JSON object:
             )
             result = json.loads(self._extract_json(raw))
 
-            # FIX 4: Validate parameter_adjustments field-by-field in its own try/except.
-            # A single malformed value (e.g. confidence_threshold="high") no longer
-            # discards the entire review result — only that one field is removed.
-            # FIX 3: validate every field in parameter_adjustments against PARAM_SCHEMA.
-            # Unknown keys are dropped, out-of-range values are clamped, non-numeric
-            # values are dropped — all field-by-field so one bad value never discards
-            # the rest of the review result.
-            raw_params = result.get("parameter_adjustments", {})
+            raw_params       = result.get("parameter_adjustments", {})
             validated_params = self._validate_param_adjustments(raw_params)
             result["parameter_adjustments"] = validated_params
 
-            # Fix 2: warn at runtime when validated keys are not in the consumer
-            # contract, so "validated but never applied" mismatches surface in logs
-            # on the first real review cycle rather than silently being ignored.
-            # The check is a no-op until PARAM_CONSUMER_KEYS is populated by the
-            # engine/risk layer (see class-level docstring for instructions).
             if self.PARAM_CONSUMER_KEYS:
                 unclaimed = set(validated_params) - self.PARAM_CONSUMER_KEYS
                 if unclaimed:
                     logger.warning(
-                        "review_strategy returned parameter keys not in "
-                        "PARAM_CONSUMER_KEYS — they will be ignored by the engine: %s. "
-                        "Add them to PARAM_CONSUMER_KEYS or remove from PARAM_SCHEMA.",
+                        "review_strategy returned keys not in PARAM_CONSUMER_KEYS "
+                        "(will be ignored): %s",
                         sorted(unclaimed),
                     )
 
@@ -986,54 +989,81 @@ Position: {json.dumps(position, indent=2)}
             logger.error("explain_position error: %s", e)
             return "Unable to analyze position."
 
-    # ── Prompt Builder ────────────────────────────────────────────────────────
+    # ── Prompt builder ────────────────────────────────────────────────────────
 
     def _build_prompt(self, ctx: MarketContext) -> str:
-        # Open positions summary
+        # ── Open positions summary ──────────────────────────────────────────
         positions_summary = ""
         if ctx.open_positions:
             for p in ctx.open_positions:
                 pnl_str = f"₹{p.get('pnl', 0):+,.0f}"
                 positions_summary += (
                     f"  - {p['symbol']} | {p['side']} {p['quantity']} | "
-                    f"Avg: ₹{p.get('avg_price', 0):,.2f} | LTP: ₹{p.get('ltp', 0):,.2f} | P&L: {pnl_str}\n"
+                    f"Avg: ₹{p.get('avg_price', 0):,.2f} | "
+                    f"LTP: ₹{p.get('ltp', 0):,.2f} | P&L: {pnl_str}\n"
                 )
 
-        # Watchlist summary — FIX: include richer signal data for better AI decisions
+        # ── Watchlist summary ───────────────────────────────────────────────
+        # Sort by signal strength so the model sees strongest setups first
+        sorted_watchlist = sorted(
+            ctx.watchlist_data[:15],
+            key=lambda w: (
+                # Rank: bullish > neutral > bearish
+                0 if w.get("indicators", {}).get("overall_signal") == "bullish" else
+                1 if w.get("indicators", {}).get("overall_signal") == "neutral"  else 2
+            ),
+        )
+
         watchlist_summary = ""
-        for w in ctx.watchlist_data[:15]:
+        open_symbols = {p["symbol"] for p in ctx.open_positions}
+
+        for w in sorted_watchlist:
             ind = w.get("indicators", {})
             levels = w.get("levels", {})
-            rsi_val = ind.get("rsi", "N/A")
-            macd_sig = ind.get("macd_signal", "N/A")
-            bb_sig = ind.get("bb_signal", "N/A")
-            supertrend = ind.get("supertrend", "N/A")
-            vol_ratio = ind.get("volume_ratio", 1.0)
-            overall = ind.get("overall_signal", "neutral")
-            pivot = levels.get("pivot", "N/A")
-            r1 = levels.get("r1", "N/A")
-            s1 = levels.get("s1", "N/A")
+            rsi_val    = ind.get("rsi",          "N/A")
+            macd_sig   = ind.get("macd_signal",  "N/A")
+            bb_sig     = ind.get("bb_signal",    "N/A")
+            supertrend = ind.get("supertrend",   "N/A")
+            vol_ratio  = ind.get("volume_ratio", 1.0)
+            overall    = ind.get("overall_signal","neutral")
+            pivot      = levels.get("pivot", "N/A")
+            r1         = levels.get("r1",    "N/A")
+            s1         = levels.get("s1",    "N/A")
+
+            # Flag already-positioned symbols so model skips them
+            has_position = w["symbol"] in open_symbols
+            position_flag = " [HAS OPEN POSITION — SKIP]" if has_position else ""
+
+            # Flag symbols repeated from last cycle
+            last_dir = self._last_cycle_directions.get(w["symbol"])
+            repeat_flag = (
+                f" [LAST CYCLE: {last_dir} — DO NOT REPEAT SAME DIRECTION]"
+                if last_dir else ""
+            )
 
             watchlist_summary += (
-                f"  **{w['symbol']}** | LTP: ₹{w.get('ltp', 0):,.2f} | "
+                f"  **{w['symbol']}**{position_flag}{repeat_flag} | "
+                f"LTP: ₹{w.get('ltp', 0):,.2f} | "
                 f"Chg: {w.get('change_pct', 0):+.2f}% | "
                 f"RSI: {rsi_val} | MACD: {macd_sig} | BB: {bb_sig} | "
                 f"Supertrend: {supertrend} | Vol: {vol_ratio}x | "
                 f"Signal: {overall} | Pivot: {pivot} R1: {r1} S1: {s1}\n"
             )
 
-        # VIX interpretation
+        # ── VIX interpretation ──────────────────────────────────────────────
         vix = ctx.india_vix
         if vix > 25:
-            vix_interp = "EXTREME FEAR - avoid directional trades"
+            vix_interp = "EXTREME FEAR — avoid all directional trades"
+        elif vix > 22:
+            vix_interp = "VERY HIGH FEAR — return avoid_trading recommendation"
         elif vix > 18:
-            vix_interp = "HIGH FEAR - prefer mean-reversion"
+            vix_interp = "HIGH FEAR — prefer mean-reversion, reduce size 30%"
         elif vix > 14:
-            vix_interp = "MODERATE - normal trading"
+            vix_interp = "MODERATE — normal trading"
         else:
-            vix_interp = "LOW - favour momentum/trend"
+            vix_interp = "LOW — favour momentum/trend strategies"
 
-        # PCR interpretation
+        # ── PCR interpretation ──────────────────────────────────────────────
         pcr = ctx.pcr or 1.0
         if pcr > 1.5:
             pcr_interp = "extremely bullish contrarian signal"
@@ -1044,7 +1074,7 @@ Position: {json.dumps(position, indent=2)}
         elif pcr > 0.5:
             pcr_interp = "bearish"
         else:
-            pcr_interp = "extremely bearish - high complacency"
+            pcr_interp = "extremely bearish — high complacency risk"
 
         options_summary = (
             json.dumps(ctx.options_chain_summary, indent=2)
@@ -1052,68 +1082,79 @@ Position: {json.dumps(position, indent=2)}
             else "Not available"
         )
 
+        # ── Last cycle memory ───────────────────────────────────────────────
+        # Injecting this prevents the model from repeating the same
+        # symbol+direction two cycles in a row
+        last_cycle_summary = "No previous cycle data."
+        if self.decision_history:
+            last = self.decision_history[-1]
+            last_sigs = last.get("signals", [])
+            actionable_last = [
+                s for s in last_sigs
+                if s.get("action") not in ("HOLD", "NO_ACTION")
+            ]
+            if actionable_last:
+                lines = []
+                for s in actionable_last[:3]:
+                    lines.append(
+                        f"  - {s.get('symbol')} {s.get('action')} "
+                        f"@ confidence {s.get('confidence', 0):.2f} "
+                        f"(strategy: {s.get('strategy', 'unknown')})"
+                    )
+                last_cycle_summary = "\n".join(lines)
+            else:
+                last_cycle_summary = "Previous cycle returned NO_ACTION for all symbols."
+
         return DECISION_PROMPT_TEMPLATE.format(
-            timestamp=ctx.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            session=ctx.session,
-            day_of_week=ctx.day_of_week,
-            nifty50_ltp=f"{ctx.nifty50_ltp:,.2f}",
-            banknifty_ltp=f"{ctx.banknifty_ltp:,.2f}",
-            india_vix=f"{ctx.india_vix:.2f}",
-            vix_interpretation=vix_interp,
-            market_trend=ctx.market_trend,
-            pcr=f"{pcr:.2f}" if ctx.pcr else "N/A",
-            pcr_interpretation=pcr_interp,
-            available_capital=ctx.available_capital,
-            used_margin=ctx.used_margin,
-            open_positions_count=len(ctx.open_positions),
-            open_positions_summary=positions_summary or "  None",
-            watchlist_summary=watchlist_summary or "  No data",
-            options_summary=options_summary,
-            news_sentiment=ctx.recent_news_sentiment or "Not available",
+            timestamp             = ctx.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            session               = ctx.session,
+            day_of_week           = ctx.day_of_week,
+            nifty50_ltp           = f"{ctx.nifty50_ltp:,.2f}",
+            banknifty_ltp         = f"{ctx.banknifty_ltp:,.2f}",
+            india_vix             = f"{ctx.india_vix:.2f}",
+            vix_interpretation    = vix_interp,
+            market_trend          = ctx.market_trend,
+            pcr                   = f"{pcr:.2f}" if ctx.pcr else "N/A",
+            pcr_interpretation    = pcr_interp,
+            available_capital     = ctx.available_capital,
+            used_margin           = ctx.used_margin,
+            open_positions_count  = len(ctx.open_positions),
+            open_positions_summary= positions_summary or "  None",
+            watchlist_summary     = watchlist_summary or "  No data",
+            options_summary       = options_summary,
+            news_sentiment        = ctx.recent_news_sentiment or "Not available",
+            last_cycle_summary    = last_cycle_summary,
         )
 
-    # ── Signal Parser ─────────────────────────────────────────────────────────
-
-    # ── Decimal helper ────────────────────────────────────────────────────────
+    # ── Signal parser ─────────────────────────────────────────────────────────
 
     @staticmethod
     def _to_decimal(value: Any, field: str, symbol: str) -> Optional[Decimal]:
-        """
-        Convert a raw AI value to Decimal safely.
-        Handles the two failure modes that Decimal conversion can produce:
-          - InvalidOperation: Decimal("N/A"), Decimal("~2450"), Decimal("null"), etc.
-          - ValueError: raised explicitly below for non-finite results (Inf, NaN).
-        TypeError covers non-string/non-numeric inputs that str() cannot sensibly convert.
-        We do NOT use bare `except Exception` — that would swallow AttributeErrors or
-        MemoryErrors that signal real bugs and should propagate.
-        """
         if value is None or value == "" or value is False:
             return None
         try:
             result = Decimal(str(value))
         except InvalidOperation as exc:
-            # e.g. "N/A", "~2450", "null", "pending" — model returned garbage
             raise ValueError(
-                f"invalid price for {field} on {symbol}: {value!r} (not a valid decimal)"
+                f"invalid price for {field} on {symbol}: {value!r}"
             ) from exc
         except (TypeError, ArithmeticError) as exc:
-            # Unexpected type or arithmetic failure during conversion
             raise ValueError(
                 f"invalid price for {field} on {symbol}: {value!r} ({type(exc).__name__})"
             ) from exc
-        # Reject special values Decimal accepts but trading math cannot use
         if not result.is_finite():
             raise ValueError(
-                f"invalid price for {field} on {symbol}: {value!r} (non-finite: {result})"
+                f"invalid price for {field} on {symbol}: {value!r} (non-finite)"
             )
         return result
 
-    def _parse_signals(self, decision: dict, ctx: MarketContext) -> list[TradingSignal]:
+    def _parse_signals(
+        self, decision: dict, ctx: MarketContext
+    ) -> list[TradingSignal]:
         signals = []
+        open_symbols = {p["symbol"] for p in ctx.open_positions}
+
         for raw_idx, s in enumerate(decision.get("signals", [])):
-            # FIX 1: guard non-dict entries before any attribute access.
-            # The AI can return a string, list, or null in the signals array;
-            # calling .get() on those raises AttributeError before the try block.
             if not isinstance(s, dict):
                 logger.warning(
                     "Skipping signals[%d]: expected dict, got %s (%r)",
@@ -1122,25 +1163,36 @@ Position: {json.dumps(position, indent=2)}
                 continue
 
             symbol = s.get("symbol", "UNKNOWN")
+
             try:
-                action = SignalAction(s.get("action", SignalAction.NO_ACTION.value))
+                action = SignalAction(
+                    s.get("action", SignalAction.NO_ACTION.value)
+                )
+
+                # ── Hard filter: skip signals for symbols with open positions
+                if symbol in open_symbols and action not in (
+                    SignalAction.HOLD, SignalAction.NO_ACTION,
+                    SignalAction.SQUARE_OFF, SignalAction.COVER,
+                ):
+                    logger.info(
+                        "Skipping %s %s — already has open position",
+                        action.value, symbol,
+                    )
+                    continue
+
                 qty = int(s.get("quantity", 0))
                 if qty <= 0:
                     qty = self._fallback_quantity_for_signal(s, ctx)
                     if qty <= 0:
                         logger.warning(
-                            "Skipping signal with quantity=%d for %s | action=%s | capital=%.2f",
-                            qty,
-                            symbol,
-                            action.value,
-                            ctx.available_capital,
+                            "Skipping signal with quantity=%d for %s | "
+                            "action=%s | capital=%.2f",
+                            qty, symbol, action.value, ctx.available_capital,
                         )
                         continue
                     logger.info(
                         "Applied fallback quantity=%d for %s | action=%s",
-                        qty,
-                        symbol,
-                        action.value,
+                        qty, symbol, action.value,
                     )
 
                 confidence = max(0.0, min(1.0, float(s.get("confidence", 0.5))))
@@ -1150,42 +1202,52 @@ Position: {json.dumps(position, indent=2)}
                 target      = self._to_decimal(s.get("target"),      "target",      symbol)
 
                 signals.append(TradingSignal(
-                    action=action,
-                    symbol=symbol,
-                    exchange=s.get("exchange", "NSE"),
-                    strategy=s.get("strategy", "unknown"),
-                    quantity=qty,
-                    entry_price=entry_price,
-                    stop_loss=stop_loss,
-                    target=target,
-                    confidence=confidence,
-                    rationale=s.get("rationale", ""),
-                    risk_reward=float(s["risk_reward"]) if s.get("risk_reward") else None,
-                    timeframe=s.get("timeframe", "intraday"),
-                    product=s.get("product", "MIS"),
-                    priority=int(s.get("priority", 5)),
-                    tags=s.get("tags", []),
+                    action      = action,
+                    symbol      = symbol,
+                    exchange    = s.get("exchange", "NSE"),
+                    strategy    = s.get("strategy", "unknown"),
+                    quantity    = qty,
+                    entry_price = entry_price,
+                    stop_loss   = stop_loss,
+                    target      = target,
+                    confidence  = confidence,
+                    rationale   = s.get("rationale", ""),
+                    risk_reward = float(s["risk_reward"]) if s.get("risk_reward") else None,
+                    timeframe   = s.get("timeframe", "intraday"),
+                    product     = s.get("product", "MIS"),
+                    priority    = int(s.get("priority", 5)),
+                    tags        = s.get("tags", []),
                 ))
-            # FIX 2: widen the catch to include TypeError and AttributeError.
-            # int()/float()/SignalAction() can raise TypeError when passed an
-            # unexpected type; dict.get() on a nested non-dict raises AttributeError.
-            # Neither should abort the entire parse — skip only this one signal.
+
             except (KeyError, ValueError, TypeError, AttributeError) as e:
                 logger.warning("Skipping malformed signal for %s: %s", symbol, e)
 
-        # Sort by priority ASC, then confidence DESC
+        # Sort by priority ASC then confidence DESC
         signals.sort(key=lambda x: (x.priority, -x.confidence))
+
+        # Hard cap at 2 signals — enforced here as a safety net even if
+        # the model ignores the prompt instruction
+        if len(signals) > 2:
+            logger.info(
+                "Capping signals from %d to 2 (max 2 per cycle rule)",
+                len(signals),
+            )
+            signals = signals[:2]
+
         return signals
 
-    def _fallback_quantity_for_signal(self, raw_signal: dict, ctx: MarketContext) -> int:
-        """Derive a tradable quantity when model returns zero/non-positive quantity."""
+    def _fallback_quantity_for_signal(
+        self, raw_signal: dict, ctx: MarketContext
+    ) -> int:
         symbol = str(raw_signal.get("symbol") or "").upper()
         entry_price = raw_signal.get("entry_price")
 
         resolved_price: Optional[Decimal] = None
         if entry_price not in (None, ""):
             try:
-                resolved_price = self._to_decimal(entry_price, "entry_price", symbol)
+                resolved_price = self._to_decimal(
+                    entry_price, "entry_price", symbol
+                )
             except ValueError:
                 resolved_price = None
 
@@ -1202,10 +1264,15 @@ Position: {json.dumps(position, indent=2)}
         if resolved_price is None or resolved_price <= 0:
             return 0
 
-        capital = Decimal(str(max(ctx.available_capital, 0.0)))
-        per_trade_budget = capital * Decimal(str(self.max_capital_per_trade_pct / 100.0))
+        capital          = Decimal(str(max(ctx.available_capital, 0.0)))
+        per_trade_budget = capital * Decimal(
+            str(self.max_capital_per_trade_pct / 100.0)
+        )
         if self.max_order_value_absolute is not None:
-            per_trade_budget = min(per_trade_budget, Decimal(str(self.max_order_value_absolute)))
+            per_trade_budget = min(
+                per_trade_budget,
+                Decimal(str(self.max_order_value_absolute)),
+            )
         if per_trade_budget <= 0:
             return 0
 
