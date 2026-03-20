@@ -548,13 +548,21 @@ def _summarize_trades(trades: list[dict]) -> dict:
     }
 
 async def create_and_start_replay(app_config: dict, payload: dict) -> dict:
+    from dataclasses import fields as dc_fields
+
     from database.repository import ReplayRunRepository
 
     run_id = str(uuid.uuid4())
     await ReplayRunRepository.create(run_id, payload)
     engine = ReplayEngine(app_config)
+
+    # Filter payload to only include fields that ReplayConfig accepts,
+    # stripping extra keys like selection_mode, budget_cap, max_auto_symbols, etc.
+    valid_keys = {f.name for f in dc_fields(ReplayConfig)}
+    filtered_payload = {k: v for k, v in payload.items() if k in valid_keys}
+
     async def _safe_replay_task() -> None:
-        await engine.run(run_id, ReplayConfig(**payload))
+        await engine.run(run_id, ReplayConfig(**filtered_payload))
 
     asyncio.create_task(_safe_replay_task())
     return {"run_id": run_id, "status": "queued"}
