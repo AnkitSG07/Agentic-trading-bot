@@ -37,7 +37,24 @@ class ReplayEngine:
         from risk.manager import RiskConfig, RiskManager
 
         self.agent = TradingAgent(app_config.get("agent", {}))
-        self.risk = RiskManager(RiskConfig())
+
+        # Replay uses relaxed risk limits so AI signals are actually tested,
+        # not silently blocked by the live-trading 5% per-trade cap.
+        replay_risk_cfg = RiskConfig(
+            max_capital_per_trade_pct=95.0,   # allow nearly full budget per trade
+            max_open_positions=50,            # no practical limit in replay
+            max_daily_loss_pct=100.0,         # don't kill-switch during replay
+            max_drawdown_pct=100.0,           # don't kill-switch during replay
+            stop_loss_pct=3.0,                # wider SL for historical candles
+            min_cash_buffer=0.0,              # no cash reserve in replay
+            tiny_account_mode=False,          # disable extra tiny-account restrictions
+        )
+        self.risk = RiskManager(replay_risk_cfg)
+        logger.info(
+            "Replay risk config: max_capital_per_trade_pct=%.0f%%, max_positions=%d",
+            replay_risk_cfg.max_capital_per_trade_pct,
+            replay_risk_cfg.max_open_positions,
+        )
 
     async def run(self, run_id: str, cfg: ReplayConfig) -> dict:
         from agents.brain import MarketContext, SignalAction
@@ -185,6 +202,7 @@ class ReplayEngine:
                 for s in signals:
                     signal_candle = snap.get(s.symbol) or last_seen.get(s.symbol)
                     if not s.is_actionable or not signal_candle:
+                        logger.debug("Signal skipped: symbol=%s actionable=%s has_candle=%s", s.symbol, s.is_actionable, bool(signal_candle))
                         continue
                     price = Decimal(str(signal_candle["close"]))
                     dynamic_slippage_pct = _estimate_replay_slippage_pct(signal_candle, cfg)
@@ -195,10 +213,15 @@ class ReplayEngine:
                     funds = Funds(available_cash=cash, used_margin=Decimal("0"), total_balance=cash)
                     check = await self.risk.check_pre_trade(s.symbol, s.action.value, s.quantity, exec_price, s.stop_loss, open_positions, funds)
                     if not check.approved:
+                        logger.warning(
+                            "Replay trade REJECTED by risk manager: symbol=%s action=%s qty=%s price=%.2f cash=%.2f reason=%s",
+                            s.symbol, s.action.value, s.quantity, exec_price, cash, check.reason,
+                        )
                         continue
                     requested_qty = Decimal(str(check.adjusted_quantity or s.quantity or 1))
                     qty = _simulate_partial_fill(requested_qty, idx, ts, s.symbol, cfg)
                     if qty <= 0:
+                        logger.warning("Replay trade skipped: partial fill returned qty=0 for %s", s.symbol)
                         continue
                     fee = exec_price * qty * Decimal(str(cfg.fee_pct))
                     action = s.action.value
