@@ -536,6 +536,13 @@ class TradingEngine:
         set_engine(self)
 
         await self._init_brokers()
+        # Give NSEDataFeed the broker references so it can pull
+        # index prices from Dhan/Zerodha instead of scraping NSE directly.
+        self.nse_feed.set_brokers(
+            dhan_broker=self.brokers.get("dhan"),
+            zerodha_broker=self.brokers.get("zerodha"),
+        )
+        
         execution_broker = self.get_execution_broker()
         if not execution_broker:
             raise RuntimeError("No broker connected. Check credentials.")
