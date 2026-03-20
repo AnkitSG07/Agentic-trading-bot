@@ -391,6 +391,13 @@ class TradingAgent:
         # ── History ───────────────────────────────────────────────────────────
         self.decision_history: list[dict] = []
 
+        # ── Circuit breaker: skip persistently failing models ─────────────
+        self._model_consecutive_failures: dict[str, int] = {}
+        self._model_skip_until: dict[str, int] = {}
+        self._call_counter: int = 0
+        self.circuit_breaker_threshold: int = 3    # failures before tripping
+        self.circuit_breaker_cooldown: int  = 30   # calls to skip after trip
+
         logger.info(
             "AI model chain configured | primary=%s | fallbacks=%d | "
             "thinking_budget=%d | max_tokens=%d | temperature=%.3f | "
@@ -689,8 +696,22 @@ class TradingAgent:
         ]
         last_error: Exception | None = None
         failure_reasons: list[str] = []
+        self._call_counter += 1
 
         for idx, model_id in enumerate(all_models):
+            # ── Circuit breaker: skip models that keep failing ────────────
+            skip_until = self._model_skip_until.get(model_id, 0)
+            if skip_until > self._call_counter:
+                remaining = skip_until - self._call_counter
+                logger.info(
+                    "Circuit breaker: skipping %s (%d consecutive failures, %d calls remaining)",
+                    model_id,
+                    self._model_consecutive_failures.get(model_id, 0),
+                    remaining,
+                )
+                failure_reasons.append(f"{model_id}=circuit_breaker_skip")
+                continue
+
             provider, provider_model = self._parse_model_identifier(model_id)
             try:
                 response_text = self._generate_with_provider(
@@ -698,6 +719,12 @@ class TradingAgent:
                     temperature=temperature, max_tokens=max_tokens,
                     expect_json=expect_json,
                 )
+                # Success — reset circuit breaker for this model
+                if self._model_consecutive_failures.get(model_id, 0) > 0:
+                    logger.info("Circuit breaker reset for %s (was at %d failures)",
+                                model_id, self._model_consecutive_failures[model_id])
+                self._model_consecutive_failures[model_id] = 0
+
                 if model_id != self.model:
                     logger.warning("Using fallback model: %s", model_id)
                 return response_text, model_id
@@ -712,13 +739,28 @@ class TradingAgent:
                     break
 
                 if self._is_rate_limited_error(e):
+                    # Track consecutive failures for circuit breaker
+                    prev_fails = self._model_consecutive_failures.get(model_id, 0)
+                    self._model_consecutive_failures[model_id] = prev_fails + 1
+                    if self._model_consecutive_failures[model_id] >= self.circuit_breaker_threshold:
+                        self._model_skip_until[model_id] = self._call_counter + self.circuit_breaker_cooldown
+                        logger.warning(
+                            "Circuit breaker TRIPPED for %s after %d consecutive failures — "
+                            "skipping for next %d calls.",
+                            model_id,
+                            self._model_consecutive_failures[model_id],
+                            self.circuit_breaker_cooldown,
+                        )
+                        failure_reasons.append(f"{model_id}=circuit_breaker_tripped")
+                        continue  # skip backoff — move to next model immediately
+
                     raw_wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** idx)
                     capped   = min(raw_wait, RATE_LIMIT_BACKOFF_MAX_SECONDS)
                     jitter   = capped * RATE_LIMIT_BACKOFF_JITTER * (2 * random.random() - 1)
                     wait     = max(0.0, capped + jitter)
                     logger.warning(
-                        "Model %s rate-limited; waiting %.1fs before fallback (idx=%d).",
-                        model_id, wait, idx,
+                        "Model %s rate-limited; waiting %.1fs before fallback (idx=%d, fails=%d).",
+                        model_id, wait, idx, self._model_consecutive_failures[model_id],
                     )
                     reason = "rate_limited"
                     failure_reasons.append(f"{model_id}={reason}")
