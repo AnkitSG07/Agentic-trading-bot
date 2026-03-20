@@ -2199,6 +2199,27 @@ export default function TradingDashboard() {
     try {
       if (simConfig.selection_mode === "auto") {
         if (Number(simConfig.budget_cap || 0) <= 0) throw new Error("Enter a valid budget in rupees.");
+
+        // Step 1: Get candidate universe symbols from the server
+        const universeRes = await fetch(`${API_BASE}/api/replay/candidate-universe`);
+        const universeData = await universeRes.json();
+        const candidateSymbols = universeData?.symbols || [];
+        if (!candidateSymbols.length) throw new Error("No candidate symbols available. Start the engine or configure a watchlist first.");
+
+        // Step 2: Backfill candidate symbols FIRST so historical data is available in the database
+        const backfillPayload = {
+          symbols: candidateSymbols,
+          exchange: simConfig.exchange,
+          timeframe: simConfig.timeframe,
+          start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
+          end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
+        };
+        const bfRes = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(backfillPayload) });
+        const bfOut = await bfRes.json();
+        if (!bfRes.ok) throw new Error(extractErrorMessage(bfOut?.detail) || "Backfill failed");
+        if (Array.isArray(bfOut?.failures) && bfOut.failures.length) throw new Error(`Backfill: ${extractErrorMessage(bfOut.failures[0]?.error) || "some symbols failed"}`);
+
+        // Step 3: Now select symbols from backfilled data
         const selectPayload = {
           symbols: [],
           exchange: simConfig.exchange,
@@ -2217,17 +2238,20 @@ export default function TradingDashboard() {
         setSimState(prev => ({ ...prev, selectionSummary: selection }));
       }
       if (!symbols.length) throw new Error(simConfig.selection_mode === "auto" ? "No affordable symbols found." : "Add at least one symbol.");
-      const payload = {
-        symbols,
-        exchange: simConfig.exchange,
-        timeframe: simConfig.timeframe,
-        start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
-        end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
-      };
-      const res = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      const out = await res.json();
-      if (!res.ok) throw new Error(extractErrorMessage(out?.detail) || "Backfill failed");
-      if (Array.isArray(out?.failures) && out.failures.length) throw new Error(`Backfill: ${extractErrorMessage(out.failures[0]?.error) || "some symbols failed"}`);
+      if (simConfig.selection_mode !== "auto") {
+        // Manual mode: backfill the specified symbols
+        const payload = {
+          symbols,
+          exchange: simConfig.exchange,
+          timeframe: simConfig.timeframe,
+          start_date: normalizedStartDate ? `${normalizedStartDate}T00:00:00` : null,
+          end_date: normalizedEndDate ? `${normalizedEndDate}T23:59:59` : null,
+        };
+        const res = await fetch(`${API_BASE}/api/historical/backfill`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const out = await res.json();
+        if (!res.ok) throw new Error(extractErrorMessage(out?.detail) || "Backfill failed");
+        if (Array.isArray(out?.failures) && out.failures.length) throw new Error(`Backfill: ${extractErrorMessage(out.failures[0]?.error) || "some symbols failed"}`);
+      }
       await loadSimulation({ symbols });
     } catch (e) { setSimState(prev => ({ ...prev, error: toUiError(e, "Backfill failed"), data: null, liveReplay: null })); }
     finally { setSimBackfilling(false); }
