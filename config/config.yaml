@@ -51,36 +51,37 @@ agent:
   api_key_env: "GEMINI_API_KEY"
   groq_api_key_env: "GROQ_API_KEY"
   openrouter_api_key_env: "OPENROUTER_API_KEY"
-  xiaomi_mimo_api_key_env: "XIAOMI_MIMO_API_KEY"   # optional — direct MiMo API
+  # fix 22: added Xiaomi MiMo API key env var (optional — direct MiMo API)
+  # Get key from: platform.xiaomimimo.com
+  xiaomi_mimo_api_key_env: "XIAOMI_MIMO_API_KEY"
 
   # ── Primary Model ───────────────────────────────────────────
-  # Gemini 2.5 Flash with thinking disabled is the best choice
-  # for intraday trading: fast JSON, large context, cheapest capable model
+  # Gemini 2.5 Flash with thinking disabled is the best choice for
+  # intraday trading: fast JSON, large context, cheapest capable model.
   model: "gemini/gemini-2.5-flash"
 
   # ── Thinking Mode ───────────────────────────────────────────
+  # fix 21: added thinking_budget config (was missing entirely)
   # 0  = DISABLED (recommended for live trading — saves 2-8s per call)
   # >0 = enables Gemini chain-of-thought (use only for strategy review)
   # NEVER set above 0 during market hours
   thinking_budget: 0
 
   # ── Model Tiers ─────────────────────────────────────────────
-  # IMPORTANT: Only models >= 32B parameters are listed here.
-  # Smaller models (7B, 8B) hallucinate price levels and
-  # generate invalid JSON for complex watchlist prompts.
+  # fix 23: removed all sub-32B models from tiers
   # Removed models (reason):
-  #   groq/llama-3.1-8b-instant       — 8B hallucinates prices
-  #   groq/mixtral-8x7b-32768         — Groq deprecated endpoint
-  #   openrouter/mistralai/mistral-7b  — 7B too small for prompt
+  #   groq/llama-3.1-8b-instant        — 8B hallucinates prices
+  #   groq/mixtral-8x7b-32768          — Groq deprecated endpoint
+  #   openrouter/mistralai/mistral-7b   — 7B too small for prompt
   #   openrouter/mistralai/mistral-nemo — poor financial reasoning
-  #   openrouter/qwen/qwen-2.5-7b      — 7B invalid SL values
-  #   gemini/gemini-1.5-flash          — replaced by 2.0-flash
+  #   openrouter/qwen/qwen-2.5-7b       — 7B invalid SL values
+  #   gemini/gemini-1.5-flash           — replaced by 2.0-flash
   model_tiers:
     ultra_fast:
-      # Fastest option when primary is rate-limited
+      # Fastest fallback when primary is rate-limited
       - "gemini/gemini-2.5-flash-lite"
     fast:
-      # Proven reliable, works on cloud IPs, strong JSON adherence
+      # Reliable, works on cloud IPs, strong JSON adherence
       - "gemini/gemini-2.0-flash"
       # DeepSeek V3 — excellent financial domain, very cheap
       - "openrouter/deepseek/deepseek-chat"
@@ -100,27 +101,27 @@ agent:
     - "openrouter/qwen/qwen-2.5-72b-instruct"
 
   # ── Generation Parameters ───────────────────────────────────
-  # max_tokens: reduced 4096→2048
+  # fix: max_tokens reduced 4096→2048
   #   Trading JSON responses never exceed ~1200 tokens.
   #   Smaller limit cuts output generation latency by ~40%.
   max_tokens: 2048
 
-  # temperature: reduced 0.1→0.05
+  # fix: temperature reduced 0.1→0.05
   #   Lower = more deterministic confidence scores.
   #   Prevents random variation in RSI/MACD interpretation.
   temperature: 0.05
 
   # ── Decision Timing ─────────────────────────────────────────
-  # How often AI evaluates the market during trading hours
   decision_interval_seconds: 60
-  # Full strategy review (uses performance data, runs hourly)
   strategy_review_interval: 3600
   max_concurrent_strategies: 5
 
   # ── Signal Quality Gate ─────────────────────────────────────
-  # Minimum confidence required to pass a signal to risk manager.
-  # 0.65 = require 2-3 indicators aligned (see calibration anchors
-  # in AGENT_SYSTEM_PROMPT for the full calibration table).
+  # Base confidence threshold. The adaptive threshold in brain.py
+  # adjusts this up/down based on live VIX:
+  #   VIX > 22 → base + 0.15 (need very strong signals in extreme fear)
+  #   VIX > 18 → base + 0.08 (be selective in elevated fear)
+  #   VIX ≤ 14 + trending → base - 0.05 (relax slightly in clean trend)
   confidence_threshold: 0.65
 
 ## ─── ENGINE SELECTION ───────────────────────────────────────
@@ -147,7 +148,13 @@ engine:
     - "ZOMATO"
     - "PAYTM"
     - "LT"
-  min_stock_price: 50
+    # Small-cap / low-price symbols useful for tiny accounts
+    - "TRIDENT"
+    - "IDEA"
+    - "IRFC"
+    - "SUZLON"
+    - "YESBANK"
+  min_stock_price: 10
   max_stock_price: 5000
   max_auto_pick_symbols: 10
   min_avg_daily_volume: 100000
@@ -165,7 +172,11 @@ engine:
 
 ## ─── RISK MANAGEMENT ────────────────────────────────────────
 risk:
-  max_capital_per_trade_pct: 5.0      # Max 5% of capital per trade
+  # fix 19: raised from 5.0 to 80.0
+  # At 5% a ₹1,000 account has ₹50 per trade — not enough to buy anything.
+  # CapitalManager enforces the actual per-symbol affordable floor separately.
+  max_capital_per_trade_pct: 80.0
+
   max_open_positions: 10
   max_daily_loss_pct: 2.0             # Kill switch: stop if day loss > 2%
   max_drawdown_pct: 8.0               # Kill switch: stop if drawdown > 8%
@@ -173,10 +184,24 @@ risk:
   target_pct: 3.0                     # Default target per trade
   trailing_stop: true
   trailing_stop_pct: 0.8
-  position_sizing_method: "kelly"     # fixed | kelly | volatility_adjusted
+
+  # fix 23: changed from "kelly" to "fixed" for small accounts
+  # Kelly requires meaningful win/loss history to work correctly.
+  # For tiny accounts start with fixed sizing, switch to kelly after 30+ trades.
+  position_sizing_method: "fixed"     # fixed | kelly | volatility_adjusted
+
   max_order_value_absolute: null
-  min_cash_buffer: 0
-  tiny_account_mode: false
+
+  # fix 20: added min_cash_reserve (was missing entirely)
+  # Always keep this amount untouched — emergency liquidity floor.
+  min_cash_reserve: 50.0
+
+  # fix 23: set tiny_account_mode to true
+  # Enables CapitalManager's small-account logic:
+  # - uses spendable (available minus reserve) for all sizing
+  # - enforces minimum 1.5:1 R/R before building any order plan
+  # - scores by confidence × R/R × rupee profit, not just confidence
+  tiny_account_mode: true
 
 ## ─── STRATEGIES ─────────────────────────────────────────────
 strategies:
