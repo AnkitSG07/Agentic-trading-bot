@@ -650,9 +650,9 @@ class TradingAgent:
                         thinking_budget=0
                     )
                     logger.debug("Gemini thinking mode: DISABLED (budget=0)")
-                except AttributeError:
-                    # Older SDK — ThinkingConfig not yet available, safe to skip
-                    logger.debug("ThinkingConfig not available in SDK version — skipping")
+                except (AttributeError, TypeError, Exception) as exc:
+                    # SDK version may not support ThinkingConfig or thinking_budget param
+                    logger.debug("ThinkingConfig not usable in this SDK version (%s) — skipping", exc)
             else:
                 logger.debug("Gemini thinking mode: ENABLED (budget=%d)", self.thinking_budget)
 
