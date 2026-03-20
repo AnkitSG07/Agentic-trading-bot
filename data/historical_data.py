@@ -529,6 +529,24 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
         len(requests_list),
     )
 
+    dhan_broker = None
+    dhan_instruments = {}
+    dhan_cfg = load_config().get("brokers", {}).get("dhan")
+    if dhan_cfg and dhan_cfg.get("enabled", True) and dhan_cfg.get("client_id") and dhan_cfg.get("access_token"):
+        try:
+            from brokers.dhan.adapter import DhanBroker
+            from brokers.base import Exchange
+            logger.info("Dhan configuration found, using Dhan for historical backfill if possible")
+            dhan_broker = DhanBroker(dhan_cfg)
+            if await dhan_broker.login():
+                insts = await dhan_broker.get_instruments(Exchange.NSE)
+                dhan_instruments = {i.symbol: i for i in insts}
+            else:
+                dhan_broker = None
+        except Exception as e:
+            logger.warning(f"Failed to load Dhan broker for backfill: {e}")
+            dhan_broker = None
+
     fetched_count = 0
     for req in requests_list:
         metrics["symbols_total"] += 1
@@ -566,9 +584,43 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
                 "Historical backfill symbol start symbol=%s exchange=%s timeframe=%s start_date=%s end_date=%s",
                 req.symbol.upper(), req.exchange, req.timeframe, req.start_date, req.end_date,
             )
-            candles, meta = await asyncio.to_thread(
-                fetcher.fetch_daily_with_meta, req.symbol, req.start_date, req.end_date
-            )
+            
+            candles = []
+            meta = None
+            
+            if dhan_broker and req.symbol.upper() in dhan_instruments:
+                try:
+                    from datetime import datetime as _dt, time as _time, timezone as _tz
+                    start_dt = _dt.combine(req.start_date, _time.min).replace(tzinfo=_tz.utc)
+                    end_dt = _dt.combine(req.end_date, _time.max).replace(tzinfo=_tz.utc)
+                    dhan_ohlcv = await dhan_broker.get_ohlcv(
+                        dhan_instruments[req.symbol.upper()], 
+                        "day", 
+                        start_dt, 
+                        end_dt
+                    )
+                    if dhan_ohlcv:
+                        for c in dhan_ohlcv:
+                            candles.append({
+                                "symbol": req.symbol.upper(),
+                                "exchange": "NSE",
+                                "timeframe": "day",
+                                "timestamp": c.timestamp.replace(tzinfo=_tz.utc) if c.timestamp.tzinfo is None else c.timestamp,
+                                "open": float(c.open),
+                                "high": float(c.high),
+                                "low": float(c.low),
+                                "close": float(c.close),
+                                "volume": int(c.volume),
+                            })
+                        meta = FetchMeta(provider="dhan", attempts=1, used_fallback=False)
+                except Exception as e:
+                    logger.warning(f"Dhan historical fetch failed for {req.symbol}: {e}")
+
+            if not candles:
+                candles, meta = await asyncio.to_thread(
+                    fetcher.fetch_daily_with_meta, req.symbol, req.start_date, req.end_date
+                )
+            
             await HistoricalCandleRepository.upsert_many(candles)
             total += len(candles)
             fetched_count += 1
