@@ -63,9 +63,9 @@ agent:
   thinking_budget: 0
 
   # ── Model Tiers ─────────────────────────────────────────────
-  # fix 15: xiaomimimo/MiMo-7B-RL added to fast tier.
+  # fix 15: xiaomimimo/mimo-v2-flash added to fast tier.
   # Previously the xiaomimimo provider routing existed in brain.py
-  # but NO model string was listed here, so it was never called.
+  # but NO model string was listed here so it was never called.
   # Now it fires automatically when Gemini + DeepSeek are rate-limited.
   #
   # Removed models (reason):
@@ -84,9 +84,10 @@ agent:
       - "gemini/gemini-2.0-flash"
       # DeepSeek V3 — excellent financial domain, very cheap
       - "openrouter/deepseek/deepseek-chat"
-      # fix 15: Xiaomi MiMo — direct API, 1M context, free tier
+      # fix 15: Xiaomi MiMo — direct API, 256K context, free tier
+      # Correct model name: mimo-v2-flash (MiMo-7B-RL is HuggingFace only, not API)
       # fires when all Gemini + DeepSeek models are rate-limited
-      - "xiaomimimo/MiMo-7B-RL"
+      - "xiaomimimo/mimo-v2-flash"
     balanced:
       # 72B — strong reasoning, handles complex multi-symbol prompts
       - "openrouter/qwen/qwen-2.5-72b-instruct"
@@ -102,7 +103,7 @@ agent:
     - "gemini/gemini-2.5-flash-lite"
     - "gemini/gemini-2.0-flash"
     - "openrouter/deepseek/deepseek-chat"
-    - "xiaomimimo/MiMo-7B-RL"
+    - "xiaomimimo/mimo-v2-flash"
     - "openrouter/qwen/qwen-2.5-72b-instruct"
     - "openrouter/meta-llama/llama-3.3-70b-instruct"
 
