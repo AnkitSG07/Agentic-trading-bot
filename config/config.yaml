@@ -51,40 +51,42 @@ agent:
   api_key_env: "GEMINI_API_KEY"
   groq_api_key_env: "GROQ_API_KEY"
   openrouter_api_key_env: "OPENROUTER_API_KEY"
-  # fix 22: added Xiaomi MiMo API key env var (optional — direct MiMo API)
-  # Get key from: platform.xiaomimimo.com
+  # Get Xiaomi MiMo key from: platform.xiaomimimo.com
   xiaomi_mimo_api_key_env: "XIAOMI_MIMO_API_KEY"
 
   # ── Primary Model ───────────────────────────────────────────
-  # Gemini 2.5 Flash with thinking disabled is the best choice for
-  # intraday trading: fast JSON, large context, cheapest capable model.
   model: "gemini/gemini-2.5-flash"
 
   # ── Thinking Mode ───────────────────────────────────────────
-  # fix 21: added thinking_budget config (was missing entirely)
-  # 0  = DISABLED (recommended for live trading — saves 2-8s per call)
-  # >0 = enables Gemini chain-of-thought (use only for strategy review)
-  # NEVER set above 0 during market hours
+  # 0 = DISABLED (recommended for live trading — saves 2-8s per call)
+  # >0 = enables chain-of-thought (use only for strategy review)
   thinking_budget: 0
 
   # ── Model Tiers ─────────────────────────────────────────────
-  # fix 23: removed all sub-32B models from tiers
+  # fix 15: xiaomimimo/MiMo-7B-RL added to fast tier.
+  # Previously the xiaomimimo provider routing existed in brain.py
+  # but NO model string was listed here, so it was never called.
+  # Now it fires automatically when Gemini + DeepSeek are rate-limited.
+  #
   # Removed models (reason):
   #   groq/llama-3.1-8b-instant        — 8B hallucinates prices
   #   groq/mixtral-8x7b-32768          — Groq deprecated endpoint
-  #   openrouter/mistralai/mistral-7b   — 7B too small for prompt
+  #   openrouter/mistralai/mistral-7b   — 7B too small
   #   openrouter/mistralai/mistral-nemo — poor financial reasoning
   #   openrouter/qwen/qwen-2.5-7b       — 7B invalid SL values
   #   gemini/gemini-1.5-flash           — replaced by 2.0-flash
   model_tiers:
     ultra_fast:
-      # Fastest fallback when primary is rate-limited
+      # Fastest Gemini fallback when primary is rate-limited
       - "gemini/gemini-2.5-flash-lite"
     fast:
       # Reliable, works on cloud IPs, strong JSON adherence
       - "gemini/gemini-2.0-flash"
       # DeepSeek V3 — excellent financial domain, very cheap
       - "openrouter/deepseek/deepseek-chat"
+      # fix 15: Xiaomi MiMo — direct API, 1M context, free tier
+      # fires when all Gemini + DeepSeek models are rate-limited
+      - "xiaomimimo/MiMo-7B-RL"
     balanced:
       # 72B — strong reasoning, handles complex multi-symbol prompts
       - "openrouter/qwen/qwen-2.5-72b-instruct"
@@ -92,23 +94,20 @@ agent:
       # Best non-Google option for financial reasoning
       - "openrouter/meta-llama/llama-3.3-70b-instruct"
 
-  # ── Fallback List ───────────────────────────────────────────
-  # Explicit ordered fallback chain — fires when primary fails
+  # ── Explicit Fallback List ──────────────────────────────────
+  # fix 15: MiMo added here too — this is what brain.py actually
+  # iterates. model_tiers above is also read but this list is the
+  # definitive fallback order when the primary model fails.
   fallback_models:
     - "gemini/gemini-2.5-flash-lite"
     - "gemini/gemini-2.0-flash"
     - "openrouter/deepseek/deepseek-chat"
+    - "xiaomimimo/MiMo-7B-RL"
     - "openrouter/qwen/qwen-2.5-72b-instruct"
+    - "openrouter/meta-llama/llama-3.3-70b-instruct"
 
   # ── Generation Parameters ───────────────────────────────────
-  # fix: max_tokens reduced 4096→2048
-  #   Trading JSON responses never exceed ~1200 tokens.
-  #   Smaller limit cuts output generation latency by ~40%.
   max_tokens: 2048
-
-  # fix: temperature reduced 0.1→0.05
-  #   Lower = more deterministic confidence scores.
-  #   Prevents random variation in RSI/MACD interpretation.
   temperature: 0.05
 
   # ── Decision Timing ─────────────────────────────────────────
@@ -117,16 +116,11 @@ agent:
   max_concurrent_strategies: 5
 
   # ── Signal Quality Gate ─────────────────────────────────────
-  # Base confidence threshold. The adaptive threshold in brain.py
-  # adjusts this up/down based on live VIX:
-  #   VIX > 22 → base + 0.15 (need very strong signals in extreme fear)
-  #   VIX > 18 → base + 0.08 (be selective in elevated fear)
-  #   VIX ≤ 14 + trending → base - 0.05 (relax slightly in clean trend)
   confidence_threshold: 0.65
 
 ## ─── ENGINE SELECTION ───────────────────────────────────────
 engine:
-  selection_mode: "watchlist"        # watchlist | auto_pick
+  selection_mode: "watchlist"
   watchlist_symbols:
     - "RELIANCE"
     - "TCS"
@@ -148,7 +142,7 @@ engine:
     - "ZOMATO"
     - "PAYTM"
     - "LT"
-    # Small-cap / low-price symbols useful for tiny accounts
+    # Low-price symbols useful for small accounts
     - "TRIDENT"
     - "IDEA"
     - "IRFC"
@@ -172,35 +166,27 @@ engine:
 
 ## ─── RISK MANAGEMENT ────────────────────────────────────────
 risk:
-  # fix 19: raised from 5.0 to 80.0
-  # At 5% a ₹1,000 account has ₹50 per trade — not enough to buy anything.
-  # CapitalManager enforces the actual per-symbol affordable floor separately.
+  # Raised from 5.0 — at 5% a ₹1,000 account has ₹50/trade budget
+  # which can't buy a single share. CapitalManager enforces the real floor.
   max_capital_per_trade_pct: 80.0
 
   max_open_positions: 10
-  max_daily_loss_pct: 2.0             # Kill switch: stop if day loss > 2%
-  max_drawdown_pct: 8.0               # Kill switch: stop if drawdown > 8%
-  stop_loss_pct: 1.5                  # Default SL per trade
-  target_pct: 3.0                     # Default target per trade
+  max_daily_loss_pct: 2.0
+  max_drawdown_pct: 8.0
+  stop_loss_pct: 1.5
+  target_pct: 3.0
   trailing_stop: true
   trailing_stop_pct: 0.8
 
-  # fix 23: changed from "kelly" to "fixed" for small accounts
-  # Kelly requires meaningful win/loss history to work correctly.
-  # For tiny accounts start with fixed sizing, switch to kelly after 30+ trades.
-  position_sizing_method: "fixed"     # fixed | kelly | volatility_adjusted
+  # Fixed sizing for small accounts — switch to kelly after 30+ trades
+  position_sizing_method: "fixed"
 
   max_order_value_absolute: null
 
-  # fix 20: added min_cash_reserve (was missing entirely)
-  # Always keep this amount untouched — emergency liquidity floor.
+  # Always keep this amount untouched — emergency liquidity floor
   min_cash_reserve: 50.0
 
-  # fix 23: set tiny_account_mode to true
-  # Enables CapitalManager's small-account logic:
-  # - uses spendable (available minus reserve) for all sizing
-  # - enforces minimum 1.5:1 R/R before building any order plan
-  # - scores by confidence × R/R × rupee profit, not just confidence
+  # Enables CapitalManager small-account logic
   tiny_account_mode: true
 
 ## ─── STRATEGIES ─────────────────────────────────────────────
