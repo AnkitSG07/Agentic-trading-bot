@@ -273,8 +273,11 @@ class ReplayEngine:
                 # ── AI decision (every N candles) ────────────────────────────
                 should_run_ai = max(int(cfg.ai_every_n_candles or 1), 1)
                 if idx % should_run_ai == 0:
+                    self.agent._model_consecutive_failures.clear()
+                    self.agent._model_skip_until.clear()
                     try:
                         signals = await self.agent.analyze_and_decide(context)
+                        await asyncio.sleep(5.0)  # 5s gap = max 12 calls/min, under Gemini 15 RPM limit
                     except Exception as exc:
                         logger.warning("AI analyze failed in replay, skipping candle: %s", exc)
                         signals = []
