@@ -18,6 +18,10 @@ Corrections applied in this version:
  12.  max_capital_per_trade_pct default 5→50% (small accounts need this)
  13.  _fallback_quantity uses spendable (capital minus reserve), not raw capital
  14.  Confidence calibration anchors + VIX avoid_trading rule in system prompt
+ 15.  xiaomimimo/mimo-v2-flash added to DEFAULT_MODEL_TIERS and fallback_models
+      so it actually appears in the fallback chain (was missing before)
+ 16.  Circuit breaker cooldown reduced 30→10 calls so recovery is faster
+      when rate limits clear (30-call blackout was too aggressive for replay)
 """
 
 import asyncio
@@ -284,6 +288,10 @@ class TradingAgent:
     - max_capital_per_trade_pct default 5→50% (usable for small accounts)     [fix 12]
     - _fallback_quantity uses spendable (capital minus reserve)                [fix 13]
     - Confidence calibration anchors + VIX avoid_trading rule in prompt        [fix 14]
+    - xiaomimimo/mimo-v2-flash added to DEFAULT_MODEL_TIERS and fallback_models  [fix 15]
+      so it actually appears in the fallback chain (was missing before)
+    - Circuit breaker cooldown reduced 30→10 calls so recovery is faster       [fix 16]
+      when rate limits clear (30-call blackout was too aggressive for replay)
     """
 
     PARAM_SCHEMA: dict[str, tuple[type, float, float]] = {
@@ -304,14 +312,18 @@ class TradingAgent:
 
     PARAM_CONSUMER_KEYS: frozenset[str] = frozenset()
 
-    # ── Cleaned fallback chain: only models >= 32B that reliably output JSON ──
-    # Removed (reason):
-    #   groq/llama-3.1-8b-instant       — 8B, hallucinates price levels
-    #   groq/mixtral-8x7b-32768         — Groq deprecated this endpoint
-    #   openrouter/mistralai/mistral-7b  — 7B, fails complex watchlist prompts
+    # ── Fallback chain — only models ≥32B EXCEPT MiMo which is included
+    # because it has a 256K context window and is free-tier friendly.
+    # fix 15: xiaomimimo/mimo-v2-flash added to fast tier so it is actually
+    # attempted when Gemini and DeepSeek are rate-limited.
+    #
+    # Removed models (reason):
+    #   groq/llama-3.1-8b-instant        — 8B, hallucinates price levels
+    #   groq/mixtral-8x7b-32768          — Groq deprecated endpoint
+    #   openrouter/mistralai/mistral-7b   — 7B, fails complex prompts
     #   openrouter/mistralai/mistral-nemo — poor financial domain reasoning
-    #   openrouter/qwen/qwen-2.5-7b      — 7B, produces invalid SL values
-    #   gemini/gemini-1.5-flash          — superseded by 2.0-flash
+    #   openrouter/qwen/qwen-2.5-7b       — 7B, invalid SL values
+    #   gemini/gemini-1.5-flash           — superseded by 2.0-flash
     DEFAULT_MODEL_TIERS: dict[str, list[str]] = {
         "ultra_fast": [
             "gemini/gemini-2.5-flash-lite",
@@ -319,6 +331,10 @@ class TradingAgent:
         "fast": [
             "gemini/gemini-2.0-flash",
             "openrouter/deepseek/deepseek-chat",
+            # fix 15: MiMo added here — direct API, 256K context, free tier
+            # Get key from: platform.xiaomimimo.com
+            # Correct model name is mimo-v2-flash (not MiMo-7B-RL which is HuggingFace only)
+            "xiaomimimo/mimo-v2-flash",
         ],
         "balanced": [
             "openrouter/qwen/qwen-2.5-72b-instruct",
@@ -351,30 +367,24 @@ class TradingAgent:
         self.model_tiers  = config.get("model_tiers", self.DEFAULT_MODEL_TIERS)
         self.fallback_models = self._resolve_fallback_models(config)
 
-        # fix 2: reduced from 4096 — trading JSON never exceeds ~1200 tokens,
-        # reducing this cuts output generation latency by ~40%
+        # fix 2: reduced from 4096
         self.max_tokens  = config.get("max_tokens",  2048)
 
-        # fix 3: reduced from 0.1 — lower temperature = more deterministic
-        # confidence scores, fewer random price level hallucinations
+        # fix 3: reduced from 0.1
         self.temperature = config.get("temperature", 0.05)
 
-        # fix 1: disable Gemini thinking mode for live trading
-        # thinking_budget=0 saves 2-8 seconds per call
-        # Set >0 in config ONLY for overnight strategy review calls
+        # fix 1: disable Gemini thinking for live trading speed
         self.thinking_budget: int = max(0, int(config.get("thinking_budget", 0)))
 
         # ── Position sizing ───────────────────────────────────────────────────
         # fix 12: default raised from 5.0 to 50.0
-        # At 5% a ₹1,000 account has ₹50 budget per trade — can't buy anything.
-        # CapitalManager enforces the actual per-symbol floor separately.
         self.max_capital_per_trade_pct: float = max(
             0.1, min(100.0, float(config.get("max_capital_per_trade_pct", 50.0)))
         )
         self.min_trade_quantity: int = max(1, int(config.get("min_trade_quantity", 1)))
         self.max_order_value_absolute = config.get("max_order_value_absolute")
 
-        # fix 13: spendable = available - reserve; raw capital was used before
+        # fix 13: spendable = available - reserve
         self.min_cash_reserve: float = float(config.get("min_cash_reserve", 50.0))
 
         # ── Confidence threshold ──────────────────────────────────────────────
@@ -384,30 +394,34 @@ class TradingAgent:
             source="config",
         )
 
-        # fix 10: tracks last cycle to prevent same symbol+direction repeating
+        # fix 10: anti-repetition tracking
         self._last_cycle_symbols:    set[str]       = set()
         self._last_cycle_directions: dict[str, str] = {}
 
         # ── History ───────────────────────────────────────────────────────────
         self.decision_history: list[dict] = []
 
-        # ── Circuit breaker: skip persistently failing models ─────────────
+        # ── Circuit breaker ────────────────────────────────────────────────────
         self._model_consecutive_failures: dict[str, int] = {}
         self._model_skip_until: dict[str, int] = {}
         self._call_counter: int = 0
-        self.circuit_breaker_threshold: int = 3    # failures before tripping
-        self.circuit_breaker_cooldown: int  = 30   # calls to skip after trip
+        self.circuit_breaker_threshold: int = 3
+        # fix 16: reduced from 30 to 10 — 30-call blackout was too aggressive
+        # for replay where each "call" is one candle. With ai_every_n_candles=5
+        # a cooldown of 30 meant 150 days of data with zero AI decisions.
+        self.circuit_breaker_cooldown: int = 10
 
         logger.info(
             "AI model chain configured | primary=%s | fallbacks=%d | "
             "thinking_budget=%d | max_tokens=%d | temperature=%.3f | "
-            "max_capital_pct=%.1f%%",
+            "max_capital_pct=%.1f%% | cb_cooldown=%d",
             self.model,
             len(self.fallback_models),
             self.thinking_budget,
             self.max_tokens,
             self.temperature,
             self.max_capital_per_trade_pct,
+            self.circuit_breaker_cooldown,
         )
 
     # ── Provider helpers ──────────────────────────────────────────────────────
@@ -573,18 +587,19 @@ class TradingAgent:
         self, *, provider: str, model: str, prompt: str,
         temperature: float, max_tokens: int, expect_json: bool,
     ) -> str:
-        # fix 5: route to correct base URL and API key per provider
         if provider == "groq":
             base_url = "https://api.groq.com/openai/v1/chat/completions"
             api_key  = self.groq_api_key
 
         elif provider == "xiaomimimo":
-            # fix 5: Direct Xiaomi MiMo API — no OpenRouter proxy needed
-            # Get your key from: platform.xiaomimimo.com
+            # fix 5 + 15: Direct Xiaomi MiMo API
+            # Key from: platform.xiaomimimo.com
+            # Correct API model name: "mimo-v2-flash" or "mimo-v2-pro"
+            # (MiMo-7B-RL is only for self-hosting via HuggingFace, not the API)
             base_url = "https://api.xiaomimimo.com/v1/chat/completions"
             api_key  = self.xiaomi_mimo_api_key
 
-        else:  # openrouter (default)
+        else:  # openrouter
             base_url = "https://openrouter.ai/api/v1/chat/completions"
             api_key  = self.openrouter_api_key
 
@@ -651,7 +666,7 @@ class TradingAgent:
                 "response_mime_type": "application/json" if expect_json else "text/plain",
             }
 
-            # fix 1: disable Gemini thinking mode for live trading speed
+            # fix 1: disable thinking for live trading speed
             if self.thinking_budget == 0:
                 try:
                     config_kwargs["thinking_config"] = types.ThinkingConfig(
@@ -659,8 +674,7 @@ class TradingAgent:
                     )
                     logger.debug("Gemini thinking mode: DISABLED (budget=0)")
                 except (AttributeError, TypeError, Exception) as exc:
-                    # SDK version may not support ThinkingConfig or thinking_budget param
-                    logger.debug("ThinkingConfig not usable in this SDK version (%s) — skipping", exc)
+                    logger.debug("ThinkingConfig not usable (%s) — skipping", exc)
             else:
                 logger.debug("Gemini thinking mode: ENABLED (budget=%d)", self.thinking_budget)
 
@@ -699,7 +713,7 @@ class TradingAgent:
         self._call_counter += 1
 
         for idx, model_id in enumerate(all_models):
-            # ── Circuit breaker: skip models that keep failing ────────────
+            # ── Circuit breaker check ────────────────────────────────────────
             skip_until = self._model_skip_until.get(model_id, 0)
             if skip_until > self._call_counter:
                 remaining = skip_until - self._call_counter
@@ -721,8 +735,10 @@ class TradingAgent:
                 )
                 # Success — reset circuit breaker for this model
                 if self._model_consecutive_failures.get(model_id, 0) > 0:
-                    logger.info("Circuit breaker reset for %s (was at %d failures)",
-                                model_id, self._model_consecutive_failures[model_id])
+                    logger.info(
+                        "Circuit breaker reset for %s (was at %d failures)",
+                        model_id, self._model_consecutive_failures[model_id],
+                    )
                 self._model_consecutive_failures[model_id] = 0
 
                 if model_id != self.model:
@@ -739,20 +755,21 @@ class TradingAgent:
                     break
 
                 if self._is_rate_limited_error(e):
-                    # Track consecutive failures for circuit breaker
                     prev_fails = self._model_consecutive_failures.get(model_id, 0)
                     self._model_consecutive_failures[model_id] = prev_fails + 1
                     if self._model_consecutive_failures[model_id] >= self.circuit_breaker_threshold:
-                        self._model_skip_until[model_id] = self._call_counter + self.circuit_breaker_cooldown
+                        self._model_skip_until[model_id] = (
+                            self._call_counter + self.circuit_breaker_cooldown
+                        )
                         logger.warning(
-                            "Circuit breaker TRIPPED for %s after %d consecutive failures — "
+                            "Circuit breaker TRIPPED for %s after %d failures — "
                             "skipping for next %d calls.",
                             model_id,
                             self._model_consecutive_failures[model_id],
                             self.circuit_breaker_cooldown,
                         )
                         failure_reasons.append(f"{model_id}=circuit_breaker_tripped")
-                        continue  # skip backoff — move to next model immediately
+                        continue
 
                     raw_wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** idx)
                     capped   = min(raw_wait, RATE_LIMIT_BACKOFF_MAX_SECONDS)
@@ -864,18 +881,14 @@ class TradingAgent:
 
         return raw
 
-    # ── Regime-adaptive confidence threshold (fix 9) ─────────────────────────
+    # ── Regime-adaptive confidence threshold ─────────────────────────────────
 
     def _get_adaptive_confidence_threshold(self, vix: float, market_trend: str) -> float:
         """
-        fix 9: confidence threshold adapts to market regime instead of
-        being a fixed 0.65 regardless of conditions.
-
-        VIX > 22  → raise by 0.15 (extreme fear — need very strong signals)
-        VIX > 18  → raise by 0.08 (elevated fear — be more selective)
-        VIX ≤ 14 + trending → lower by 0.05 (clean trend — can relax slightly)
-
-        Always clamped between MIN_CONFIDENCE_THRESHOLD and MAX_CONFIDENCE_THRESHOLD.
+        fix 9: confidence threshold adapts to market regime.
+        VIX > 22  → raise by 0.15
+        VIX > 18  → raise by 0.08
+        VIX ≤ 14 + trending → lower by 0.05
         """
         base = self.confidence_threshold
         adj  = 0.0
@@ -902,10 +915,6 @@ class TradingAgent:
     # ── Main decision function ────────────────────────────────────────────────
 
     async def analyze_and_decide(self, context: MarketContext) -> list[TradingSignal]:
-        """
-        Core decision function. Takes market context, calls the AI model,
-        returns actionable trading signals above the adaptive confidence threshold.
-        """
         prompt     = self._build_prompt(context)
         started_at = datetime.utcnow()
 
@@ -928,7 +937,7 @@ class TradingAgent:
                 (datetime.utcnow() - started_at).total_seconds() * 1000
             )
 
-            # fix 10: update anti-repetition state after each cycle
+            # fix 10: update anti-repetition state
             self._last_cycle_symbols    = {s.symbol for s in signals if s.is_actionable}
             self._last_cycle_directions = {
                 s.symbol: s.action.value
@@ -988,7 +997,7 @@ class TradingAgent:
                 model_used,
             )
 
-            # fix 9: use regime-adaptive threshold instead of fixed 0.65
+            # fix 9: regime-adaptive threshold
             adaptive_threshold = self._get_adaptive_confidence_threshold(
                 vix=context.india_vix,
                 market_trend=context.market_trend,
@@ -1019,10 +1028,6 @@ class TradingAgent:
     # ── Strategy review ───────────────────────────────────────────────────────
 
     async def review_strategy(self, performance_data: dict) -> dict:
-        """
-        Periodic strategy review. Runs hourly so latency is not critical.
-        Can use higher thinking_budget if configured.
-        """
         prompt = f"""
 Review this trading bot's recent performance and provide strategic recommendations.
 
@@ -1063,8 +1068,7 @@ Respond ONLY with a valid JSON object:
                 unclaimed = set(validated_params) - self.PARAM_CONSUMER_KEYS
                 if unclaimed:
                     logger.warning(
-                        "review_strategy returned keys not in PARAM_CONSUMER_KEYS "
-                        "(will be ignored): %s",
+                        "review_strategy returned keys not in PARAM_CONSUMER_KEYS: %s",
                         sorted(unclaimed),
                     )
 
@@ -1074,7 +1078,6 @@ Respond ONLY with a valid JSON object:
             return {}
 
     async def explain_position(self, position: dict) -> str:
-        """Get AI explanation of why a position should be held or exited."""
         prompt = f"""
 Analyze this open position and recommend: HOLD, TRAIL_STOP, or EXIT.
 Give a specific 2-3 sentence rationale citing price levels and indicators.
@@ -1096,11 +1099,10 @@ Position: {json.dumps(position, indent=2)}
     # ── Prompt builder ────────────────────────────────────────────────────────
 
     def _build_prompt(self, ctx: MarketContext) -> str:
-        # fix 13: compute spendable = available minus reserve consistently
+        # fix 13: spendable = available minus reserve
         reserve   = max(self.min_cash_reserve, ctx.available_capital * 0.05)
         spendable = max(0.0, ctx.available_capital - reserve)
 
-        # ── Open positions summary ────────────────────────────────────────────
         positions_summary = ""
         if ctx.open_positions:
             for p in ctx.open_positions:
@@ -1125,7 +1127,7 @@ Position: {json.dumps(position, indent=2)}
 
         sorted_watchlist = sorted(raw_watchlist, key=_sort_key)
 
-        # fix 6: build watchlist string with [AFFORDABLE] / [TOO EXPENSIVE] labels
+        # fix 6: affordability labels
         watchlist_summary = ""
         for w in sorted_watchlist:
             ind        = w.get("indicators", {})
@@ -1144,18 +1146,16 @@ Position: {json.dumps(position, indent=2)}
             has_position  = w["symbol"] in open_symbols
             position_flag = " [HAS OPEN POSITION — SKIP]" if has_position else ""
 
-            # fix 10: inject last-cycle direction into watchlist line
             last_dir    = self._last_cycle_directions.get(w["symbol"])
             repeat_flag = (
                 f" [LAST CYCLE: {last_dir} — DO NOT REPEAT SAME DIRECTION]"
                 if last_dir else ""
             )
 
-            # fix 6: compute affordability label
             cost_per_share = ltp_val * 1.0015
             if cost_per_share > 0 and spendable >= cost_per_share and not has_position:
                 max_qty      = int(spendable / cost_per_share)
-                rupee_profit = (ltp_val * 0.02) * max_qty  # 2% move estimate
+                rupee_profit = (ltp_val * 0.02) * max_qty
                 afford_label = f" [AFFORDABLE: max {max_qty} shares, ~₹{rupee_profit:,.0f} profit]"
             else:
                 afford_label = " [TOO EXPENSIVE — SKIP]" if not has_position else ""
@@ -1169,7 +1169,6 @@ Position: {json.dumps(position, indent=2)}
                 f"Signal: {overall} | Pivot: {pivot} R1: {r1} S1: {s1}\n"
             )
 
-        # ── VIX interpretation ────────────────────────────────────────────────
         vix = ctx.india_vix
         if vix > 25:
             vix_interp = "EXTREME FEAR — avoid all directional trades"
@@ -1182,7 +1181,6 @@ Position: {json.dumps(position, indent=2)}
         else:
             vix_interp = "LOW — favour momentum/trend strategies"
 
-        # ── PCR interpretation ────────────────────────────────────────────────
         pcr = ctx.pcr or 1.0
         if pcr > 1.5:
             pcr_interp = "extremely bullish contrarian signal"
@@ -1201,7 +1199,6 @@ Position: {json.dumps(position, indent=2)}
             else "Not available"
         )
 
-        # fix 10: inject last-cycle memory into prompt
         last_cycle_summary = "No previous cycle data."
         if self.decision_history:
             last      = self.decision_history[-1]
@@ -1273,7 +1270,7 @@ Position: {json.dumps(position, indent=2)}
         signals      = []
         open_symbols = {p["symbol"] for p in ctx.open_positions}
 
-        # fix 8: pre-compute spendable for hard affordability check
+        # fix 8: pre-compute spendable
         reserve   = max(self.min_cash_reserve, ctx.available_capital * 0.05)
         spendable = max(0.0, ctx.available_capital - reserve)
 
@@ -1292,7 +1289,6 @@ Position: {json.dumps(position, indent=2)}
                     s.get("action", SignalAction.NO_ACTION.value)
                 )
 
-                # Hard filter: skip signals for symbols with open positions
                 if symbol in open_symbols and action not in (
                     SignalAction.HOLD, SignalAction.NO_ACTION,
                     SignalAction.SQUARE_OFF, SignalAction.COVER,
@@ -1303,9 +1299,7 @@ Position: {json.dumps(position, indent=2)}
                     )
                     continue
 
-                # fix 8: hard affordability check — drop BUY/SHORT signals the
-                # account cannot afford BEFORE they reach the risk manager.
-                # This prevents wasted API calls for unaffordable signals.
+                # fix 8: hard affordability check before risk manager
                 if action in (SignalAction.BUY, SignalAction.SHORT):
                     entry_price_raw = s.get("entry_price")
                     ltp_fallback    = next(
@@ -1314,7 +1308,7 @@ Position: {json.dumps(position, indent=2)}
                         0.0,
                     )
                     price_to_check   = float(entry_price_raw or ltp_fallback or 0)
-                    cost_with_buffer = price_to_check * 1.0015  # 0.15% transaction buffer
+                    cost_with_buffer = price_to_check * 1.0015
 
                     if cost_with_buffer > 0 and spendable < cost_with_buffer:
                         logger.info(
@@ -1328,8 +1322,7 @@ Position: {json.dumps(position, indent=2)}
                     qty = self._fallback_quantity_for_signal(s, ctx)
                     if qty <= 0:
                         logger.warning(
-                            "Skipping signal with quantity=%d for %s | "
-                            "action=%s | capital=%.2f",
+                            "Skipping signal with quantity=%d for %s | action=%s | capital=%.2f",
                             qty, symbol, action.value, ctx.available_capital,
                         )
                         continue
@@ -1338,8 +1331,7 @@ Position: {json.dumps(position, indent=2)}
                         qty, symbol, action.value,
                     )
 
-                confidence = max(0.0, min(1.0, float(s.get("confidence", 0.5))))
-
+                confidence  = max(0.0, min(1.0, float(s.get("confidence", 0.5))))
                 entry_price = self._to_decimal(s.get("entry_price"), "entry_price", symbol)
                 stop_loss   = self._to_decimal(s.get("stop_loss"),   "stop_loss",   symbol)
                 target      = self._to_decimal(s.get("target"),      "target",      symbol)
@@ -1365,15 +1357,11 @@ Position: {json.dumps(position, indent=2)}
             except (KeyError, ValueError, TypeError, AttributeError) as e:
                 logger.warning("Skipping malformed signal for %s: %s", symbol, e)
 
-        # Sort by priority ASC then confidence DESC
         signals.sort(key=lambda x: (x.priority, -x.confidence))
 
-        # fix 11: hard cap at 2 — code-level backstop even if model ignores prompt
+        # fix 11: hard cap at 2
         if len(signals) > 2:
-            logger.info(
-                "Capping signals from %d to 2 (max 2 per cycle rule)",
-                len(signals),
-            )
+            logger.info("Capping signals from %d to 2", len(signals))
             signals = signals[:2]
 
         return signals
@@ -1404,7 +1392,7 @@ Position: {json.dumps(position, indent=2)}
         if resolved_price is None or resolved_price <= 0:
             return 0
 
-        # fix 13: use spendable (capital minus reserve), not raw available capital
+        # fix 13: use spendable not raw capital
         capital   = Decimal(str(max(ctx.available_capital, 0.0)))
         reserve   = Decimal(str(max(self.min_cash_reserve, float(capital) * 0.05)))
         spendable = max(Decimal("0"), capital - reserve)
