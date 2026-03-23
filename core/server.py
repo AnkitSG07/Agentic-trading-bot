@@ -778,6 +778,87 @@ async def set_broker_preference(req: BrokerPreferenceRequest):
     return status
 
 
+# ─── BROKER ACCOUNTS ─────────────────────────────────────────────────────────
+
+from core.broker_accounts import (
+    get_broker_account_store,
+    BROKER_DEFINITIONS,
+    test_broker_connection,
+)
+
+
+class BrokerAccountCreateRequest(BaseModel):
+    broker: str
+    label: str = ""
+    credentials: dict
+
+
+class BrokerAccountUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    credentials: Optional[dict] = None
+
+
+@app.get("/api/broker-accounts")
+async def list_broker_accounts():
+    """List all broker accounts with masked credentials."""
+    store = get_broker_account_store()
+    return {
+        "accounts": store.list_accounts(mask_credentials=True),
+        "broker_definitions": BROKER_DEFINITIONS,
+    }
+
+
+@app.post("/api/broker-accounts")
+async def add_broker_account(req: BrokerAccountCreateRequest):
+    """Add a new broker account."""
+    store = get_broker_account_store()
+    try:
+        account = store.add_account(req.broker, req.label, req.credentials)
+        return {"status": "created", "account": account}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.put("/api/broker-accounts/{account_id}")
+async def update_broker_account(account_id: str, req: BrokerAccountUpdateRequest):
+    """Update an existing broker account."""
+    store = get_broker_account_store()
+    updated = store.update_account(account_id, label=req.label, credentials=req.credentials)
+    if not updated:
+        raise HTTPException(404, "Account not found")
+    return {"status": "updated", "account": updated}
+
+
+@app.delete("/api/broker-accounts/{account_id}")
+async def delete_broker_account(account_id: str):
+    """Delete a broker account."""
+    store = get_broker_account_store()
+    deleted = store.delete_account(account_id)
+    if not deleted:
+        raise HTTPException(404, "Account not found")
+    return {"status": "deleted"}
+
+
+@app.post("/api/broker-accounts/{account_id}/test")
+async def test_broker_account(account_id: str):
+    """Test connectivity for a broker account."""
+    store = get_broker_account_store()
+    account = store.get_account(account_id, mask_credentials=False)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    creds = store.get_raw_credentials(account_id)
+    result = await test_broker_connection(account["broker"], creds)
+
+    # Update status based on test result
+    new_status = "connected" if result["success"] else "error"
+    store.update_status(account_id, new_status)
+
+    return {"status": new_status, **result}
+
+
 def _degraded_live_payload(engine: TradingEngine, ui_status: dict, reason: str) -> dict:
     return {
         "type": "live_update",
