@@ -204,3 +204,29 @@ def test_brain_uses_failure_count_based_backoff_with_budget():
     assert "remaining_budget = self.decision_timeout_seconds - elapsed" in src
     assert "all_models = all_models[: self.max_models_per_decision]" in src
     assert "timeout_seconds=min(self.provider_timeout_seconds, max(0.5, remaining_budget))" in src
+
+def test_brain_classifies_timeout_errors_explicitly():
+    src = Path("agents/brain.py").read_text()
+    assert "def _is_timeout_error" in src
+    assert '"read operation timed out"' in src
+    assert '"read timed out"' in src
+
+
+def test_last_model_preserves_timeout_and_rate_limit_reason():
+    src = Path("agents/brain.py").read_text()
+    timeout_block = """if self._is_timeout_error(e):
+                    logger.warning(
+                        "Model %s timed out after %.1fs; trying fallback.",
+                        model_id,
+                        min(self.provider_timeout_seconds, max(0.5, remaining_budget)),
+                    )
+                    reason = "timeout"
+                    failure_reasons.append(f"{model_id}={reason}")
+                    if is_last:
+                        break"""
+    rate_limit_break = """reason = "rate_limited"
+                    failure_reasons.append(f"{model_id}={reason}")
+                    if is_last:
+                        break"""
+    assert timeout_block in src
+    assert rate_limit_break in src
