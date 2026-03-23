@@ -45,12 +45,15 @@ logger = logging.getLogger("agent.brain")
 
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
-MAX_DECISION_HISTORY           = 200
-MIN_CONFIDENCE_THRESHOLD       = 0.30
-MAX_CONFIDENCE_THRESHOLD       = 0.95
-RATE_LIMIT_BACKOFF_SECONDS     = 1.0
-RATE_LIMIT_BACKOFF_MAX_SECONDS = 30.0
-RATE_LIMIT_BACKOFF_JITTER      = 0.20
+MAX_DECISION_HISTORY              = 200
+MIN_CONFIDENCE_THRESHOLD          = 0.30
+MAX_CONFIDENCE_THRESHOLD          = 0.95
+RATE_LIMIT_BACKOFF_SECONDS        = 0.5
+RATE_LIMIT_BACKOFF_MAX_SECONDS    = 5.0
+RATE_LIMIT_BACKOFF_JITTER         = 0.20
+DEFAULT_DECISION_TIMEOUT_SECONDS  = 8.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS  = 4.0
+DEFAULT_MAX_MODELS_PER_DECISION   = 4
 
 MODEL_ID_ALIASES: dict[str, str] = {
     # OpenRouter currently serves DeepSeek V3 chat traffic under deepseek-chat.
@@ -360,6 +363,10 @@ class TradingAgent:
         self.model        = config.get("model", "gemini/gemini-2.5-flash")
         self.model_tiers  = config.get("model_tiers", self.DEFAULT_MODEL_TIERS)
         self.fallback_models = self._resolve_fallback_models(config)
+        self.max_models_per_decision: int = max(
+            1,
+            int(config.get("max_models_per_decision", DEFAULT_MAX_MODELS_PER_DECISION)),
+        )
 
         # fix 2: reduced from 4096
         self.max_tokens  = config.get("max_tokens",  2048)
@@ -369,6 +376,18 @@ class TradingAgent:
 
         # fix 1: disable Gemini thinking for live trading speed
         self.thinking_budget: int = max(0, int(config.get("thinking_budget", 0)))
+        self.decision_timeout_seconds: float = max(
+            0.5,
+            float(config.get("decision_timeout_seconds", DEFAULT_DECISION_TIMEOUT_SECONDS)),
+        )
+        self.provider_timeout_seconds: float = max(
+            0.5,
+            float(config.get("provider_timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS)),
+        )
+        self.max_fallback_wait_seconds: float = max(
+            0.0,
+            float(config.get("max_fallback_wait_seconds", RATE_LIMIT_BACKOFF_MAX_SECONDS)),
+        )
 
         # ── Position sizing ───────────────────────────────────────────────────
         # fix 12: default raised from 5.0 to 50.0
@@ -408,12 +427,16 @@ class TradingAgent:
         logger.info(
             "AI model chain configured | primary=%s | fallbacks=%d | "
             "thinking_budget=%d | max_tokens=%d | temperature=%.3f | "
+            "decision_timeout=%.1fs | provider_timeout=%.1fs | max_models=%d | "
             "max_capital_pct=%.1f%% | cb_cooldown=%d",
             self.model,
             len(self.fallback_models),
             self.thinking_budget,
             self.max_tokens,
             self.temperature,
+            self.decision_timeout_seconds,
+            self.provider_timeout_seconds,
+            self.max_models_per_decision,
             self.max_capital_per_trade_pct,
             self.circuit_breaker_cooldown,
         )
@@ -581,6 +604,7 @@ class TradingAgent:
     def _generate_with_openai_compatible(
         self, *, provider: str, model: str, prompt: str,
         temperature: float, max_tokens: int, expect_json: bool,
+        timeout_seconds: float | None = None,
     ) -> str:
         if provider == "groq":
             base_url = "https://api.groq.com/openai/v1/chat/completions"
@@ -612,7 +636,8 @@ class TradingAgent:
         if expect_json:
             payload["response_format"] = {"type": "json_object"}
 
-        with httpx.Client(timeout=45.0) as client:
+        timeout = max(0.5, float(timeout_seconds or self.provider_timeout_seconds))
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(base_url, headers=headers, json=payload)
             if response.status_code >= 400:
                 raise RuntimeError(
@@ -637,6 +662,7 @@ class TradingAgent:
     def _generate_with_provider(
         self, *, provider: str, model: str, prompt: str,
         temperature: float, max_tokens: int, expect_json: bool,
+        timeout_seconds: float | None = None,
     ) -> str:
         self._ensure_provider_key(provider)
 
@@ -678,6 +704,7 @@ class TradingAgent:
                 provider=provider, model=model, prompt=prompt,
                 temperature=temperature, max_tokens=max_tokens,
                 expect_json=expect_json,
+                timeout_seconds=timeout_seconds,
             )
 
         raise RuntimeError(f"Unsupported model provider '{provider}'.")
@@ -705,11 +732,24 @@ class TradingAgent:
             all_models = [self.model] + [
                 m for m in self.fallback_models if m != self.model
             ]
+        all_models = all_models[: self.max_models_per_decision]
         last_error: Exception | None = None
         failure_reasons: list[str] = []
         self._call_counter += 1
+        started_at = time.monotonic()
 
         for idx, model_id in enumerate(all_models):
+            elapsed = time.monotonic() - started_at
+            remaining_budget = self.decision_timeout_seconds - elapsed
+            if remaining_budget <= 0:
+                failure_reasons.append("decision_budget_exhausted")
+                logger.warning(
+                    "Decision timeout reached before trying %s | budget=%.1fs | attempts=%d",
+                    model_id,
+                    self.decision_timeout_seconds,
+                    idx,
+                )
+                break
             # ── Circuit breaker check ────────────────────────────────────────
             skip_until = self._model_skip_until.get(model_id, 0)
             if skip_until > self._call_counter:
@@ -729,6 +769,7 @@ class TradingAgent:
                     provider=provider, model=provider_model, prompt=prompt,
                     temperature=temperature, max_tokens=max_tokens,
                     expect_json=expect_json,
+                    timeout_seconds=min(self.provider_timeout_seconds, max(0.5, remaining_budget)),
                 )
                 # Success — reset circuit breaker for this model
                 if self._model_consecutive_failures.get(model_id, 0) > 0:
@@ -768,17 +809,20 @@ class TradingAgent:
                         failure_reasons.append(f"{model_id}=circuit_breaker_tripped")
                         continue
 
-                    raw_wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** idx)
-                    capped   = min(raw_wait, RATE_LIMIT_BACKOFF_MAX_SECONDS)
-                    jitter   = capped * RATE_LIMIT_BACKOFF_JITTER * (2 * random.random() - 1)
-                    wait     = max(0.0, capped + jitter)
+                    fail_count = self._model_consecutive_failures[model_id]
+                    raw_wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** max(0, fail_count - 1))
+                    capped = min(raw_wait, self.max_fallback_wait_seconds)
+                    jitter = capped * RATE_LIMIT_BACKOFF_JITTER * (2 * random.random() - 1)
+                    wait = max(0.0, capped + jitter)
+                    wait = min(wait, max(0.0, remaining_budget - 0.1))
                     logger.warning(
-                        "Model %s rate-limited; waiting %.1fs before fallback (idx=%d, fails=%d).",
-                        model_id, wait, idx, self._model_consecutive_failures[model_id],
+                        "Model %s rate-limited; waiting %.1fs before fallback (idx=%d, fails=%d, remaining_budget=%.1fs).",
+                        model_id, wait, idx, fail_count, max(0.0, remaining_budget),
                     )
                     reason = "rate_limited"
                     failure_reasons.append(f"{model_id}={reason}")
-                    time.sleep(wait)
+                    if wait > 0:
+                        time.sleep(wait)
                     continue
 
                 if self._is_unsupported_system_instruction_error(e):
@@ -804,6 +848,7 @@ class TradingAgent:
         logger.error(
             "All configured models failed | attempts=%s", ", ".join(failure_reasons)
         )
+
         raise RuntimeError(
             f"All configured models failed. Last error: {last_error}"
         )
