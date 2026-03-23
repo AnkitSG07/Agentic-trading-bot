@@ -1,12 +1,18 @@
 """Tests for the AI model chain configuration after the overhaul."""
 
+import ast
 from pathlib import Path
+
+
+def _active_config_text() -> str:
+    cfg = Path("config/config.yaml").read_text()
+    return "\n".join(line for line in cfg.splitlines() if not line.strip().startswith("#"))
 
 
 # ─── Config file assertions ──────────────────────────────────────────────────
 
 def test_xiaomimimo_removed_from_config():
-    cfg = Path("config/config.yaml").read_text()
+    cfg = _active_config_text()
     assert "xiaomimimo" not in cfg, "xiaomimimo should be removed from config.yaml"
     assert "XIAOMI_MIMO_API_KEY" not in cfg
 
@@ -25,9 +31,18 @@ def test_groq_70b_models_in_config():
     assert "groq/llama-3.3-70b-specdec" in cfg
 
 
-def test_deepseek_v3_in_config():
+def test_free_openrouter_models_in_config():
     cfg = Path("config/config.yaml").read_text()
-    assert "openrouter/deepseek/deepseek-v3" in cfg
+    assert "openrouter/stepfun/step-3.5-flash:free" in cfg
+    assert "openrouter/qwen/qwen3-next-80b-a3b-instruct:free" in cfg
+    assert "openrouter/openai/gpt-oss-120b:free" in cfg
+    assert "openrouter/meta-llama/llama-3.3-70b-instruct:free" in cfg
+    assert "openrouter/arcee-ai/trinity-large-preview:free" in cfg
+
+
+def test_deepseek_v3_removed_from_config():
+    cfg = Path("config/config.yaml").read_text()
+    assert "openrouter/deepseek/deepseek-v3" not in cfg
 
 
 def test_groq_70b_models_in_brain_default_tiers():
@@ -36,9 +51,25 @@ def test_groq_70b_models_in_brain_default_tiers():
     assert '"groq/llama-3.3-70b-specdec"' in src
 
 
-def test_deepseek_v3_in_brain_default_tiers():
+def test_free_openrouter_models_in_brain_default_tiers():
     src = Path("agents/brain.py").read_text()
-    assert '"openrouter/deepseek/deepseek-v3"' in src
+    assert '"openrouter/stepfun/step-3.5-flash:free"' in src
+    assert '"openrouter/qwen/qwen3-next-80b-a3b-instruct:free"' in src
+    assert '"openrouter/openai/gpt-oss-120b:free"' in src
+    assert '"openrouter/meta-llama/llama-3.3-70b-instruct:free"' in src
+    assert '"openrouter/arcee-ai/trinity-large-preview:free"' in src
+
+
+def test_deepseek_v3_removed_from_brain_default_tiers():
+    src = Path("agents/brain.py").read_text()
+    default_tiers_section = src.split("DEFAULT_MODEL_TIERS", 1)[1].split("PARAM_ALIASES", 1)[0]
+    assert '"openrouter/deepseek/deepseek-v3"' not in default_tiers_section
+
+
+def test_stale_deepseek_v3_id_is_aliased_to_chat():
+    src = Path("agents/brain.py").read_text()
+    assert '"openrouter/deepseek/deepseek-v3": "openrouter/deepseek/deepseek-chat"' in src
+    assert '"deepseek/deepseek-v3": "deepseek/deepseek-chat"' in src
 
 
 def test_review_strategy_uses_gemini_pro():
@@ -60,6 +91,52 @@ def test_decommissioned_model_marked_unavailable_in_agent_logic():
     src = Path("agents/brain.py").read_text()
     assert '"model_decommissioned"' in src
     assert '"decommissioned"' in src
+    assert '"is not a valid model id"' in src
+    assert '"invalid model id"' in src
+
+
+def test_invalid_model_id_errors_are_listed_in_unavailable_matchers():
+    tree = ast.parse(Path("agents/brain.py").read_text())
+
+    method = None
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "TradingAgent":
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "_is_unavailable_model_error":
+                    method = item
+                    break
+
+    if method is None:
+        raise AssertionError("Could not locate TradingAgent._is_unavailable_model_error")
+
+    values = [
+        node.value
+        for node in ast.walk(method)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+    assert "is not a valid model id" in values
+    assert "invalid model id" in values
+
+
+def test_parse_model_identifier_normalizes_stale_deepseek_v3_alias():
+    tree = ast.parse(Path("agents/brain.py").read_text())
+
+    aliases = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "MODEL_ID_ALIASES":
+                    aliases = ast.literal_eval(node.value)
+                    break
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == "MODEL_ID_ALIASES":
+                aliases = ast.literal_eval(node.value)
+                break
+
+    assert aliases is not None
+    assert aliases["openrouter/deepseek/deepseek-v3"] == "openrouter/deepseek/deepseek-chat"
+    assert aliases["deepseek/deepseek-v3"] == "deepseek/deepseek-chat"
 
 
 # ─── Replay engine assertions ───────────────────────────────────────────────
@@ -84,7 +161,7 @@ def test_replay_delay_values():
 # ─── No sub-32B models in chain ──────────────────────────────────────────────
 
 def test_no_small_models_in_fallback():
-    cfg = Path("config/config.yaml").read_text()
+    cfg = _active_config_text()
     banned = [
         "llama-3.1-8b",
         "mixtral-8x7b",
