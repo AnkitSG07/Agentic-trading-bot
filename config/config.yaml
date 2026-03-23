@@ -51,8 +51,6 @@ agent:
   api_key_env: "GEMINI_API_KEY"
   groq_api_key_env: "GROQ_API_KEY"
   openrouter_api_key_env: "OPENROUTER_API_KEY"
-  # Get Xiaomi MiMo key from: platform.xiaomimimo.com
-  xiaomi_mimo_api_key_env: "XIAOMI_MIMO_API_KEY"
 
   # ── Primary Model ───────────────────────────────────────────
   model: "gemini/gemini-2.5-flash"
@@ -63,12 +61,10 @@ agent:
   thinking_budget: 0
 
   # ── Model Tiers ─────────────────────────────────────────────
-  # fix 15: xiaomimimo/mimo-v2-flash added to fast tier.
-  # Previously the xiaomimimo provider routing existed in brain.py
-  # but NO model string was listed here so it was never called.
-  # Now it fires automatically when Gemini + DeepSeek are rate-limited.
+  # All models ≥70B or Gemini-class. No sub-32B model in the chain.
   #
   # Removed models (reason):
+  #   xiaomimimo/mimo-v2-flash          — unverified financial reasoning, 7B-class
   #   groq/llama-3.1-8b-instant        — 8B hallucinates prices
   #   groq/mixtral-8x7b-32768          — Groq deprecated endpoint
   #   openrouter/mistralai/mistral-7b   — 7B too small
@@ -82,28 +78,31 @@ agent:
     fast:
       # Reliable, works on cloud IPs, strong JSON adherence
       - "gemini/gemini-2.0-flash"
-      # DeepSeek V3 — excellent financial domain, very cheap
+      # DeepSeek V2 — excellent financial domain, very cheap
       - "openrouter/deepseek/deepseek-chat"
-      # fix 15: Xiaomi MiMo — direct API, 256K context, free tier
-      # Correct model name: mimo-v2-flash (MiMo-7B-RL is HuggingFace only, not API)
-      # fires when all Gemini + DeepSeek models are rate-limited
-      - "xiaomimimo/mimo-v2-flash"
+      # Groq 70B — 30 RPM free, ~0.4s latency
+      - "groq/llama-3.1-70b-versatile"
+      # Groq speculative decoding — best Groq JSON adherence
+      - "groq/llama-3.3-70b-specdec"
     balanced:
       # 72B — strong reasoning, handles complex multi-symbol prompts
       - "openrouter/qwen/qwen-2.5-72b-instruct"
+      # DeepSeek V3 — better quantitative reasoning than V2
+      - "openrouter/deepseek/deepseek-v3"
     quality:
       # Best non-Google option for financial reasoning
       - "openrouter/meta-llama/llama-3.3-70b-instruct"
 
   # ── Explicit Fallback List ──────────────────────────────────
-  # fix 15: MiMo added here too — this is what brain.py actually
-  # iterates. model_tiers above is also read but this list is the
-  # definitive fallback order when the primary model fails.
+  # Definitive fallback order when the primary model fails.
+  # brain.py also reads model_tiers above, but this list takes priority.
   fallback_models:
     - "gemini/gemini-2.5-flash-lite"
     - "gemini/gemini-2.0-flash"
+    - "groq/llama-3.1-70b-versatile"
+    - "groq/llama-3.3-70b-specdec"
     - "openrouter/deepseek/deepseek-chat"
-    - "xiaomimimo/mimo-v2-flash"
+    - "openrouter/deepseek/deepseek-v3"
     - "openrouter/qwen/qwen-2.5-72b-instruct"
     - "openrouter/meta-llama/llama-3.3-70b-instruct"
 
