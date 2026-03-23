@@ -566,6 +566,15 @@ class TradingAgent:
     def _is_unsupported_system_instruction_error(self, err: Exception) -> bool:
         return "developer instruction is not enabled" in str(err).lower()
 
+    def _is_timeout_error(self, err: Exception) -> bool:
+        msg = str(err).lower()
+        return any(t in msg for t in (
+            "timed out",
+            "timeout",
+            "read operation timed out",
+            "read timed out",
+        ))
+
     def _is_unavailable_model_error(self, err: Exception) -> bool:
         msg = str(err).lower()
         return any(t in msg for t in (
@@ -788,10 +797,6 @@ class TradingAgent:
                 is_last = idx == len(all_models) - 1
                 reason  = "unknown"
 
-                if is_last:
-                    failure_reasons.append(f"{model_id}=terminal_error")
-                    break
-
                 if self._is_rate_limited_error(e):
                     prev_fails = self._model_consecutive_failures.get(model_id, 0)
                     self._model_consecutive_failures[model_id] = prev_fails + 1
@@ -821,8 +826,22 @@ class TradingAgent:
                     )
                     reason = "rate_limited"
                     failure_reasons.append(f"{model_id}={reason}")
+                    if is_last:
+                        break
                     if wait > 0:
                         time.sleep(wait)
+                    continue
+
+                if self._is_timeout_error(e):
+                    logger.warning(
+                        "Model %s timed out after %.1fs; trying fallback.",
+                        model_id,
+                        min(self.provider_timeout_seconds, max(0.5, remaining_budget)),
+                    )
+                    reason = "timeout"
+                    failure_reasons.append(f"{model_id}={reason}")
+                    if is_last:
+                        break
                     continue
 
                 if self._is_unsupported_system_instruction_error(e):
@@ -832,6 +851,8 @@ class TradingAgent:
                     )
                     reason = "unsupported_system_instruction"
                     failure_reasons.append(f"{model_id}={reason}")
+                    if is_last:
+                        break
                     continue
 
                 if self._is_unavailable_model_error(e):
@@ -840,7 +861,13 @@ class TradingAgent:
                     )
                     reason = "unavailable_or_permission"
                     failure_reasons.append(f"{model_id}={reason}")
+                    if is_last:
+                        break
                     continue
+
+                if is_last:
+                    failure_reasons.append(f"{model_id}=terminal_error")
+                    break
 
                 failure_reasons.append(f"{model_id}={reason}")
                 raise
