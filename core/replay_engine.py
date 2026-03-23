@@ -27,11 +27,17 @@ from decimal import Decimal
 
 logger = logging.getLogger("core.replay")
 
-# ── How long to wait between AI calls during replay (seconds) ────────────────
-# Gemini free tier: 15 RPM. 5s gap = 12 calls/min — safely under the limit.
-# All other providers (OpenRouter, MiMo) have similar or higher free limits.
-# Increase this if you still see rate-limit errors on a slow connection.
-REPLAY_AI_CALL_DELAY_SECONDS = 5.0
+# ── Per-provider delay between AI calls during replay (seconds) ────────────────
+# Gemini free tier: 15 RPM → 4s minimum gap
+# Groq free tier:   30 RPM → 2s minimum gap
+# OpenRouter:       generous limits, 1s is enough
+# Unknown provider: stay conservative at 5s
+REPLAY_AI_CALL_DELAY_BY_PROVIDER = {
+    "gemini":     4.0,
+    "groq":       2.0,
+    "openrouter": 1.0,
+    "default":    5.0,
+}
 
 
 @dataclass
@@ -283,10 +289,21 @@ class ReplayEngine:
                         )
                         signals = []
 
-                    # fix 6: throttle between AI calls to stay under rate limits.
-                    # 5s gap = 12 calls/min, safely under Gemini/OpenRouter free tiers.
-                    # Also sleep on failure so rate limits have time to recover.
-                    await asyncio.sleep(REPLAY_AI_CALL_DELAY_SECONDS)
+                    # Per-provider adaptive throttle between AI calls.
+                    # Extract provider from the model that was actually used.
+                    model_used = None
+                    if self.agent.decision_history:
+                        model_used = self.agent.decision_history[-1].get("model_used")
+                    provider = (
+                        model_used.split("/")[0]
+                        if model_used and "/" in model_used
+                        else "default"
+                    )
+                    delay = REPLAY_AI_CALL_DELAY_BY_PROVIDER.get(
+                        provider,
+                        REPLAY_AI_CALL_DELAY_BY_PROVIDER["default"],
+                    )
+                    await asyncio.sleep(delay)
                 else:
                     signals = []
 
