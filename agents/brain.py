@@ -18,7 +18,7 @@ Corrections applied in this version:
  12.  max_capital_per_trade_pct default 5→50% (small accounts need this)
  13.  _fallback_quantity uses spendable (capital minus reserve), not raw capital
  14.  Confidence calibration anchors + VIX avoid_trading rule in system prompt
- 15.  Groq 70B models + DeepSeek V3 added to fallback chain
+ 15.  Groq 70B models added to fallback chain; stale provider IDs removed
  16.  Circuit breaker cooldown reduced 30→10 calls so recovery is faster
       when rate limits clear (30-call blackout was too aggressive for replay)
  17.  override_model param added so review_strategy() uses gemini-2.5-pro
@@ -51,6 +51,12 @@ MAX_CONFIDENCE_THRESHOLD       = 0.95
 RATE_LIMIT_BACKOFF_SECONDS     = 1.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 30.0
 RATE_LIMIT_BACKOFF_JITTER      = 0.20
+
+MODEL_ID_ALIASES: dict[str, str] = {
+    # OpenRouter currently serves DeepSeek V3 chat traffic under deepseek-chat.
+    "openrouter/deepseek/deepseek-v3": "openrouter/deepseek/deepseek-chat",
+    "deepseek/deepseek-v3": "deepseek/deepseek-chat",
+}
 
 # ─── SIGNAL TYPES ────────────────────────────────────────────────────────────
 
@@ -273,12 +279,12 @@ class TradingAgent:
     """
     The AI brain that drives all trading decisions.
 
-    Model chain: 10 models, all ≥70B or Gemini-class.
+    Model chain: 10+ models, all Gemini-class or large open/free instruct models.
     Primary: gemini-2.5-flash | Review: gemini-2.5-pro
     Fallbacks: gemini-2.5-flash-lite, gemini-2.0-flash,
                groq/llama-3.1-70b, groq/llama-3.3-70b-specdec,
-               deepseek-chat, deepseek-v3,
-               qwen-2.5-72b, llama-3.3-70b
+               deepseek-chat, step-3.5-flash:free, qwen3-next-80b:free,
+               gpt-oss-120b:free, llama-3.3-70b:free, trinity-large-preview:free
     """
 
     PARAM_SCHEMA: dict[str, tuple[type, float, float]] = {
@@ -299,8 +305,8 @@ class TradingAgent:
 
     PARAM_CONSUMER_KEYS: frozenset[str] = frozenset()
 
-    # ── Fallback chain — all models ≥70B or Gemini-class.
-    # No sub-32B model in the chain.
+    # ── Fallback chain — all models are Gemini-class or large open/free instruct models.
+    # No small speculative fallback should be used for trading decisions.
     #
     # Removed models (reason):
     #   xiaomimimo/mimo-v2-flash          — unverified financial reasoning, 7B-class
@@ -313,6 +319,7 @@ class TradingAgent:
     DEFAULT_MODEL_TIERS: dict[str, list[str]] = {
         "ultra_fast": [
             "gemini/gemini-2.5-flash-lite",
+            "openrouter/stepfun/step-3.5-flash:free",
         ],
         "fast": [
             "gemini/gemini-2.0-flash",
@@ -323,12 +330,12 @@ class TradingAgent:
             "groq/llama-3.3-70b-specdec",
         ],
         "balanced": [
-            "openrouter/qwen/qwen-2.5-72b-instruct",
-            # DeepSeek V3 — better quantitative reasoning than V2
-            "openrouter/deepseek/deepseek-v3",
+            "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
+            "openrouter/openai/gpt-oss-120b:free",
         ],
         "quality": [
-            "openrouter/meta-llama/llama-3.3-70b-instruct",
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+            "openrouter/arcee-ai/trinity-large-preview:free",
         ],
     }
 
@@ -415,6 +422,7 @@ class TradingAgent:
 
     @staticmethod
     def _parse_model_identifier(model_id: str) -> tuple[str, str]:
+        model_id = MODEL_ID_ALIASES.get(model_id, model_id)
         if "/" not in model_id:
             return "gemini", model_id
         provider, model = model_id.split("/", 1)
@@ -541,6 +549,7 @@ class TradingAgent:
             "404", "not_found", "model is not found",
             "is not found for api version",
             "not supported for generatecontent",
+            "is not a valid model id", "invalid model id",
             "unknown model", "403", "401", "unauthorized",
             "invalid api key", "permission_denied",
             "not have permission", "decommissioned", "model_decommissioned",
