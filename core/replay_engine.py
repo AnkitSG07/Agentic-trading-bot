@@ -294,12 +294,6 @@ class ReplayEngine:
                 # ── AI decision ──────────────────────────────────────────────
                 should_run_ai = max(int(cfg.ai_every_n_candles or 1), 1)
                 if idx % should_run_ai == 0:
-                    # fix 7: reset circuit breaker before each AI call so a
-                    # rate-limit spike on one candle doesn't black-list all
-                    # models for the rest of the replay run.
-                    self.agent._model_consecutive_failures.clear()
-                    self.agent._model_skip_until.clear()
-
                     try:
                         signals = await self.agent.analyze_and_decide(context)
                     except Exception as exc:
