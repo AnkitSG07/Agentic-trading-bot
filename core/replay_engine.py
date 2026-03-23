@@ -28,15 +28,13 @@ from decimal import Decimal
 logger = logging.getLogger("core.replay")
 
 # ── Per-provider delay between AI calls during replay (seconds) ────────────────
-# Gemini free tier: 15 RPM → 4s minimum gap
-# Groq free tier:   30 RPM → 2s minimum gap
-# OpenRouter:       generous limits, 1s is enough
-# Unknown provider: stay conservative at 5s
+# These values act as minimum pacing after each completed AI decision.
+# Replay still enforces a strict end-to-end decision budget in TradingAgent.
 REPLAY_AI_CALL_DELAY_BY_PROVIDER = {
-    "gemini":     4.0,
-    "groq":       2.0,
-    "openrouter": 1.0,
-    "default":    5.0,
+    "gemini": 0.75,
+    "groq": 0.50,
+    "openrouter": 0.25,
+    "default": 1.00,
 }
 
 
@@ -64,7 +62,28 @@ class ReplayEngine:
         from agents.brain import TradingAgent
         from risk.manager import RiskConfig, RiskManager
 
-        self.agent = TradingAgent(app_config.get("agent", {}))
+        agent_cfg = dict(app_config.get("agent", {}))
+        replay_fallbacks = agent_cfg.get("replay_fallback_models")
+        if replay_fallbacks:
+            agent_cfg["fallback_models"] = replay_fallbacks
+        agent_cfg["decision_timeout_seconds"] = agent_cfg.get(
+            "replay_decision_timeout_seconds",
+            agent_cfg.get("decision_timeout_seconds", 5.0),
+        )
+        agent_cfg["provider_timeout_seconds"] = agent_cfg.get(
+            "replay_provider_timeout_seconds",
+            agent_cfg.get("provider_timeout_seconds", 2.5),
+        )
+        agent_cfg["max_fallback_wait_seconds"] = agent_cfg.get(
+            "replay_max_fallback_wait_seconds",
+            agent_cfg.get("max_fallback_wait_seconds", 0.5),
+        )
+        agent_cfg["max_models_per_decision"] = agent_cfg.get(
+            "replay_max_models_per_decision",
+            agent_cfg.get("max_models_per_decision", 3),
+        )
+
+        self.agent = TradingAgent(agent_cfg)
 
         replay_risk_cfg = RiskConfig(
             max_capital_per_trade_pct=95.0,
