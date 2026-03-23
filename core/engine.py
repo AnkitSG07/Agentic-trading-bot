@@ -1421,8 +1421,29 @@ class TradingEngine:
     async def _init_brokers(self) -> None:
         from brokers.zerodha.adapter import ZerodhaBroker
         from brokers.dhan.adapter import DhanBroker
-        bc = self.config.get("brokers", {})
+        from core.broker_accounts import get_broker_account_store
+
+        bc = self.config.setdefault("brokers", {})
         connected_order: list[str] = []
+
+        # -- INJECT DYNAMIC CREDENTIALS --
+        store = get_broker_account_store()
+        accounts = store.list_accounts(mask_credentials=False)
+        dhan_acc = next((a for a in accounts if a["broker"] == "dhan"), None)
+        zero_acc = next((a for a in accounts if a["broker"] == "zerodha"), None)
+
+        if dhan_acc:
+            if "dhan" not in bc:
+                bc["dhan"] = {"enabled": True}
+            bc["dhan"].update(dhan_acc.get("credentials", {}))
+            bc["dhan"]["enabled"] = True
+            
+        if zero_acc:
+            if "zerodha" not in bc:
+                bc["zerodha"] = {"enabled": True}
+            bc["zerodha"].update(zero_acc.get("credentials", {}))
+            bc["zerodha"]["enabled"] = True
+        # --------------------------------
 
         if bc.get("zerodha", {}).get("enabled"):
             zb = ZerodhaBroker(bc["zerodha"])
