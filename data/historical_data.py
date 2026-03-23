@@ -84,6 +84,47 @@ class FetchMeta:
     used_fallback: bool = False
 
 
+def _count_weekdays(start: date, end: date) -> int:
+    if start > end:
+        return 0
+    total_days = (end - start).days + 1
+    full_weeks, remainder = divmod(total_days, 7)
+    weekdays = full_weeks * 5
+    for offset in range(remainder):
+        if (start.weekday() + offset) % 7 < 5:
+            weekdays += 1
+    return weekdays
+
+
+def _is_requested_range_fully_cached(
+    existing: list[dict],
+    start_date: date | None,
+    end_date: date | None,
+    min_cached_candles: int,
+) -> bool:
+    if len(existing) < min_cached_candles:
+        return False
+    if not start_date or not end_date:
+        return True
+
+    candle_dates = sorted({
+        ts.date() if hasattr(ts, "date") else ts
+        for ts in (row.get("timestamp") for row in existing)
+        if ts is not None
+    })
+    if not candle_dates:
+        return False
+    if candle_dates[0] > start_date or candle_dates[-1] < end_date:
+        return False
+
+    expected_weekdays = _count_weekdays(start_date, end_date)
+    # Indian market holidays reduce the actual candle count below weekday count.
+    # Keep the skip logic conservative: only skip when the cache is close to a
+    # full business-day window and the requested range is covered end-to-end.
+    holiday_tolerance = max(3, int(expected_weekdays * 0.08))
+    minimum_complete_count = max(min_cached_candles, expected_weekdays - holiday_tolerance)
+    return len(candle_dates) >= minimum_complete_count
+
 def _make_candle(symbol: str, ts: datetime, o, h, l, c, v: int) -> dict:
     return {
         "symbol": symbol.upper(),
@@ -563,7 +604,7 @@ async def backfill_historical_data(requests_iter: Iterable[BackfillRequest]) -> 
             existing = await HistoricalCandleRepository.fetch_window(
                 [req.symbol.upper()], req.exchange, req.timeframe, _start, _end,
             )
-            if len(existing) >= min_cached_candles:
+            if _is_requested_range_fully_cached(existing, req.start_date, req.end_date, min_cached_candles):
                 logger.info(
                     "Historical backfill symbol skipped (cached) symbol=%s existing_candles=%s",
                     req.symbol.upper(), len(existing),
