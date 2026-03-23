@@ -921,6 +921,16 @@ class TradingAgent:
                 return []
 
             decision = json.loads(self._extract_json(raw_text))
+
+            # Gemini sometimes returns a bare JSON array instead of the
+            # expected object.  Wrap it so _parse_signals always gets a dict.
+            if isinstance(decision, list):
+                logger.info(
+                    "AI returned a JSON array (%d items) — wrapping as {\"signals\": [...]}",
+                    len(decision),
+                )
+                decision = {"signals": decision}
+
             signals  = self._parse_signals(decision, context)
 
             latency_ms = int(
