@@ -115,7 +115,24 @@ agent:
   # ── Generation Parameters ───────────────────────────────────
   max_tokens: 2048
   temperature: 0.05
+  provider_timeout_seconds: 4.0
+  decision_timeout_seconds: 8.0
+  max_fallback_wait_seconds: 1.5
+  max_models_per_decision: 4
 
+  # ── Replay policy ───────────────────────────────────────────
+  # Replay should behave like a real market: fail fast instead of walking
+  # the entire quality-heavy chain when providers are slow or rate-limited.
+  replay_fallback_models:
+    - "gemini/gemini-2.5-flash-lite"
+    - "openrouter/stepfun/step-3.5-flash:free"
+    - "gemini/gemini-2.0-flash"
+  replay_decision_timeout_seconds: 5.0
+  replay_provider_timeout_seconds: 2.5
+  replay_max_fallback_wait_seconds: 0.5
+  replay_max_models_per_decision: 3
+  replay_preserve_cooldowns: true
+  
   # ── Decision Timing ─────────────────────────────────────────
   decision_interval_seconds: 60
   strategy_review_interval: 3600
