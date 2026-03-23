@@ -75,6 +75,8 @@ agent:
     ultra_fast:
       # Fastest Gemini fallback when primary is rate-limited
       - "gemini/gemini-2.5-flash-lite"
+      # OpenRouter free MoE model with high recent free-router usage
+      - "openrouter/stepfun/step-3.5-flash:free"
     fast:
       # Reliable, works on cloud IPs, strong JSON adherence
       - "gemini/gemini-2.0-flash"
@@ -85,26 +87,30 @@ agent:
       # Groq speculative decoding — best Groq JSON adherence
       - "groq/llama-3.3-70b-specdec"
     balanced:
-      # 72B — strong reasoning, handles complex multi-symbol prompts
-      - "openrouter/qwen/qwen-2.5-72b-instruct"
-      # DeepSeek V3 — better quantitative reasoning than V2
-      - "openrouter/deepseek/deepseek-v3"
+      # 80B free instruct model optimized for stable long-context outputs
+      - "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
+      # Free 120B MoE with structured outputs and tool-use support
+      - "openrouter/openai/gpt-oss-120b:free"
     quality:
-      # Best non-Google option for financial reasoning
-      - "openrouter/meta-llama/llama-3.3-70b-instruct"
+      # Free 70B fallback with broad provider support
+      - "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+      # Large free MoE with strong long-context / agent harness behavior
+      - "openrouter/arcee-ai/trinity-large-preview:free"
 
   # ── Explicit Fallback List ──────────────────────────────────
   # Definitive fallback order when the primary model fails.
   # brain.py also reads model_tiers above, but this list takes priority.
   fallback_models:
     - "gemini/gemini-2.5-flash-lite"
+    - "openrouter/stepfun/step-3.5-flash:free"
     - "gemini/gemini-2.0-flash"
     - "groq/llama-3.1-70b-versatile"
     - "groq/llama-3.3-70b-specdec"
     - "openrouter/deepseek/deepseek-chat"
-    - "openrouter/deepseek/deepseek-v3"
-    - "openrouter/qwen/qwen-2.5-72b-instruct"
-    - "openrouter/meta-llama/llama-3.3-70b-instruct"
+    - "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
+    - "openrouter/openai/gpt-oss-120b:free"
+    - "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+    - "openrouter/arcee-ai/trinity-large-preview:free"
 
   # ── Generation Parameters ───────────────────────────────────
   max_tokens: 2048
