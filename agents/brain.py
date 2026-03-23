@@ -8,7 +8,7 @@ Corrections applied in this version:
   2.  max_tokens reduced 4096→2048 (40% output latency cut)
   3.  temperature reduced 0.1→0.05 (deterministic signals)
   4.  Removed all sub-32B fallback models (7B/8B models hallucinate prices)
-  5.  Added xiaomimimo provider support (direct api.xiaomimimo.com routing)
+  5.  (removed) xiaomimimo provider — unverified financial reasoning, 7B-class
   6.  AI now sees [AFFORDABLE] / [TOO EXPENSIVE] labels per symbol
   7.  Watchlist sorted by affordability then signal strength before prompt
   8.  Hard affordability check in _parse_signals (BUY dropped before risk mgr)
@@ -18,10 +18,10 @@ Corrections applied in this version:
  12.  max_capital_per_trade_pct default 5→50% (small accounts need this)
  13.  _fallback_quantity uses spendable (capital minus reserve), not raw capital
  14.  Confidence calibration anchors + VIX avoid_trading rule in system prompt
- 15.  xiaomimimo/mimo-v2-flash added to DEFAULT_MODEL_TIERS and fallback_models
-      so it actually appears in the fallback chain (was missing before)
+ 15.  Groq 70B models + DeepSeek V3 added to fallback chain
  16.  Circuit breaker cooldown reduced 30→10 calls so recovery is faster
       when rate limits clear (30-call blackout was too aggressive for replay)
+ 17.  override_model param added so review_strategy() uses gemini-2.5-pro
 """
 
 import asyncio
@@ -273,25 +273,12 @@ class TradingAgent:
     """
     The AI brain that drives all trading decisions.
 
-    Corrections from original:
-    - Gemini thinking mode disabled for 2-8s latency saving                   [fix 1]
-    - max_tokens default reduced 4096→2048                                     [fix 2]
-    - temperature default reduced 0.1→0.05                                     [fix 3]
-    - All sub-32B fallback models removed                                       [fix 4]
-    - xiaomimimo provider added (direct api.xiaomimimo.com)                     [fix 5]
-    - AI receives [AFFORDABLE] / [TOO EXPENSIVE] labels per symbol             [fix 6]
-    - Watchlist sorted: affordable first, then by signal strength               [fix 7]
-    - Hard affordability check in _parse_signals before risk manager            [fix 8]
-    - Regime-adaptive confidence threshold (VIX-based)                         [fix 9]
-    - Anti-repetition: _last_cycle_symbols + _last_cycle_directions tracking  [fix 10]
-    - Hard signal cap signals[:2] in _parse_signals (code-level enforcement)  [fix 11]
-    - max_capital_per_trade_pct default 5→50% (usable for small accounts)     [fix 12]
-    - _fallback_quantity uses spendable (capital minus reserve)                [fix 13]
-    - Confidence calibration anchors + VIX avoid_trading rule in prompt        [fix 14]
-    - xiaomimimo/mimo-v2-flash added to DEFAULT_MODEL_TIERS and fallback_models  [fix 15]
-      so it actually appears in the fallback chain (was missing before)
-    - Circuit breaker cooldown reduced 30→10 calls so recovery is faster       [fix 16]
-      when rate limits clear (30-call blackout was too aggressive for replay)
+    Model chain: 10 models, all ≥70B or Gemini-class.
+    Primary: gemini-2.5-flash | Review: gemini-2.5-pro
+    Fallbacks: gemini-2.5-flash-lite, gemini-2.0-flash,
+               groq/llama-3.1-70b, groq/llama-3.3-70b-specdec,
+               deepseek-chat, deepseek-v3,
+               qwen-2.5-72b, llama-3.3-70b
     """
 
     PARAM_SCHEMA: dict[str, tuple[type, float, float]] = {
@@ -312,12 +299,11 @@ class TradingAgent:
 
     PARAM_CONSUMER_KEYS: frozenset[str] = frozenset()
 
-    # ── Fallback chain — only models ≥32B EXCEPT MiMo which is included
-    # because it has a 256K context window and is free-tier friendly.
-    # fix 15: xiaomimimo/mimo-v2-flash added to fast tier so it is actually
-    # attempted when Gemini and DeepSeek are rate-limited.
+    # ── Fallback chain — all models ≥70B or Gemini-class.
+    # No sub-32B model in the chain.
     #
     # Removed models (reason):
+    #   xiaomimimo/mimo-v2-flash          — unverified financial reasoning, 7B-class
     #   groq/llama-3.1-8b-instant        — 8B, hallucinates price levels
     #   groq/mixtral-8x7b-32768          — Groq deprecated endpoint
     #   openrouter/mistralai/mistral-7b   — 7B, fails complex prompts
@@ -331,13 +317,15 @@ class TradingAgent:
         "fast": [
             "gemini/gemini-2.0-flash",
             "openrouter/deepseek/deepseek-chat",
-            # fix 15: MiMo added here — direct API, 256K context, free tier
-            # Get key from: platform.xiaomimimo.com
-            # Correct model name is mimo-v2-flash (not MiMo-7B-RL which is HuggingFace only)
-            "xiaomimimo/mimo-v2-flash",
+            # Groq 70B — 30 RPM free, ~0.4s latency
+            "groq/llama-3.1-70b-versatile",
+            # Groq speculative decoding — best Groq JSON adherence
+            "groq/llama-3.3-70b-specdec",
         ],
         "balanced": [
             "openrouter/qwen/qwen-2.5-72b-instruct",
+            # DeepSeek V3 — better quantitative reasoning than V2
+            "openrouter/deepseek/deepseek-v3",
         ],
         "quality": [
             "openrouter/meta-llama/llama-3.3-70b-instruct",
@@ -355,7 +343,6 @@ class TradingAgent:
         self.gemini_api_key      = os.getenv(config.get("api_key_env",            "GEMINI_API_KEY"),      "")
         self.groq_api_key        = os.getenv(config.get("groq_api_key_env",       "GROQ_API_KEY"),        "")
         self.openrouter_api_key  = os.getenv(config.get("openrouter_api_key_env", "OPENROUTER_API_KEY"),  "")
-        self.xiaomi_mimo_api_key = os.getenv(config.get("xiaomi_mimo_api_key_env","XIAOMI_MIMO_API_KEY"), "")
 
         # ── Gemini client ─────────────────────────────────────────────────────
         self.gemini_client = (
@@ -406,9 +393,9 @@ class TradingAgent:
         self._model_skip_until: dict[str, int] = {}
         self._call_counter: int = 0
         self.circuit_breaker_threshold: int = 3
-        # fix 16: reduced from 30 to 10 — 30-call blackout was too aggressive
-        # for replay where each "call" is one candle. With ai_every_n_candles=5
-        # a cooldown of 30 meant 150 days of data with zero AI decisions.
+        # circuit_breaker_cooldown: calls to skip after threshold failures
+        # 10 = safe for live trading (60s interval × 10 = 10 min blackout max)
+        # 30 was too aggressive for replay where each "call" = one candle
         self.circuit_breaker_cooldown: int = 10
 
         logger.info(
@@ -438,7 +425,6 @@ class TradingAgent:
             "gemini":     self.gemini_api_key,
             "groq":       self.groq_api_key,
             "openrouter": self.openrouter_api_key,
-            "xiaomimimo": self.xiaomi_mimo_api_key,
         }
         if not key_by_provider.get(provider):
             raise RuntimeError(f"Missing API key for provider '{provider}'.")
@@ -591,14 +577,6 @@ class TradingAgent:
             base_url = "https://api.groq.com/openai/v1/chat/completions"
             api_key  = self.groq_api_key
 
-        elif provider == "xiaomimimo":
-            # fix 5 + 15: Direct Xiaomi MiMo API
-            # Key from: platform.xiaomimimo.com
-            # Correct API model name: "mimo-v2-flash" or "mimo-v2-pro"
-            # (MiMo-7B-RL is only for self-hosting via HuggingFace, not the API)
-            base_url = "https://api.xiaomimimo.com/v1/chat/completions"
-            api_key  = self.xiaomi_mimo_api_key
-
         else:  # openrouter
             base_url = "https://openrouter.ai/api/v1/chat/completions"
             api_key  = self.openrouter_api_key
@@ -686,7 +664,7 @@ class TradingAgent:
             )
             return self._extract_response_text(response)
 
-        if provider in {"groq", "openrouter", "xiaomimimo"}:
+        if provider in {"groq", "openrouter"}:
             return self._generate_with_openai_compatible(
                 provider=provider, model=model, prompt=prompt,
                 temperature=temperature, max_tokens=max_tokens,
@@ -699,15 +677,25 @@ class TradingAgent:
 
     def _generate_text_sync(
         self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool,
+        override_model: str | None = None,
     ) -> tuple[str, str]:
         """
         Synchronous multi-provider call with fallback chain.
         Always run via asyncio.to_thread — never call directly.
         Returns (response_text, model_actually_used).
+
+        If override_model is provided, it is tried first before the
+        standard fallback chain (useful for review_strategy with a
+        higher-quality model like gemini-2.5-pro).
         """
-        all_models = [self.model] + [
-            m for m in self.fallback_models if m != self.model
-        ]
+        if override_model:
+            all_models = [override_model] + [
+                m for m in self.fallback_models if m != override_model
+            ]
+        else:
+            all_models = [self.model] + [
+                m for m in self.fallback_models if m != self.model
+            ]
         last_error: Exception | None = None
         failure_reasons: list[str] = []
         self._call_counter += 1
@@ -815,6 +803,7 @@ class TradingAgent:
 
     async def _generate_text(
         self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool,
+        override_model: str | None = None,
     ) -> tuple[str, str]:
         return await asyncio.to_thread(
             self._generate_text_sync,
@@ -822,6 +811,7 @@ class TradingAgent:
             temperature=temperature,
             max_tokens=max_tokens,
             expect_json=expect_json,
+            override_model=override_model,
         )
 
     # ── JSON extraction ───────────────────────────────────────────────────────
@@ -1052,11 +1042,13 @@ Respond ONLY with a valid JSON object:
 }}
 """
         try:
+            # Use the best available model for review — not the fast trading model
             raw, _model = await self._generate_text(
                 prompt,
                 temperature=0.2,
                 max_tokens=2048,
                 expect_json=True,
+                override_model="gemini/gemini-2.5-pro",
             )
             result = json.loads(self._extract_json(raw))
 
