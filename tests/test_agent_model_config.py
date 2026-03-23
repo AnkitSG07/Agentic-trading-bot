@@ -173,3 +173,34 @@ def test_no_small_models_in_fallback():
     ]
     for model in banned:
         assert model not in cfg, f"Banned model '{model}' should not be in config"
+
+
+def test_trading_agent_has_fail_fast_latency_controls_in_config():
+    cfg = Path("config/config.yaml").read_text()
+    assert "provider_timeout_seconds:" in cfg
+    assert "decision_timeout_seconds:" in cfg
+    assert "max_fallback_wait_seconds:" in cfg
+    assert "max_models_per_decision:" in cfg
+
+
+def test_replay_uses_dedicated_latency_first_model_policy():
+    cfg = Path("config/config.yaml").read_text()
+    replay = Path("core/replay_engine.py").read_text()
+    assert "replay_fallback_models:" in cfg
+    assert 'agent_cfg["fallback_models"] = replay_fallbacks' in replay
+    assert 'replay_max_models_per_decision' in replay
+    assert 'replay_decision_timeout_seconds' in replay
+
+
+def test_replay_no_longer_clears_model_cooldown_each_candle():
+    replay = Path("core/replay_engine.py").read_text()
+    assert "_model_consecutive_failures.clear()" not in replay
+    assert "_model_skip_until.clear()" not in replay
+
+
+def test_brain_uses_failure_count_based_backoff_with_budget():
+    src = Path("agents/brain.py").read_text()
+    assert "fail_count = self._model_consecutive_failures[model_id]" in src
+    assert "remaining_budget = self.decision_timeout_seconds - elapsed" in src
+    assert "all_models = all_models[: self.max_models_per_decision]" in src
+    assert "timeout_seconds=min(self.provider_timeout_seconds, max(0.5, remaining_budget))" in src
