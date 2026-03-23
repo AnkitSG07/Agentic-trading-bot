@@ -11,6 +11,7 @@ import {
   Eye, Layers, GitBranch, Clock, CheckCircle, XCircle,
   AlertCircle, Wifi, WifiOff, List, BarChart as BarChartIcon,
   ChevronRight, Sun, Moon, Menu, X, Play, Square,
+  Link, Plus, Trash2, Edit3, Check, Loader,
 } from "lucide-react";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -1141,6 +1142,404 @@ function BottomNav({ tabs, active, onChange, T }) {
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── BROKERS TAB ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+const BROKER_ICONS = {
+  dhan: { emoji: "🟢", gradient: "linear-gradient(135deg, #00b386, #009973)" },
+  zerodha: { emoji: "🔵", gradient: "linear-gradient(135deg, #387ed1, #2a5fb0)" },
+};
+
+function BrokersTab({ T }) {
+  const { isMobile } = useBreakpoint();
+  const [accounts, setAccounts] = useState([]);
+  const [brokerDefs, setBrokerDefs] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [selectedBroker, setSelectedBroker] = useState("");
+  const [formLabel, setFormLabel] = useState("");
+  const [formCreds, setFormCreds] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState({});
+  const [testResults, setTestResults] = useState({});
+  const [deleting, setDeleting] = useState(null);
+  const [formError, setFormError] = useState("");
+  const [formSuccess, setFormSuccess] = useState("");
+
+  const fetchAccounts = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/broker-accounts`);
+      if (res.ok) {
+        const data = await res.json();
+        setAccounts(data.accounts || []);
+        setBrokerDefs(data.broker_definitions || {});
+      }
+    } catch (e) { console.error("Failed to fetch broker accounts", e); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { fetchAccounts(); }, [fetchAccounts]);
+
+  const resetForm = () => {
+    setShowForm(false);
+    setEditingId(null);
+    setSelectedBroker("");
+    setFormLabel("");
+    setFormCreds({});
+    setFormError("");
+    setFormSuccess("");
+  };
+
+  const openAddForm = (brokerId) => {
+    setEditingId(null);
+    setSelectedBroker(brokerId);
+    setFormLabel("");
+    setFormCreds({});
+    setFormError("");
+    setFormSuccess("");
+    setShowForm(true);
+  };
+
+  const openEditForm = (account) => {
+    setEditingId(account.id);
+    setSelectedBroker(account.broker);
+    setFormLabel(account.label || "");
+    setFormCreds({});
+    setFormError("");
+    setFormSuccess("");
+    setShowForm(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setFormError("");
+    setFormSuccess("");
+    try {
+      const url = editingId
+        ? `${API_BASE}/api/broker-accounts/${editingId}`
+        : `${API_BASE}/api/broker-accounts`;
+      const method = editingId ? "PUT" : "POST";
+      const body = editingId
+        ? { label: formLabel || undefined, credentials: Object.keys(formCreds).length ? formCreds : undefined }
+        : { broker: selectedBroker, label: formLabel, credentials: formCreds };
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(extractErrorMessage(data?.detail) || "Save failed");
+      setFormSuccess(editingId ? "Account updated!" : "Account added!");
+      await fetchAccounts();
+      setTimeout(resetForm, 1200);
+    } catch (e) {
+      setFormError(toUiError(e, "Failed to save"));
+    } finally { setSaving(false); }
+  };
+
+  const handleDelete = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/broker-accounts/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setDeleting(null);
+        await fetchAccounts();
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  const handleTest = async (id) => {
+    setTesting(prev => ({ ...prev, [id]: true }));
+    setTestResults(prev => ({ ...prev, [id]: null }));
+    try {
+      const res = await fetch(`${API_BASE}/api/broker-accounts/${id}/test`, { method: "POST" });
+      const data = await res.json();
+      setTestResults(prev => ({ ...prev, [id]: data }));
+      await fetchAccounts();
+    } catch (e) {
+      setTestResults(prev => ({ ...prev, [id]: { success: false, message: "Test failed" } }));
+    } finally { setTesting(prev => ({ ...prev, [id]: false })); }
+  };
+
+  const currentFields = brokerDefs[selectedBroker]?.fields || [];
+
+  const inputStyle = { width: "100%", padding: "10px 14px", background: T.bg, border: `1px solid ${T.border}`, borderRadius: 4, color: T.text, fontSize: 12, fontFamily: "'Share Tech Mono', monospace", outline: "none", transition: "border-color 0.2s" };
+  const selectStyle = { ...inputStyle, cursor: "pointer", appearance: "none", WebkitAppearance: "none", backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%237aa0c4' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E")`, backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center" };
+
+  if (loading) return (
+    <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: 300 }}>
+      <Loader size={24} color={T.accent} style={{ animation: "spin 1s linear infinite" }} />
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+      {/* ── Header ── */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: T.textMuted, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace", marginBottom: 4 }}>BROKER ACCOUNTS</div>
+          <div style={{ fontSize: 12, color: T.textSub }}>{accounts.length} account{accounts.length !== 1 ? "s" : ""} configured</div>
+        </div>
+        {!showForm && (
+          <button onClick={() => { setShowForm(true); setEditingId(null); setSelectedBroker(""); setFormCreds({}); setFormError(""); setFormSuccess(""); }} style={{
+            background: `${T.accent}12`, border: `1px solid ${T.accent}40`, borderRadius: 4,
+            padding: "9px 20px", cursor: "pointer", fontSize: 10, fontWeight: 700,
+            color: T.accent, letterSpacing: 1.5, fontFamily: "'Share Tech Mono', monospace",
+            textTransform: "uppercase", display: "flex", alignItems: "center", gap: 6, transition: "all 0.15s",
+          }}>
+            <Plus size={12} /> ADD ACCOUNT
+          </button>
+        )}
+      </div>
+
+      {/* ── Add / Edit Form ── */}
+      {showForm && (
+        <Card T={T} accent={T.accent}>
+          <CardHeader T={T} title={editingId ? "Edit Account" : "Add New Account"} subtitle="Configure broker credentials" accent={T.accent}
+            right={<button onClick={resetForm} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 3, padding: "5px 10px", cursor: "pointer", fontSize: 9, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace" }}><X size={10} /> CLOSE</button>}
+          />
+          <div style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+
+            {/* Broker Selector */}
+            {!editingId && (
+              <div>
+                <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, color: T.textMuted, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace", marginBottom: 8 }}>SELECT BROKER</div>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, 1fr)", gap: 10 }}>
+                  {Object.entries(brokerDefs).map(([bId, bDef]) => {
+                    const isSelected = selectedBroker === bId;
+                    const brokerIcon = BROKER_ICONS[bId] || { emoji: "📊", gradient: `linear-gradient(135deg, ${T.accent}, ${T.blue})` };
+                    return (
+                      <button key={bId} onClick={() => { setSelectedBroker(bId); setFormCreds({}); }} style={{
+                        background: isSelected ? `${bDef.color || T.accent}10` : T.bg,
+                        border: `1px solid ${isSelected ? (bDef.color || T.accent) : T.border}`,
+                        borderRadius: 6, padding: "16px 18px", cursor: "pointer", textAlign: "left",
+                        transition: "all 0.2s", position: "relative", overflow: "hidden",
+                        boxShadow: isSelected ? `0 0 20px ${bDef.color || T.accent}15` : "none",
+                      }}>
+                        {isSelected && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: bDef.color || T.accent }} />}
+                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                          <div style={{ width: 40, height: 40, borderRadius: 8, background: brokerIcon.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, boxShadow: `0 4px 12px ${bDef.color || T.accent}30` }}>
+                            {brokerIcon.emoji}
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: isSelected ? (bDef.color || T.accent) : T.text, fontFamily: "'Share Tech Mono', monospace" }}>{bDef.label}</div>
+                            <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{bDef.description}</div>
+                          </div>
+                          {isSelected && <Check size={16} color={bDef.color || T.accent} style={{ marginLeft: "auto" }} />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Credential Fields */}
+            {selectedBroker && (
+              <div>
+                <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, color: T.textMuted, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace", marginBottom: 10 }}>
+                  {editingId ? "UPDATE CREDENTIALS" : "ENTER CREDENTIALS"}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div>
+                    <label style={{ fontSize: 10, color: T.textSub, marginBottom: 4, display: "block", fontFamily: "'Share Tech Mono', monospace" }}>Account Label</label>
+                    <input value={formLabel} onChange={e => setFormLabel(e.target.value)} placeholder={`My ${brokerDefs[selectedBroker]?.label || ""} Account`} style={inputStyle} />
+                  </div>
+                  {currentFields.map(f => (
+                    <div key={f.key}>
+                      <label style={{ fontSize: 10, color: T.textSub, marginBottom: 4, display: "flex", alignItems: "center", gap: 6, fontFamily: "'Share Tech Mono', monospace" }}>
+                        {f.label}
+                        {f.required && !editingId && <span style={{ color: T.red, fontSize: 8 }}>*</span>}
+                      </label>
+                      <input
+                        type={f.type === "password" ? "password" : "text"}
+                        value={formCreds[f.key] || ""}
+                        onChange={e => setFormCreds(prev => ({ ...prev, [f.key]: e.target.value }))}
+                        placeholder={editingId ? "Leave empty to keep current" : (f.placeholder || "")}
+                        style={inputStyle}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Error / Success Messages */}
+            {formError && (
+              <div style={{ background: `${T.red}10`, border: `1px solid ${T.red}30`, borderLeft: `3px solid ${T.red}`, borderRadius: 3, padding: "10px 14px", fontSize: 11, color: T.red, fontFamily: "'Share Tech Mono', monospace" }}>
+                <AlertTriangle size={12} style={{ verticalAlign: "middle", marginRight: 6 }} />{formError}
+              </div>
+            )}
+            {formSuccess && (
+              <div style={{ background: `${T.green}10`, border: `1px solid ${T.green}30`, borderLeft: `3px solid ${T.green}`, borderRadius: 3, padding: "10px 14px", fontSize: 11, color: T.green, fontFamily: "'Share Tech Mono', monospace" }}>
+                <CheckCircle size={12} style={{ verticalAlign: "middle", marginRight: 6 }} />{formSuccess}
+              </div>
+            )}
+
+            {/* Save Button */}
+            {selectedBroker && (
+              <button onClick={handleSave} disabled={saving} style={{
+                background: `${T.accent}15`, border: `1px solid ${T.accent}50`, borderRadius: 4,
+                padding: "12px 24px", cursor: saving ? "not-allowed" : "pointer", fontSize: 11, fontWeight: 700,
+                color: T.accent, letterSpacing: 1.5, fontFamily: "'Share Tech Mono', monospace",
+                textTransform: "uppercase", transition: "all 0.15s", opacity: saving ? 0.6 : 1,
+                boxShadow: `0 0 20px ${T.accent}10`,
+              }}>
+                {saving ? "SAVING…" : (editingId ? "UPDATE ACCOUNT" : "SAVE ACCOUNT")}
+              </button>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* ── Existing Accounts ── */}
+      {accounts.length === 0 && !showForm ? (
+        <Card T={T} accent={T.textMuted}>
+          <div style={{ padding: "60px 20px", textAlign: "center" }}>
+            <Link size={32} color={T.textMuted} style={{ marginBottom: 16, opacity: 0.4 }} />
+            <div style={{ fontSize: 12, color: T.textMuted, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 2, marginBottom: 8 }}>NO BROKER ACCOUNTS</div>
+            <div style={{ fontSize: 11, color: T.textDim, marginBottom: 20 }}>Add your first broker account to get started</div>
+            <button onClick={() => { setShowForm(true); setSelectedBroker(""); setFormCreds({}); }} style={{
+              background: `${T.accent}12`, border: `1px solid ${T.accent}40`, borderRadius: 4,
+              padding: "10px 24px", cursor: "pointer", fontSize: 10, fontWeight: 700,
+              color: T.accent, letterSpacing: 1.5, fontFamily: "'Share Tech Mono', monospace",
+              textTransform: "uppercase",
+            }}>
+              <Plus size={11} style={{ verticalAlign: "middle", marginRight: 4 }} /> ADD YOUR FIRST ACCOUNT
+            </button>
+          </div>
+        </Card>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(380px, 1fr))", gap: 12 }}>
+          {accounts.map(acc => {
+            const bDef = brokerDefs[acc.broker] || {};
+            const brokerIcon = BROKER_ICONS[acc.broker] || { emoji: "📊", gradient: `linear-gradient(135deg, ${T.accent}, ${T.blue})` };
+            const statusColor = acc.status === "connected" ? T.green : acc.status === "error" ? T.red : T.amber;
+            const statusLabel = acc.status === "connected" ? "Connected" : acc.status === "error" ? "Error" : acc.status === "imported" ? "Imported" : "Pending";
+            const isTesting = testing[acc.id];
+            const testResult = testResults[acc.id];
+
+            return (
+              <Card key={acc.id} T={T} accent={bDef.color || T.accent} style={{ transition: "all 0.2s" }}>
+                {/* Account Header */}
+                <div style={{ padding: "16px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 14 }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 10, background: brokerIcon.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: `0 4px 16px ${bDef.color || T.accent}25`, flexShrink: 0 }}>
+                    {brokerIcon.emoji}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text, fontFamily: "'Share Tech Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{acc.label || `${bDef.label || acc.broker} Account`}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                      <Pill label={bDef.label || acc.broker} color={bDef.color || T.accent} T={T} />
+                      <StatusDot active={acc.status === "connected"} color={statusColor} />
+                      <span style={{ fontSize: 9, color: statusColor, fontWeight: 700, letterSpacing: 1, fontFamily: "'Share Tech Mono', monospace" }}>{statusLabel.toUpperCase()}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Credentials Preview */}
+                <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}` }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {Object.entries(acc.credentials || {}).slice(0, 4).map(([key, val]) => (
+                      <div key={key}>
+                        <div style={{ fontSize: 8, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", fontFamily: "'Share Tech Mono', monospace", marginBottom: 3 }}>{key.replace(/_/g, " ")}</div>
+                        <Mono size={10} color={T.textSub}>{val}</Mono>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Test Result */}
+                {testResult && (
+                  <div style={{ padding: "10px 18px", borderBottom: `1px solid ${T.border}`, background: testResult.success ? `${T.green}06` : `${T.red}06` }}>
+                    <div style={{ fontSize: 10, color: testResult.success ? T.green : T.red, fontFamily: "'Share Tech Mono', monospace", display: "flex", alignItems: "center", gap: 6 }}>
+                      {testResult.success ? <CheckCircle size={11} /> : <XCircle size={11} />}
+                      {testResult.message}
+                    </div>
+                  </div>
+                )}
+
+                {/* Delete Confirmation */}
+                {deleting === acc.id && (
+                  <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, background: `${T.red}08` }}>
+                    <div style={{ fontSize: 11, color: T.red, marginBottom: 10, fontWeight: 600, fontFamily: "'Share Tech Mono', monospace" }}>⚠ Delete this account?</div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => handleDelete(acc.id)} style={{ background: `${T.red}20`, border: `1px solid ${T.red}`, borderRadius: 3, padding: "6px 16px", cursor: "pointer", fontSize: 9, color: T.red, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" }}>YES, DELETE</button>
+                      <button onClick={() => setDeleting(null)} style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 3, padding: "6px 16px", cursor: "pointer", fontSize: 9, color: T.textMuted, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" }}>CANCEL</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div style={{ padding: "12px 18px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button onClick={() => handleTest(acc.id)} disabled={isTesting} style={{
+                    background: `${T.green}10`, border: `1px solid ${T.green}35`, borderRadius: 3,
+                    padding: "7px 14px", cursor: isTesting ? "not-allowed" : "pointer",
+                    fontSize: 9, fontWeight: 700, color: T.green, letterSpacing: 1,
+                    fontFamily: "'Share Tech Mono', monospace", display: "flex", alignItems: "center", gap: 5,
+                    opacity: isTesting ? 0.6 : 1, transition: "all 0.15s",
+                  }}>
+                    {isTesting ? <Loader size={10} style={{ animation: "spin 1s linear infinite" }} /> : <Wifi size={10} />}
+                    {isTesting ? "TESTING…" : "TEST"}
+                  </button>
+                  <button onClick={() => openEditForm(acc)} style={{
+                    background: `${T.blue}10`, border: `1px solid ${T.blue}35`, borderRadius: 3,
+                    padding: "7px 14px", cursor: "pointer", fontSize: 9, fontWeight: 700,
+                    color: T.blue, letterSpacing: 1, fontFamily: "'Share Tech Mono', monospace",
+                    display: "flex", alignItems: "center", gap: 5, transition: "all 0.15s",
+                  }}>
+                    <Edit3 size={10} /> EDIT
+                  </button>
+                  <button onClick={() => setDeleting(acc.id)} style={{
+                    background: `${T.red}08`, border: `1px solid ${T.red}25`, borderRadius: 3,
+                    padding: "7px 14px", cursor: "pointer", fontSize: 9, fontWeight: 700,
+                    color: T.red, letterSpacing: 1, fontFamily: "'Share Tech Mono', monospace",
+                    display: "flex", alignItems: "center", gap: 5, transition: "all 0.15s",
+                    marginLeft: "auto",
+                  }}>
+                    <Trash2 size={10} /> DELETE
+                  </button>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Available Brokers (when accounts exist and form is hidden) ── */}
+      {accounts.length > 0 && !showForm && (
+        <Card T={T} accent={T.textMuted}>
+          <CardHeader T={T} title="Available Brokers" subtitle="Click to add a new account" accent={T.textMuted} />
+          <div style={{ padding: "14px 18px", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
+            {Object.entries(brokerDefs).map(([bId, bDef]) => {
+              const brokerIcon = BROKER_ICONS[bId] || { emoji: "📊", gradient: `linear-gradient(135deg, ${T.accent}, ${T.blue})` };
+              const existingCount = accounts.filter(a => a.broker === bId).length;
+              return (
+                <button key={bId} onClick={() => openAddForm(bId)} style={{
+                  background: T.bg, border: `1px solid ${T.border}`, borderRadius: 6,
+                  padding: "14px 16px", cursor: "pointer", textAlign: "left",
+                  display: "flex", alignItems: "center", gap: 12, transition: "all 0.2s",
+                }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 8, background: brokerIcon.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>
+                    {brokerIcon.emoji}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: T.text, fontFamily: "'Share Tech Mono', monospace" }}>{bDef.label}</div>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginTop: 2 }}>{existingCount} account{existingCount !== 1 ? "s" : ""} added</div>
+                  </div>
+                  <Plus size={14} color={T.textMuted} />
+                </button>
+              );
+            })}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
@@ -2279,6 +2678,7 @@ export default function TradingDashboard() {
 
   const TABS = [
     { id: "overview", label: "Overview", icon: Activity },
+    { id: "brokers", label: "Brokers", icon: Link },
     { id: "positions", label: "Positions", icon: Target },
     { id: "options", label: "Options", icon: Layers },
     { id: "watchlist", label: "Watchlist", icon: Eye },
@@ -2605,6 +3005,13 @@ export default function TradingDashboard() {
                 </div>
               </Card>
             </div>
+          </div>
+        )}
+
+        {/* BROKERS */}
+        {activeTab === "brokers" && (
+          <div className="tab-content">
+            <BrokersTab T={T} />
           </div>
         )}
 
