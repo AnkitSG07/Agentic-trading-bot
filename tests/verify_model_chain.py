@@ -34,9 +34,23 @@ check("not in brain.py (api url)", "api.xiaomimimo.com" not in src)
 print("\n[Step 2] New models added")
 check("groq/llama-3.1-70b-versatile in config", "groq/llama-3.1-70b-versatile" in cfg)
 check("groq/llama-3.3-70b-specdec in config", "groq/llama-3.3-70b-specdec" in cfg)
-check("deepseek-v3 in config", "openrouter/deepseek/deepseek-v3" in cfg)
+check("step-3.5-flash free in config", "openrouter/stepfun/step-3.5-flash:free" in cfg)
+check("qwen3-next-80b free in config", "openrouter/qwen/qwen3-next-80b-a3b-instruct:free" in cfg)
+check("gpt-oss-120b free in config", "openrouter/openai/gpt-oss-120b:free" in cfg)
+check("llama-3.3-70b free in config", "openrouter/meta-llama/llama-3.3-70b-instruct:free" in cfg)
+check("trinity-large-preview free in config", "openrouter/arcee-ai/trinity-large-preview:free" in cfg)
+check("deepseek-v3 removed from config", "openrouter/deepseek/deepseek-v3" not in cfg)
 check("groq 70b in brain.py", '"groq/llama-3.1-70b-versatile"' in src and '"groq/llama-3.3-70b-specdec"' in src)
-check("deepseek-v3 in brain.py", '"openrouter/deepseek/deepseek-v3"' in src)
+check("free OpenRouter models in brain.py", all(model in src for model in [
+    '"openrouter/stepfun/step-3.5-flash:free"',
+    '"openrouter/qwen/qwen3-next-80b-a3b-instruct:free"',
+    '"openrouter/openai/gpt-oss-120b:free"',
+    '"openrouter/meta-llama/llama-3.3-70b-instruct:free"',
+    '"openrouter/arcee-ai/trinity-large-preview:free"',
+]))
+brain_default_tiers = src.split("DEFAULT_MODEL_TIERS", 1)[1].split("PARAM_ALIASES", 1)[0]
+check("deepseek-v3 removed from brain.py default tiers", '"openrouter/deepseek/deepseek-v3"' not in brain_default_tiers)
+check("deepseek-v3 alias supported", '"openrouter/deepseek/deepseek-v3": "openrouter/deepseek/deepseek-chat"' in src)
 check("override_model param", "override_model: str | None = None" in src)
 check("review_strategy uses gemini-2.5-pro", 'override_model="gemini/gemini-2.5-pro"' in src)
 
