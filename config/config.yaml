@@ -9,6 +9,17 @@ app:
   environment: "production"  # paper | production
   log_level: "INFO"
 
+## ─── AUTONOMOUS SESSION CONTROLS ──────────────────────────
+session:
+  blocked_entry_windows:
+    - start: "09:15"
+      end: "09:30"
+      reason: "Opening range entry block"
+    - start: "15:15"
+      end: "15:30"
+      reason: "Closing auction entry block"
+  allow_exits_during_entry_blocks: true
+
 ## ─── MARKET SETTINGS ───────────────────────────────────────
 market:
   exchange: ["NSE", "BSE", "NFO", "MCX"]
@@ -140,6 +151,8 @@ agent:
 
   # ── Signal Quality Gate ─────────────────────────────────────
   confidence_threshold: 0.65
+  ai_absolute_max_new_entries: 1
+  ai_absolute_capital_multiplier: 1.0
 
 ## ─── ENGINE SELECTION ───────────────────────────────────────
 engine:
@@ -186,6 +199,11 @@ engine:
     closing:
       selection_multiplier: 0.6
       risk_cap_multiplier: 0.8
+  market_data_max_age_seconds: 120
+  health_check_interval_seconds: 60
+  reconciliation_interval_seconds: 120
+  pause_on_mismatch: false
+  sl_protection_failure_policy: "flatten"
 
 ## ─── RISK MANAGEMENT ────────────────────────────────────────
 risk:
@@ -208,9 +226,27 @@ risk:
 
   # Always keep this amount untouched — emergency liquidity floor
   min_cash_reserve: 50.0
+  min_risk_reward: 1.5
+  sector_concentration_cap: 2
+  correlation_cap: 2
+  long_bias_cap: 10
+  short_bias_cap: 10
+  strategy_family_cap: 0.5
 
   # Enables CapitalManager small-account logic
   tiny_account_mode: true
+
+## ─── REPLAY DEFAULTS ───────────────────────────────────────
+replay:
+  slippage_pct: 0.0005
+  latency_slippage_bps: 2.0
+  stop_target_precedence: "stop_first"
+
+## ─── NEWS MODIFIERS ────────────────────────────────────────
+news:
+  enabled: true
+  freshness_limit_minutes: 240
+  confidence_modifier_cap: 0.2
 
 ## ─── STRATEGIES ─────────────────────────────────────────────
 strategies:
