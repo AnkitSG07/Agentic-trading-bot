@@ -14,17 +14,25 @@ import uuid
 from datetime import datetime, time, timedelta
 from time import monotonic
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Optional
 
 import pandas as pd
 import pytz
 
 from agents.brain import MarketContext, TradingAgent, SignalAction, TradingSignal
+from capital_manager import CapitalManager
 from brokers.base import (
     BaseBroker, Exchange, Instrument, InstrumentType,
     OrderSide, OrderStatus, OrderType, Position, ProductType,
 )
+from core.candidate_builder import CandidateBuilder, CandidateBuilderConfig
+from core.pipeline_models import AIEvaluationResult, ApprovedCandidate, ExecutionFill, OrderPlan, ReconciliationStatus
+from core.preflight import EnginePreflight, PreflightConfig
+from core.session_guard import SessionBlockWindow, SessionGuard, SessionGuardConfig
+from core.signal_validator import SignalValidator, SignalValidatorConfig
 from data.indicators import IndicatorsEngine
+from data.news_classifier import NewsClassifier, NewsClassifierConfig
 from data.stock_selector import SelectorConfig, StockSelector
 from data.stock_universe import load_nse_equity_symbols
 from data.nse_feed import NSEDataFeed, NewsSentimentAnalyzer
@@ -34,6 +42,7 @@ from database.repository import (
     SLOrderRepository, TradeRepository,
 )
 from risk.manager import RiskConfig, RiskManager
+from risk.portfolio_guard import PortfolioGuard, PortfolioGuardConfig
 
 logger = logging.getLogger("engine")
 IST = pytz.timezone("Asia/Kolkata")
@@ -128,6 +137,38 @@ class TradingEngine:
         risk_kwargs = {k: v for k, v in config.get("risk", {}).items() if k in risk_fields}
         self.risk = RiskManager(RiskConfig(**risk_kwargs))
         self.tracker = ActivePositionTracker()
+        capital_config = {
+            **config.get("agent", {}),
+            "min_risk_reward": config.get("risk", {}).get("min_risk_reward", 1.5),
+        }
+        self.capital_manager = CapitalManager(capital_config)
+        self.signal_validator = SignalValidator(SignalValidatorConfig(
+            min_risk_reward=float(config.get("risk", {}).get("min_risk_reward", 1.5)),
+        ))
+        session_cfg = config.get("session", {})
+        block_windows = tuple(
+            SessionBlockWindow(
+                start=time.fromisoformat(window.get("start", "09:15")),
+                end=time.fromisoformat(window.get("end", "09:30")),
+                reason=str(window.get("reason", "Entry block")),
+            )
+            for window in session_cfg.get("blocked_entry_windows", [])
+        )
+        self.session_guard = SessionGuard(SessionGuardConfig(
+            entry_block_windows=block_windows or SessionGuardConfig().entry_block_windows,
+            exits_allowed_during_entry_blocks=bool(session_cfg.get("allow_exits_during_entry_blocks", True)),
+        ))
+        self.portfolio_guard = PortfolioGuard(PortfolioGuardConfig(
+            max_open_positions=self.risk.config.max_open_positions,
+            max_per_sector=int(config.get("risk", {}).get("sector_concentration_cap", 2) or 2),
+            correlation_cap=int(config.get("risk", {}).get("correlation_cap", 2) or 2),
+            max_long_positions=int(config.get("risk", {}).get("long_bias_cap", 10) or 10),
+            max_short_positions=int(config.get("risk", {}).get("short_bias_cap", 10) or 10),
+            max_strategy_allocation=float(config.get("risk", {}).get("strategy_family_cap", 0.5) or 0.5),
+        ))
+        self.preflight = EnginePreflight(PreflightConfig(
+            market_data_max_age_seconds=int(config.get("engine", {}).get("market_data_max_age_seconds", 120) or 120),
+        ))
 
         legacy_market_cfg = config.get("market", {})
         engine_cfg = {
@@ -170,6 +211,18 @@ class TradingEngine:
             min_avg_daily_turnover=self.min_avg_daily_turnover,
             max_auto_pick_symbols=self.max_auto_pick_symbols,
         ))
+        news_cfg = config.get("news", {})
+        self.candidate_builder = CandidateBuilder(CandidateBuilderConfig(
+            exchange="NSE",
+            timeframe="day",
+            product="MIS",
+            capital_budget=0.0,
+            max_candidates=self.max_auto_pick_symbols,
+        ), news_classifier=NewsClassifier(NewsClassifierConfig(
+            enabled=bool(news_cfg.get("enabled", True)),
+            freshness_limit_minutes=int(news_cfg.get("freshness_limit_minutes", 240) or 240),
+            confidence_modifier_cap=float(news_cfg.get("confidence_modifier_cap", 0.2) or 0.2),
+        )))
         self._base_risk_caps = {
             "max_order_value_absolute": self.risk.config.max_order_value_absolute,
             "max_open_positions": self.risk.config.max_open_positions,
@@ -216,11 +269,32 @@ class TradingEngine:
         self._last_replication_error: str = ""
         self._reconciliation_task: Optional[asyncio.Task] = None
         self._reconcile_interval_seconds: int = int(
-            self.config.get("brokers", {}).get("replication", {}).get("reconcile_interval_seconds", 120)
+            self.config.get("engine", {}).get(
+                "reconciliation_interval_seconds",
+                self.config.get("brokers", {}).get("replication", {}).get("reconcile_interval_seconds", 120),
+            )
         )
         self._broker_health_cache: dict[str, tuple[bool, float]] = {}
         self._broker_health_ttl_seconds: float = 5.0
         self._broker_health_scores: dict[str, float] = {}
+        self._last_tick_at: Optional[datetime] = None
+        self._latest_runtime_health = None
+        self._last_runtime_health_check_at: Optional[datetime] = None
+        self._latest_startup_preflight = None
+        self._latest_reconciliation_status = None
+        self._ai_health_cache: tuple[bool, float] | None = None
+        self._ai_health_ttl_seconds: float = 30.0
+        self._pending_execution_reconciliation: dict[str, dict[str, object]] = {}
+        self._last_known_funds = None
+        engine_cfg_runtime = config.get("engine", {})
+        self.pause_on_mismatch = bool(engine_cfg_runtime.get("pause_on_mismatch", False))
+        self._health_check_interval_seconds = int(engine_cfg_runtime.get("health_check_interval_seconds", 60) or 60)
+        self.sl_protection_failure_policy = str(
+            engine_cfg_runtime.get("sl_protection_failure_policy", "flatten") or "flatten"
+        ).strip().lower()
+        if self.sl_protection_failure_policy not in {"flatten", "pause"}:
+            self.sl_protection_failure_policy = "flatten"
+        self.sl_protection_retry_count = int(engine_cfg_runtime.get("sl_protection_retry_count", 1) or 1)
 
 
     @staticmethod
@@ -548,7 +622,14 @@ class TradingEngine:
             raise RuntimeError("No broker connected. Check credentials.")
 
         funds = await execution_broker.get_funds()
+        self._last_known_funds = funds
         await self.risk.initialize(funds)
+        startup_report = await self._run_startup_preflight(execution_broker)
+        self._latest_startup_preflight = startup_report
+        if not startup_report.overall_ok:
+            raise RuntimeError(
+                f"Startup preflight failed: {', '.join(startup_report.blocking_reasons)}"
+            )
 
         await self._load_instruments()
         self._candidate_universe_symbols = self._build_candidate_universe()
@@ -605,6 +686,7 @@ class TradingEngine:
                 await self._refresh_ohlcv()
                 await self._decision_cycle(now)
                 await self._monitor_positions()
+                await self._reconcile_pending_execution_state()
                 await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
@@ -645,25 +727,98 @@ class TradingEngine:
             metadata={"progress_pct": 10},
         )
         context = await self._build_market_context(now)
+        runtime_report = await self._run_runtime_preflight(now)
+        self._latest_runtime_health = runtime_report
+        if runtime_report.recommended_action == "full trading pause":
+            self._set_agent_stage("paused", now)
+            self._push_agent_event(
+                "Runtime preflight requested full trading pause",
+                level="error",
+                now=now,
+                metadata={"blocking_reasons": runtime_report.blocking_reasons},
+            )
+            return
+
+        if runtime_report.recommended_action in {"block new entries", "exits only"}:
+            context.trade_candidates = []
+            self._record_phase4_decision(
+                context=context,
+                candidates=[],
+                evaluation_result=AIEvaluationResult(
+                    candidate_evaluations=[],
+                    market_regime=context.market_trend,
+                    operating_mode=(
+                        "avoid_trading"
+                        if runtime_report.recommended_action == "exits only"
+                        else "capital_preservation"
+                    ),
+                    market_commentary="Entry generation skipped due to runtime health gating.",
+                    mode_constraints={},
+                ),
+                approved_candidates=[],
+                portfolio_result=SimpleNamespace(
+                    approved=[],
+                    blocked={"runtime_health": list(runtime_report.blocking_reasons)},
+                ),
+                order_plans=[],
+                session_block_reason=runtime_report.recommended_action,
+            )
+            self._set_agent_stage("entries_blocked", now)
+            self._agent_status["progress_pct"] = 100
+            self._push_agent_event(
+                "Skipping new-entry generation due to runtime health gating",
+                level="warn",
+                now=now,
+                metadata={
+                    "recommended_action": runtime_report.recommended_action,
+                    "blocking_reasons": list(runtime_report.blocking_reasons),
+                    "progress_pct": 100,
+                },
+            )
+            return
+
+        self._set_agent_stage("building_candidates")
+        self._agent_status["progress_pct"] = 25
+        self._push_agent_event(
+            "Building deterministic trade candidates",
+            now=now,
+            metadata={"progress_pct": 25},
+        )
+
+        execution_broker = self.get_execution_broker()
+        if not execution_broker:
+            logger.error("Execution broker unavailable during decision cycle")
+            return
+
+        funds = await execution_broker.get_funds()
+        self._last_known_funds = funds
+        positions = await execution_broker.get_positions()
+        candidate_bundle = await self._prepare_phase4_execution(context, funds, positions)
+        context.trade_candidates = list(candidate_bundle["candidates"])
 
         self._set_agent_stage("calling_model")
         self._agent_status["progress_pct"] = 35
         self._push_agent_event(
-            "Sending context to AI model",
+            "Sending candidates to AI model",
             now=now,
-            metadata={"progress_pct": 35},
+            metadata={"progress_pct": 35, "candidates_built": len(candidate_bundle["candidates"])},
         )
-        signals = await self.agent.analyze_and_decide(context)
-        self._agent_status["signals_considered"] = len(signals)
-        if signals:
-            self._agent_status["selected_strategy"] = signals[0].strategy
+
+        evaluation_result = candidate_bundle["evaluation_result"]
+        approved_candidates = candidate_bundle["approved_candidates"]
+        order_plans = candidate_bundle["order_plans"]
+        self._agent_status["signals_considered"] = len(candidate_bundle["candidates"])
+        if approved_candidates:
+            self._agent_status["selected_strategy"] = approved_candidates[0].candidate.strategy
         self._push_agent_event(
-            f"AI generated {len(signals)} signal(s) | regime {getattr(context, '_regime', 'unknown')}",
+            f"AI approved {len(approved_candidates)} candidate(s) and produced {len(order_plans)} order plan(s) | regime {getattr(context, '_regime', 'unknown')}",
             now=now,
             metadata={
                 "progress_pct": 50,
                 "selected_strategy": self._agent_status.get("selected_strategy"),
-                "signals_considered": len(signals),
+                "signals_considered": len(candidate_bundle["candidates"]),
+                "approved_candidates": len(approved_candidates),
+                "order_plans": len(order_plans),
             },
         )
 
@@ -672,62 +827,69 @@ class TradingEngine:
         self._set_agent_stage("risk_checks")
         self._agent_status["progress_pct"] = 60
         self._push_agent_event(
-            "Running risk checks on AI signals",
+            "Running risk checks on planned orders",
             now=now,
             metadata={"progress_pct": 60},
         )
-        if signals:
-            execution_broker = self.get_execution_broker()
-            if not execution_broker:
-                logger.error("Execution broker unavailable during risk checks")
-                return
-            funds = await execution_broker.get_funds()
-            positions = await execution_broker.get_positions()
-
-            for signal in signals:
-                if not signal.is_actionable:
-                    continue
+        if order_plans:
+            for order_plan in order_plans:
                 check = await self.risk.check_pre_trade(
-                    symbol=signal.symbol,
-                    side=signal.action.value,
-                    quantity=signal.quantity,
-                    entry_price=signal.entry_price or Decimal("1"),
-                    stop_loss=signal.stop_loss,
+                    symbol=order_plan.symbol,
+                    side=order_plan.side,
+                    quantity=order_plan.quantity,
+                    entry_price=order_plan.entry_price or Decimal("1"),
+                    stop_loss=order_plan.stop_loss,
                     open_positions=positions,
                     funds=funds,
                 )
                 if not check.approved:
-                    logger.warning(f"❌ {signal.symbol}: {check.reason}")
+                    logger.warning(f"❌ {order_plan.symbol}: {check.reason}")
                     reason = (check.reason or "risk_check_failed").strip().lower().replace(" ", "_")
                     rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + 1
                     self._push_agent_event(
-                        f"{signal.symbol} {signal.action.value} rejected: {check.reason}",
+                        f"{order_plan.symbol} {order_plan.side} rejected: {check.reason}",
                         level="error",
                         metadata={
                             "signals_rejected": rejected + 1,
                             "signals_approved": executed,
-                            "selected_strategy": signal.strategy,
+                            "selected_strategy": order_plan.strategy_tag,
                         },
                     )
                     rejected += 1
                     self._agent_status["signals_rejected"] = rejected
                     continue
 
-                qty = check.adjusted_quantity or signal.quantity
-                sl = check.adjusted_sl or signal.stop_loss
+                qty = check.adjusted_quantity or order_plan.quantity
+                sl = check.adjusted_sl or order_plan.stop_loss
                 self._set_agent_stage("placing_orders")
                 self._agent_status["progress_pct"] = 85
-                ok = await self._execute_signal(signal, qty, sl)
+                execution_plan = OrderPlan(
+                    symbol=order_plan.symbol,
+                    exchange=order_plan.exchange,
+                    side=order_plan.side,
+                    quantity=qty,
+                    entry_price=order_plan.entry_price,
+                    stop_loss=sl,
+                    target=order_plan.target,
+                    product=order_plan.product,
+                    order_type=order_plan.order_type,
+                    strategy_tag=order_plan.strategy_tag,
+                    capital_allocated=(order_plan.entry_price * Decimal(qty)).quantize(Decimal("0.01")),
+                    risk_reward=order_plan.risk_reward,
+                    confidence=order_plan.confidence,
+                    source_candidate_id=order_plan.source_candidate_id,
+                )
+                ok = await self._execute_from_plan(execution_plan)
                 if ok:
                     executed += 1
                     self._agent_status["signals_approved"] = executed
                     self._push_agent_event(
-                        f"{signal.symbol} {signal.action.value} executed qty {qty}",
+                        f"{execution_plan.symbol} {execution_plan.side} executed qty {qty}",
                         level="success",
                         metadata={
                             "signals_approved": executed,
                             "signals_rejected": rejected,
-                            "selected_strategy": signal.strategy,
+                            "selected_strategy": order_plan.strategy_tag,
                         },
                     )
                 else:
@@ -735,22 +897,27 @@ class TradingEngine:
                     self._agent_status["signals_rejected"] = rejected
                     rejection_breakdown["execution_error"] = rejection_breakdown.get("execution_error", 0) + 1
                     self._push_agent_event(
-                        f"{signal.symbol} {signal.action.value} execution failed",
+                        f"{execution_plan.symbol} {execution_plan.side} execution failed",
                         level="error",
                         metadata={
                             "signals_approved": executed,
                             "signals_rejected": rejected,
-                            "selected_strategy": signal.strategy,
+                            "selected_strategy": order_plan.strategy_tag,
                         },
                     )
 
         latest_decision = self.agent.decision_history[-1] if self.agent.decision_history else None
-        if latest_decision and latest_decision.get("timestamp") == context.timestamp.isoformat():
-            latest_decision["signals_generated"] = len(signals)
+        if latest_decision:
+            latest_decision["signals_generated"] = len(order_plans)
             latest_decision["signals_executed"] = executed
             latest_decision["signals_rejected"] = rejected
             latest_decision["rejection_breakdown"] = rejection_breakdown
             latest_decision["market_commentary"] = latest_decision.get("market_commentary") or latest_decision.get("commentary")
+            latest_decision["candidate_count"] = len(candidate_bundle["candidates"])
+            latest_decision["approved_candidate_count"] = len(approved_candidates)
+            latest_decision["order_plan_count"] = len(order_plans)
+            latest_decision["operating_mode"] = evaluation_result.operating_mode
+            latest_decision["mode_constraints"] = dict(evaluation_result.mode_constraints)
 
         # Persist to DB
         try:
@@ -763,7 +930,7 @@ class TradingEngine:
                 banknifty_ltp=context.banknifty_ltp,
                 india_vix=context.india_vix,
                 pcr=context.pcr,
-                signals_generated=len(signals),
+                signals_generated=len(order_plans),
                 signals_executed=executed,
                 signals_rejected=rejected,
                 risk_assessment=(latest_decision or {}).get("risk_assessment") or "",
@@ -772,6 +939,17 @@ class TradingEngine:
                     "decision": (latest_decision or {}).get("raw_response") or {},
                     "rejection_breakdown": rejection_breakdown,
                     "signals": (latest_decision or {}).get("signals") or [],
+                    "candidates": [candidate.candidate_id for candidate in candidate_bundle["candidates"]],
+                    "approved_candidates": [item.candidate_id for item in approved_candidates],
+                    "order_plans": [
+                        {
+                            "symbol": plan.symbol,
+                            "side": plan.side,
+                            "quantity": plan.quantity,
+                            "capital_allocated": float(plan.capital_allocated),
+                        }
+                        for plan in order_plans
+                    ],
                 },
                 context_snapshot={
                     "market": {
@@ -815,113 +993,488 @@ class TradingEngine:
                 "progress_pct": 100,
                 "signals_approved": executed,
                 "signals_rejected": rejected,
-                "signals_considered": len(signals),
+                "signals_considered": len(candidate_bundle["candidates"]),
                 "selected_strategy": self._agent_status.get("selected_strategy"),
             },
         )
 
+    async def _prepare_phase4_execution(
+        self,
+        context: MarketContext,
+        funds,
+        positions: list[Position],
+    ) -> dict[str, object]:
+        candidates = self._build_trade_candidates(context, funds)
+        evaluation_result = await self.agent.evaluate_candidates(candidates, context)
+        approved_candidates = self._approved_candidates_from_result(candidates, evaluation_result)
+        approved_by_id = {approved.candidate_id: approved for approved in approved_candidates}
+
+        session_block_reason = self.session_guard.active_block_reason(context.timestamp)
+        if session_block_reason:
+            approved_candidates = []
+            approved_by_id = {}
+
+        order_plans = self.capital_manager.plan_from_candidates(
+            approved_candidates,
+            funds,
+            open_position_symbols={position.instrument.symbol for position in positions},
+        )
+        validated_order_plans = self._validated_order_plans(order_plans, context.available_capital)
+        risk_config = getattr(self, "risk", None)
+        if risk_config is not None:
+            self.portfolio_guard.config.max_open_positions = self.risk.config.max_open_positions
+        portfolio_result = self.portfolio_guard.check(
+            validated_order_plans,
+            candidate_lookup=approved_by_id,
+            open_position_symbols={position.instrument.symbol for position in positions},
+            open_positions_count=len(positions),
+            open_positions=positions,
+        )
+        surviving_candidate_ids = {plan.source_candidate_id for plan in portfolio_result.approved}
+        filtered_approved_candidates = [
+            approved for approved in approved_candidates
+            if approved.candidate_id in surviving_candidate_ids
+        ]
+
+        self._record_phase4_decision(
+            context=context,
+            candidates=candidates,
+            evaluation_result=evaluation_result,
+            approved_candidates=filtered_approved_candidates,
+            portfolio_result=portfolio_result,
+            order_plans=portfolio_result.approved,
+            session_block_reason=session_block_reason,
+        )
+        return {
+            "candidates": candidates,
+            "evaluation_result": evaluation_result,
+            "approved_candidates": filtered_approved_candidates,
+            "order_plans": portfolio_result.approved,
+            "portfolio_result": portfolio_result,
+            "session_block_reason": session_block_reason,
+        }
+
+    def _build_trade_candidates(self, context: MarketContext, funds) -> list:
+        self.candidate_builder.config.capital_budget = float(max(funds.available_cash, Decimal("0")))
+        self.candidate_builder.config.max_candidates = self.max_auto_pick_symbols
+        price_references = {
+            item["symbol"]: float(item.get("ltp") or 0.0)
+            for item in context.watchlist_data
+            if item.get("symbol")
+        }
+        symbols = list(price_references) or list(self._selected_symbols)
+        return self.candidate_builder.build_candidates(
+            self._ohlcv_frames,
+            price_references=price_references,
+            symbols=symbols,
+            generated_at=context.timestamp,
+            regime=context.market_trend,
+            session_name=context.session,
+        )
+
+    @staticmethod
+    def _approved_candidates_from_result(candidates, evaluation_result) -> list[ApprovedCandidate]:
+        candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        approved: list[ApprovedCandidate] = []
+        for evaluation in evaluation_result.candidate_evaluations:
+            if not evaluation.approved:
+                continue
+            candidate = candidate_by_id.get(evaluation.candidate_id)
+            if candidate is None:
+                continue
+            approved.append(ApprovedCandidate(candidate=candidate, evaluation=evaluation))
+        return approved
+
+    def _validated_order_plans(self, order_plans: list[OrderPlan], available_capital: float) -> list[OrderPlan]:
+        validated: list[OrderPlan] = []
+        for order_plan in order_plans:
+            validation = self.signal_validator.validate(
+                order_plan,
+                current_price_reference=order_plan.entry_price,
+                available_capital=Decimal(str(available_capital)),
+            )
+            if validation.all_passed:
+                validated.append(order_plan)
+            else:
+                logger.warning(
+                    "OrderPlan rejected by SignalValidator | symbol=%s reasons=%s",
+                    order_plan.symbol,
+                    getattr(validation, "blocking_reasons", []),
+                )
+        return validated
+
+    async def _run_startup_preflight(self, execution_broker: BaseBroker):
+        return await self.preflight.run_startup(
+            broker_connected=bool(execution_broker and execution_broker.is_connected),
+            funds_probe=execution_broker.get_funds,
+            positions_probe=execution_broker.get_positions,
+            orders_probe=execution_broker.get_order_history,
+            market_data_fresh=self._market_data_is_fresh(datetime.now(IST)),
+            ai_reachable=await self._probe_ai_reachability(),
+            repository_available=await self._probe_repository_available(),
+            risk_allows_trading=self.risk.is_trading_allowed,
+            tradable_session=self._is_market_open(datetime.now(IST)),
+            now=datetime.now(IST),
+        )
+
+    async def _run_runtime_preflight(self, now: datetime):
+        cached = self._latest_runtime_health
+        last_checked = getattr(self, "_last_runtime_health_check_at", None)
+        if (
+            cached is not None
+            and last_checked is not None
+            and self._health_check_interval_seconds > 0
+            and (now - last_checked).total_seconds() < self._health_check_interval_seconds
+        ):
+            return cached
+        broker_summary = self.get_broker_health_summary()
+        broker_ok = any(bool(item.get("healthy")) for item in broker_summary.values()) if broker_summary else True
+        ai_ok = await self._probe_ai_reachability()
+        risk_ok = self.risk.is_trading_allowed
+        market_data_fresh = self._market_data_is_fresh(now)
+        report = await self.preflight.run_runtime(
+            broker_ok=broker_ok,
+            market_data_fresh=market_data_fresh,
+            ai_ok=ai_ok,
+            risk_ok=risk_ok,
+            now=now,
+        )
+        self._latest_runtime_health = report
+        self._last_runtime_health_check_at = now
+        return report
+
+    def _market_data_is_fresh(self, now: Optional[datetime] = None) -> bool:
+        current = now or datetime.now(IST)
+        if not getattr(self, "_tick_data", {}):
+            return True
+        if not getattr(self, "_last_tick_at", None):
+            return False
+        max_age = timedelta(seconds=self.preflight.config.market_data_max_age_seconds)
+        return (current - self._last_tick_at) <= max_age
+
+    async def _probe_repository_available(self) -> bool:
+        try:
+            await AgentDecisionRepository.get_recent(limit=1)
+        except Exception:
+            return False
+        return True
+
+    async def _probe_ai_reachability(self) -> bool:
+        now = monotonic()
+        cached = getattr(self, "_ai_health_cache", None)
+        if cached and (now - cached[1]) <= getattr(self, "_ai_health_ttl_seconds", 30.0):
+            return bool(cached[0])
+
+        probe = getattr(self.agent, "check_provider_health", None)
+        if callable(probe):
+            try:
+                ok = bool(await probe())
+            except Exception:
+                ok = False
+        else:
+            ok = bool(str(getattr(self.agent, "model", "") or "").strip())
+        self._ai_health_cache = (ok, now)
+        return ok
+
+    @staticmethod
+    def _open_sector_counts(positions: list[Position]) -> dict[str, int]:
+        sector_counts: dict[str, int] = {}
+        for position in positions:
+            sector = f"symbol:{position.instrument.symbol}"
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        return sector_counts
+
+    def _record_phase4_decision(
+        self,
+        *,
+        context: MarketContext,
+        candidates: list,
+        evaluation_result,
+        approved_candidates: list[ApprovedCandidate],
+        portfolio_result,
+        order_plans: list[OrderPlan],
+        session_block_reason: Optional[str],
+    ) -> None:
+        self.agent.decision_history.append({
+            "timestamp": context.timestamp.isoformat(),
+            "market_regime": evaluation_result.market_regime,
+            "operating_mode": evaluation_result.operating_mode,
+            "mode_constraints": dict(evaluation_result.mode_constraints),
+            "market_commentary": evaluation_result.market_commentary,
+            "signals": [
+                {
+                    "symbol": plan.symbol,
+                    "action": plan.side,
+                    "confidence": plan.confidence,
+                    "quantity": plan.quantity,
+                }
+                for plan in order_plans
+            ],
+            "candidate_count": len(candidates),
+            "approved_candidate_count": len(approved_candidates),
+            "portfolio_blocked": dict(portfolio_result.blocked),
+            "session_block_reason": session_block_reason,
+        })
+        if len(self.agent.decision_history) > 200:
+            self.agent.decision_history = self.agent.decision_history[-200:]
+
+    @staticmethod
+    def _signal_from_order_plan(order_plan: OrderPlan) -> TradingSignal:
+        action = SignalAction.BUY if order_plan.side in {"BUY", "COVER"} else SignalAction.SHORT
+        return TradingSignal(
+            action=action,
+            symbol=order_plan.symbol,
+            exchange=order_plan.exchange,
+            strategy=order_plan.strategy_tag,
+            quantity=order_plan.quantity,
+            entry_price=order_plan.entry_price,
+            stop_loss=order_plan.stop_loss,
+            target=order_plan.target,
+            confidence=order_plan.confidence,
+            rationale=f"Planned from candidate {order_plan.source_candidate_id}",
+            risk_reward=order_plan.risk_reward,
+            timeframe="day",
+            product=order_plan.product,
+            priority=1,
+            tags=["phase4_order_plan"],
+        )
+
     # ── Execution ─────────────────────────────────────────────────────────────
 
-    async def _execute_signal(self, signal: TradingSignal, qty: int, sl: Optional[Decimal]) -> bool:
+    async def _execute_from_plan(self, plan: OrderPlan) -> bool:
         try:
-            inst = await self._get_instrument(signal.symbol, signal.exchange)
-            product = ProductType(signal.product)
-            side = OrderSide.BUY if signal.action in (SignalAction.BUY, SignalAction.COVER) else OrderSide.SELL
-            order_type = OrderType.LIMIT if signal.entry_price else OrderType.MARKET
+            inst = await self._get_instrument(plan.symbol, plan.exchange)
+            product = ProductType(plan.product)
+            side = OrderSide.BUY if plan.side in {"BUY", "COVER"} else OrderSide.SELL
+            order_type = OrderType(plan.order_type)
 
-            # Entry order
             execution_broker = self.get_execution_broker()
             if not execution_broker:
                 raise RuntimeError("Execution broker unavailable")
 
             entry_order = await execution_broker.place_order(
-                instrument=inst, side=side, quantity=qty,
+                instrument=inst, side=side, quantity=plan.quantity,
                 order_type=order_type, product=product,
-                price=signal.entry_price, tag=signal.strategy[:8].upper(),
+                price=plan.entry_price, tag=plan.strategy_tag[:8].upper(),
             )
-            logger.info(
-                f"✅ Dhan master execution success | {signal.action.value} {qty} {signal.symbol} [{entry_order.order_id}]"
-            )
+            fill = await self._capture_execution_fill(execution_broker, entry_order, plan)
 
             asyncio.create_task(
                 self._copy_trade_to_replica(
                     instrument=inst,
                     side=side,
-                    quantity=qty,
+                    quantity=plan.quantity,
                     order_type=order_type,
                     product=product,
-                    price=signal.entry_price,
+                    price=plan.entry_price,
                     trigger_price=None,
-                    tag=f"COPY_{signal.strategy[:8].upper()}",
+                    tag=f"COPY_{plan.strategy_tag[:8].upper()}",
                 )
             )
 
-            logger.info(f"✅ {signal.action.value} {qty} {signal.symbol} | {signal.strategy} | {signal.confidence:.0%}")
-
-            # Save trade
+            persisted_price = fill.fill_price if fill.fill_price > 0 else plan.entry_price
+            persisted_status = fill.status if fill.status != OrderStatus.COMPLETE.value else (
+                OrderStatus.COMPLETE.value if fill.fill_price > 0 else "PENDING_RECONCILIATION"
+            )
             await TradeRepository.save(
                 broker_order_id=entry_order.order_id,
                 broker=self.execution_primary_broker or self._primary_broker_name,
-                symbol=signal.symbol, exchange=signal.exchange,
+                symbol=plan.symbol, exchange=plan.exchange,
                 instrument_type=inst.instrument_type.value,
                 side=side.value, order_type=order_type.value, product=product.value,
-                quantity=qty, price=signal.entry_price,
-                status=entry_order.status.value, tag=signal.strategy[:8].upper(),
-                strategy=signal.strategy, confidence=signal.confidence,
-                rationale=signal.rationale,
+                quantity=plan.quantity, price=persisted_price,
+                status=persisted_status, tag=plan.strategy_tag[:8].upper(),
+                strategy=plan.strategy_tag, confidence=plan.confidence,
+                rationale=f"Planned from candidate {plan.source_candidate_id}",
+                average_price=fill.fill_price if fill.fill_price > 0 else None,
             )
 
-            # Open DB position
-            entry_price = signal.entry_price or Decimal("0")
             db_pos = await PositionRepository.open_position(
                 broker=self.execution_primary_broker or self._primary_broker_name,
-                symbol=signal.symbol, exchange=signal.exchange,
-                product=product.value, side=side.value, quantity=qty,
-                entry_price=entry_price, stop_loss=sl,
-                target=signal.target, strategy=signal.strategy,
+                symbol=plan.symbol, exchange=plan.exchange,
+                product=product.value, side=side.value, quantity=plan.quantity,
+                entry_price=persisted_price, stop_loss=plan.stop_loss,
+                target=plan.target, strategy=plan.strategy_tag,
             )
+            if fill.status == "PENDING_RECONCILIATION":
+                pending = getattr(self, "_pending_execution_reconciliation", {})
+                pending[entry_order.order_id] = {
+                    "position_id": str(db_pos.id),
+                    "symbol": plan.symbol,
+                    "stop_loss": plan.stop_loss,
+                    "quantity": plan.quantity,
+                    "side": side,
+                    "product": product,
+                    "instrument": inst,
+                    "strategy_tag": plan.strategy_tag,
+                }
+                self._pending_execution_reconciliation = pending
 
-            # SL order
-            sl_order_id = None
-            if sl:
-                exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
-                try:
-                    sl_order = await execution_broker.place_order(
-                        instrument=inst, side=exit_side, quantity=qty,
-                        order_type=OrderType.SL_M, product=product,
-                        trigger_price=sl, tag=f"SL_{signal.strategy[:6].upper()}",
-                    )
-                    sl_order_id = sl_order.order_id
-                    await SLOrderRepository.save(
-                        position_id=str(db_pos.id),
-                        broker_order_id=sl_order.order_id,
-                        broker=self.execution_primary_broker or self._primary_broker_name,
-                        symbol=signal.symbol, sl_price=sl, sl_type="INITIAL",
-                    )
-                    logger.info(f"🛡️ SL @ ₹{sl} [{sl_order.order_id}]")
-                except Exception as e:
-                    logger.error(f"SL placement failed {signal.symbol}: {e}")
-                    await RiskEventRepository.log(
-                        "SL_ORDER_FAILED", f"SL failed for {signal.symbol}: {e}",
-                        severity="CRITICAL", symbol=signal.symbol,
-                    )
+            sl_order_id = await self._ensure_protective_stop(
+                execution_broker=execution_broker,
+                instrument=inst,
+                side=side,
+                quantity=plan.quantity,
+                product=product,
+                stop_loss=plan.stop_loss,
+                symbol=plan.symbol,
+                strategy_tag=plan.strategy_tag,
+                position_id=str(db_pos.id),
+            )
+            if plan.stop_loss and sl_order_id is None:
+                await self._handle_unprotected_fill(
+                    execution_broker=execution_broker,
+                    instrument=inst,
+                    side=side,
+                    quantity=plan.quantity,
+                    product=product,
+                    symbol=plan.symbol,
+                )
+                return False
 
             self.tracker.add(
-                position_db_id=str(db_pos.id), symbol=signal.symbol,
-                side=side.value, quantity=qty, entry_price=entry_price,
-                stop_loss=sl, target=signal.target,
+                position_db_id=str(db_pos.id), symbol=plan.symbol,
+                side=side.value, quantity=plan.quantity, entry_price=persisted_price,
+                stop_loss=plan.stop_loss, target=plan.target,
                 sl_broker_order_id=sl_order_id,
-                broker=self.execution_primary_broker or self._primary_broker_name, strategy=signal.strategy,
+                broker=self.execution_primary_broker or self._primary_broker_name, strategy=plan.strategy_tag,
             )
 
-            # Telegram alert
-            await self._notify_entry(signal, qty, sl)
+            signal = self._signal_from_order_plan(plan)
+            signal.entry_price = persisted_price
+            await self._notify_entry(signal, plan.quantity, plan.stop_loss)
             return True
 
         except Exception as e:
-            logger.error(f"❌ Dhan master execution failed | {signal.symbol}: {e}")
-            logger.error(f"Execution error {signal.symbol}: {e}", exc_info=True)
+            logger.error(f"❌ OrderPlan execution failed | {plan.symbol}: {e}")
+            logger.error(f"Execution error {plan.symbol}: {e}", exc_info=True)
             return False
+
+    async def _capture_execution_fill(self, broker: BaseBroker, entry_order, plan: OrderPlan) -> ExecutionFill:
+        resolved_order = None
+        try:
+            if hasattr(broker, "get_order_status"):
+                resolved_order = await broker.get_order_status(entry_order.order_id)
+            else:
+                orders = await broker.get_order_history()
+                resolved_order = next((order for order in orders if order.order_id == entry_order.order_id), None)
+        except Exception:
+            resolved_order = None
+
+        fill_price = Decimal("0")
+        fill_qty = 0
+        status = entry_order.status.value
+        if resolved_order is not None:
+            fill_qty = int(getattr(resolved_order, "filled_quantity", 0) or 0)
+            average_price = getattr(resolved_order, "average_price", None)
+            if average_price and Decimal(average_price) > 0:
+                fill_price = Decimal(average_price)
+            status = resolved_order.status.value
+
+        if fill_price <= 0 and status == OrderStatus.COMPLETE.value:
+            status = "PENDING_RECONCILIATION"
+
+        return ExecutionFill(
+            order_id=entry_order.order_id,
+            broker_order_id=entry_order.broker_order_id,
+            fill_price=fill_price,
+            fill_qty=fill_qty,
+            fill_time=datetime.now(IST),
+            slippage=(fill_price - plan.entry_price) if fill_price > 0 else Decimal("0"),
+            status=status,
+        )
+
+    async def _ensure_protective_stop(
+        self,
+        *,
+        execution_broker: BaseBroker,
+        instrument: Instrument,
+        side: OrderSide,
+        quantity: int,
+        product: ProductType,
+        stop_loss: Optional[Decimal],
+        symbol: str,
+        strategy_tag: str,
+        position_id: str,
+    ) -> Optional[str]:
+        if stop_loss is None:
+            return None
+        exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+        attempts = max(1, self.sl_protection_retry_count + 1)
+        last_error = None
+        for _attempt in range(attempts):
+            try:
+                sl_order = await execution_broker.place_order(
+                    instrument=instrument,
+                    side=exit_side,
+                    quantity=quantity,
+                    order_type=OrderType.SL_M,
+                    product=product,
+                    trigger_price=stop_loss,
+                    tag=f"SL_{strategy_tag[:6].upper()}",
+                )
+                await SLOrderRepository.save(
+                    position_id=position_id,
+                    broker_order_id=sl_order.order_id,
+                    broker=self.execution_primary_broker or self._primary_broker_name,
+                    symbol=symbol,
+                    sl_price=stop_loss,
+                    sl_type="INITIAL",
+                )
+                return sl_order.order_id
+            except Exception as exc:
+                last_error = exc
+        await RiskEventRepository.log(
+            "SL_ORDER_FAILED",
+            f"Protective SL failed for {symbol}: {last_error}",
+            severity="CRITICAL",
+            symbol=symbol,
+        )
+        return None
+
+    async def _handle_unprotected_fill(
+        self,
+        *,
+        execution_broker: BaseBroker,
+        instrument: Instrument,
+        side: OrderSide,
+        quantity: int,
+        product: ProductType,
+        symbol: str,
+    ) -> None:
+        if self.sl_protection_failure_policy == "pause":
+            self.risk._trigger_kill_switch(f"Protective stop could not be confirmed for {symbol}")
+            return
+
+        flatten_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+        await execution_broker.place_order(
+            instrument=instrument,
+            side=flatten_side,
+            quantity=quantity,
+            order_type=OrderType.MARKET,
+            product=product,
+            tag="SLFAIL_FLAT",
+        )
+
+    async def _execute_signal(self, signal: TradingSignal, qty: int, sl: Optional[Decimal]) -> bool:
+        side = signal.action.value if signal.action in (SignalAction.BUY, SignalAction.COVER) else "SHORT"
+        plan = OrderPlan(
+            symbol=signal.symbol,
+            exchange=signal.exchange,
+            side=side,
+            quantity=qty,
+            entry_price=signal.entry_price or Decimal("0"),
+            stop_loss=sl,
+            target=signal.target or Decimal("0"),
+            product=signal.product,
+            order_type="LIMIT" if signal.entry_price else "MARKET",
+            strategy_tag=signal.strategy,
+            capital_allocated=((signal.entry_price or Decimal("0")) * Decimal(qty)).quantize(Decimal("0.01")),
+            risk_reward=signal.risk_reward or 0.0,
+            confidence=signal.confidence,
+            source_candidate_id=f"legacy:{signal.symbol}",
+        )
+        return await self._execute_from_plan(plan)
 
     async def _copy_trade_to_replica(
         self,
@@ -1003,6 +1556,7 @@ class TradingEngine:
     async def _reconciliation_loop(self) -> None:
         while True:
             try:
+                await self._reconcile_pending_execution_state()
                 await self._reconcile_master_replica_state()
             except asyncio.CancelledError:
                 break
@@ -1042,16 +1596,96 @@ class TradingEngine:
         order_drift = sorted(dhan_open_orders ^ zerodha_open_orders)
         if missing_in_replica or extra_in_replica or order_drift:
             self._replication_status = "partial_failure"
+            self._latest_reconciliation_status = ReconciliationStatus(
+                positions_match=not (missing_in_replica or extra_in_replica),
+                orders_match=not bool(order_drift),
+                drift_details=[str(details) for details in (missing_in_replica + extra_in_replica + order_drift)],
+                action_taken="pause" if self.pause_on_mismatch else "log_only",
+            )
             details = {
                 "missing_in_zerodha": missing_in_replica,
                 "extra_in_zerodha": extra_in_replica,
                 "order_drift": order_drift,
             }
             logger.warning(f"⚠️ Reconciliation drift detected (Dhan source of truth): {details}")
+            if self.pause_on_mismatch:
+                self.risk._trigger_kill_switch("Replication mismatch detected")
         else:
             if self._replication_enabled:
                 self._replication_status = "ok"
+            self._latest_reconciliation_status = ReconciliationStatus(
+                positions_match=True,
+                orders_match=True,
+                drift_details=[],
+                action_taken="none",
+            )
             logger.info("✅ Reconciliation in sync: Dhan and Zerodha state aligned")
+
+    async def _reconcile_pending_execution_state(self) -> None:
+        pending = dict(getattr(self, "_pending_execution_reconciliation", {}))
+        if not pending:
+            return
+
+        execution_broker = self.get_execution_broker()
+        if not execution_broker:
+            return
+
+        resolved: list[str] = []
+        for broker_order_id, metadata in pending.items():
+            try:
+                if hasattr(execution_broker, "get_order_status"):
+                    order = await execution_broker.get_order_status(broker_order_id)
+                else:
+                    orders = await execution_broker.get_order_history()
+                    order = next((item for item in orders if item.order_id == broker_order_id), None)
+                if order is None:
+                    continue
+
+                average_price = getattr(order, "average_price", None)
+                if order.status == OrderStatus.COMPLETE and average_price and Decimal(average_price) > 0:
+                    fill_price = Decimal(average_price)
+                    filled_qty = int(getattr(order, "filled_quantity", 0) or 0)
+                    await TradeRepository.update_status(
+                        broker_order_id=broker_order_id,
+                        status=OrderStatus.COMPLETE.value,
+                        filled_qty=filled_qty,
+                        avg_price=fill_price,
+                    )
+                    position_id = str(metadata.get("position_id") or "")
+                    if position_id:
+                        await PositionRepository.update_entry_price(position_id, fill_price)
+                        if metadata.get("stop_loss") is not None:
+                            active_sl = await SLOrderRepository.get_active_for_position(position_id)
+                            if active_sl is None:
+                                sl_order_id = await self._ensure_protective_stop(
+                                    execution_broker=execution_broker,
+                                    instrument=metadata["instrument"],
+                                    side=metadata["side"],
+                                    quantity=int(metadata["quantity"]),
+                                    product=metadata["product"],
+                                    stop_loss=metadata["stop_loss"],
+                                    symbol=str(metadata["symbol"]),
+                                    strategy_tag=str(metadata["strategy_tag"]),
+                                    position_id=position_id,
+                                )
+                                if sl_order_id is None:
+                                    await RiskEventRepository.log(
+                                        "MISSING_PROTECTIVE_SL",
+                                        f"Protective stop missing after reconciliation for {metadata['symbol']}",
+                                        severity="CRITICAL",
+                                        symbol=str(metadata["symbol"]),
+                                    )
+                    resolved.append(broker_order_id)
+            except Exception as exc:
+                logger.warning(
+                    "Pending execution reconciliation failed | order_id=%s error=%s",
+                    broker_order_id,
+                    exc,
+                )
+
+        for broker_order_id in resolved:
+            pending.pop(broker_order_id, None)
+        self._pending_execution_reconciliation = pending
 
 
     # ── Position Monitoring ───────────────────────────────────────────────────
@@ -1632,7 +2266,8 @@ class TradingEngine:
         )
         if sym:
             self._tick_data[sym] = tick
-
+            self._last_tick_at = datetime.now(IST)
+            
     # ── Utilities ─────────────────────────────────────────────────────────────
 
     def _is_market_open(self, now: datetime) -> bool:
