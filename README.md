@@ -140,6 +140,9 @@ python main.py --mode production  # Live trading (real money!)
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/health` | System health check |
+| GET | `/api/engine/status` | Engine observability, AI mode, session state, spendable capital |
+| GET | `/api/engine/preflight` | Latest startup preflight state |
+| GET | `/api/engine/health` | Latest runtime health / pause reason |
 | GET | `/api/portfolio/positions` | Open positions |
 | GET | `/api/portfolio/funds` | Available capital |
 | GET | `/api/orders` | Today's orders |
@@ -166,11 +169,32 @@ risk:
   max_capital_per_trade_pct: 5.0 # Max position size
   max_open_positions: 10
 
+session:
+  blocked_entry_windows:
+    - start: "09:15"
+      end: "09:30"
+      reason: "Opening range entry block"
+  allow_exits_during_entry_blocks: true
+
+engine:
+  health_check_interval_seconds: 60
+  reconciliation_interval_seconds: 120
+  sl_protection_failure_policy: "flatten"
+
+news:
+  enabled: true
+  freshness_limit_minutes: 240
+  confidence_modifier_cap: 0.2
+
 strategies:
   options_selling:
     enabled: true
     iv_rank_threshold: 50         # Only sell options when IV is high
 ```
+
+Live and replay now share the typed autonomous pipeline:
+`TradeCandidate -> AIEvaluationResult -> ApprovedCandidate -> OrderPlan`.
+`analyze_and_decide()` remains only as a transitional compatibility wrapper.
 
 ---
 
