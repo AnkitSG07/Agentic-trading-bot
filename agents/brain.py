@@ -41,6 +41,8 @@ import httpx
 from google import genai
 from google.genai import types
 
+from core.pipeline_models import AICandidateEvaluation, AIEvaluationResult, ApprovedCandidate, TradeCandidate
+
 logger = logging.getLogger("agent.brain")
 
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -54,6 +56,7 @@ RATE_LIMIT_BACKOFF_JITTER         = 0.20
 DEFAULT_DECISION_TIMEOUT_SECONDS  = 8.0
 DEFAULT_PROVIDER_TIMEOUT_SECONDS  = 4.0
 DEFAULT_MAX_MODELS_PER_DECISION   = 4
+DEFAULT_AI_ABSOLUTE_MAX_NEW_ENTRIES = 2
 
 MODEL_ID_ALIASES: dict[str, str] = {
     # OpenRouter currently serves DeepSeek V3 chat traffic under deepseek-chat.
@@ -406,7 +409,13 @@ class TradingAgent:
             fallback=0.65,
             source="config",
         )
-
+        self.ai_absolute_max_new_entries: int = max(
+            0, int(config.get("ai_absolute_max_new_entries", DEFAULT_AI_ABSOLUTE_MAX_NEW_ENTRIES))
+        )
+        self.ai_absolute_capital_multiplier: float = max(
+            0.0, min(1.0, float(config.get("ai_absolute_capital_multiplier", 1.0)))
+        )
+      
         # fix 10: anti-repetition tracking
         self._last_cycle_symbols:    set[str]       = set()
         self._last_cycle_directions: dict[str, str] = {}
@@ -984,127 +993,394 @@ class TradingAgent:
         return adapted
 
     # ── Main decision function ────────────────────────────────────────────────
+  
+    @staticmethod
+    def _normalize_operating_mode(raw_mode: Any) -> str | None:
+        valid = {"active_trading", "selective", "capital_preservation", "avoid_trading"}
+        mode = str(raw_mode or "").strip().lower()
+        return mode if mode in valid else None
 
-    async def analyze_and_decide(self, context: MarketContext) -> list[TradingSignal]:
-        prompt     = self._build_prompt(context)
-        started_at = datetime.utcnow()
+    def _mode_constraints(self, operating_mode: str) -> dict[str, float | int]:
+        requested = {
+            "active_trading": {"confidence_floor": 0.65, "max_new_entries": 2, "capital_multiplier": 1.0},
+            "selective": {"confidence_floor": 0.72, "max_new_entries": 1, "capital_multiplier": 0.75},
+            "capital_preservation": {"confidence_floor": 0.80, "max_new_entries": 1, "capital_multiplier": 0.50},
+            "avoid_trading": {"confidence_floor": 0.95, "max_new_entries": 0, "capital_multiplier": 0.0},
+        }.get(operating_mode, {"confidence_floor": 0.72, "max_new_entries": 1, "capital_multiplier": 0.75})
+        return {
+            "confidence_floor": round(max(self.confidence_threshold, float(requested["confidence_floor"])), 2),
+            "max_new_entries": min(self.ai_absolute_max_new_entries, int(requested["max_new_entries"])),
+            "capital_multiplier": round(min(self.ai_absolute_capital_multiplier, float(requested["capital_multiplier"])), 2),
+        }
 
+    def _infer_operating_mode(self, context: MarketContext, candidates: list[TradeCandidate]) -> str:
+        if context.india_vix > 22 or context.session in {"opening", "closing"}:
+            return "avoid_trading"
+        if context.india_vix > 18 or not candidates:
+            return "capital_preservation"
+        if len(candidates) >= 2 and context.market_trend in {"trending_up", "trending_down"} and context.india_vix <= 14:
+            return "active_trading"
+        return "selective"
+
+    def _build_candidate_prompt(self, candidates: list[TradeCandidate], ctx: MarketContext) -> str:
+        rows = []
+        for candidate in candidates:
+            rows.append({
+                "candidate_id": candidate.candidate_id,
+                "symbol": candidate.symbol,
+                "side": candidate.side,
+                "strategy": candidate.strategy,
+                "setup_type": candidate.setup_type,
+                "timeframe": candidate.timeframe,
+                "entry_price": float(candidate.entry_price),
+                "stop_loss": float(candidate.stop_loss),
+                "target": float(candidate.target),
+                "risk_reward": candidate.risk_reward,
+                "signal_strength": candidate.signal_strength,
+                "trend_score": candidate.trend_score,
+                "liquidity_score": candidate.liquidity_score,
+                "volatility_regime": candidate.volatility_regime,
+                "priority": candidate.priority,
+                "caution_flags": candidate.caution_flags,
+                "event_flags": candidate.event_flags,
+                "max_affordable_qty": candidate.max_affordable_qty,
+            })
+
+        market_context_json = json.dumps({
+            "timestamp": ctx.timestamp.isoformat(),
+            "market_trend": ctx.market_trend,
+            "session": ctx.session,
+            "india_vix": ctx.india_vix,
+            "available_capital": ctx.available_capital,
+            "recent_news_sentiment": ctx.recent_news_sentiment,
+        })
+        candidates_json = json.dumps(rows)
+
+        return (
+            "Evaluate only the provided trade candidates for Indian markets.\n"
+            "Do not invent any new symbols, quantities, or price geometry.\n"
+            "You may only approve/reject and rank provided candidates.\n"
+            f"Market context: {market_context_json}\n"
+            f"Candidates: {candidates_json}\n"
+            "Return valid JSON with keys market_regime, operating_mode, market_commentary, candidate_evaluations. "
+            "Each candidate_evaluation must contain candidate_id, approved, confidence, rationale, priority, risk_notes.\n"
+            "Never include a candidate_id that was not provided."
+        )
+
+    def _heuristic_evaluation_result(
+        self,
+        candidates: list[TradeCandidate],
+        context: MarketContext,
+        *,
+        operating_mode: str,
+        commentary: str,
+    ) -> AIEvaluationResult:
+        constraints = self._mode_constraints(operating_mode)
+        floor = float(constraints["confidence_floor"])
+        allowed = int(constraints["max_new_entries"])
+        ranked = sorted(candidates, key=lambda candidate: (-candidate.priority, -candidate.signal_strength, candidate.symbol))
+        evaluations: list[AICandidateEvaluation] = []
+        approvals = 0
+        for idx, candidate in enumerate(ranked, start=1):
+            confidence = round(max(0.0, min(candidate.signal_strength, 1.0)), 4)
+            approved = (
+                approvals < allowed
+                and confidence >= floor
+                and candidate.max_affordable_qty > 0
+                and candidate.risk_reward >= 1.5
+            )
+            risk_notes: list[str] = []
+            if confidence < floor:
+                risk_notes.append(f"Below confidence floor {floor:.2f}")
+            if candidate.max_affordable_qty <= 0:
+                risk_notes.append("Unaffordable candidate")
+            if candidate.risk_reward < 1.5:
+                risk_notes.append("Risk/reward below minimum")
+            if approved:
+                approvals += 1
+            evaluations.append(AICandidateEvaluation(
+                candidate_id=candidate.candidate_id,
+                approved=approved,
+                confidence=confidence,
+                rationale=(
+                    "Deterministic fallback approval based on signal strength, affordability, and risk/reward."
+                    if approved else
+                    "Deterministic fallback rejection based on safety thresholds."
+                ),
+                priority=idx,
+                risk_notes=risk_notes,
+            ))
+        return AIEvaluationResult(
+            candidate_evaluations=evaluations,
+            market_regime=context.market_trend,
+            operating_mode=operating_mode,
+            market_commentary=commentary,
+            mode_constraints=constraints,
+        )
+
+    def _sanitize_candidate_evaluations(
+        self,
+        raw_evaluations: Any,
+        candidates: list[TradeCandidate],
+        constraints: dict[str, float | int],
+    ) -> list[AICandidateEvaluation]:
+        candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        parsed: dict[str, tuple[AICandidateEvaluation, int]] = {}
+
+        if isinstance(raw_evaluations, list):
+            for raw in raw_evaluations:
+                if not isinstance(raw, dict):
+                    continue
+                candidate_id = str(raw.get("candidate_id") or "").strip()
+                if candidate_id not in candidate_by_id or candidate_id in parsed:
+                    continue
+                candidate = candidate_by_id[candidate_id]
+                confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.0) or 0.0)))
+                approved = bool(raw.get("approved", False))
+                rationale = str(raw.get("rationale") or "No rationale provided.")
+                priority_hint = int(raw.get("priority", candidate.priority or 0) or 0)
+                risk_notes = [str(note) for note in raw.get("risk_notes", [])] if isinstance(raw.get("risk_notes"), list) else []
+                parsed[candidate_id] = (AICandidateEvaluation(
+                    candidate_id=candidate_id,
+                    approved=approved,
+                    confidence=confidence,
+                    rationale=rationale,
+                    priority=priority_hint,
+                    risk_notes=risk_notes,
+                ), priority_hint)
+
+        floor = float(constraints["confidence_floor"])
+        ranked: list[tuple[AICandidateEvaluation, TradeCandidate]] = []
+        for candidate in candidates:
+            evaluation, _priority_hint = parsed.get(candidate.candidate_id, (
+                AICandidateEvaluation(
+                    candidate_id=candidate.candidate_id,
+                    approved=False,
+                    confidence=0.0,
+                    rationale="Candidate was not selected by AI evaluation.",
+                    priority=candidate.priority or 0,
+                    risk_notes=[],
+                ),
+                candidate.priority or 0,
+            ))
+            if evaluation.confidence < floor:
+                evaluation.approved = False
+                evaluation.risk_notes.append(f"Below confidence floor {floor:.2f}")
+            if candidate.max_affordable_qty <= 0:
+                evaluation.approved = False
+                evaluation.risk_notes.append("Unaffordable candidate")
+            if candidate.risk_reward < 1.5:
+                evaluation.approved = False
+                evaluation.risk_notes.append("Risk/reward below minimum")
+            ranked.append((evaluation, candidate))
+
+        ranked.sort(key=lambda item: (-int(item[0].approved), -item[0].confidence, -(item[0].priority or 0), -item[1].signal_strength, item[1].symbol))
+
+        approvals = 0
+        final: list[AICandidateEvaluation] = []
+        allowed = int(constraints["max_new_entries"])
+        for idx, (evaluation, _candidate) in enumerate(ranked, start=1):
+            if evaluation.approved:
+                if approvals >= allowed:
+                    evaluation.approved = False
+                    evaluation.risk_notes.append("Rejected by operating mode max entries ceiling")
+                else:
+                    approvals += 1
+            evaluation.priority = idx
+            final.append(evaluation)
+        return final
+
+    async def evaluate_candidates(
+        self, candidates: list[TradeCandidate], context: MarketContext
+    ) -> AIEvaluationResult:
+        operating_mode = self._infer_operating_mode(context, candidates)
+        if not candidates:
+            return AIEvaluationResult(
+                candidate_evaluations=[],
+                market_regime=context.market_trend,
+                operating_mode=operating_mode,
+                market_commentary="No candidates supplied for AI evaluation.",
+                mode_constraints=self._mode_constraints(operating_mode),
+            )
+
+        prompt = self._build_candidate_prompt(candidates, context)
         try:
-            raw_text, model_used = await self._generate_text(
+            raw_text, _model_used = await self._generate_text(
                 prompt,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 expect_json=True,
             )
-
-            if not raw_text:
-                logger.warning("Empty response from AI model.")
-                return []
-
-            decision = json.loads(self._extract_json(raw_text))
-
-            # Gemini sometimes returns a bare JSON array instead of the
-            # expected object.  Wrap it so _parse_signals always gets a dict.
-            if isinstance(decision, list):
-                logger.info(
-                    "AI returned a JSON array (%d items) — wrapping as {\"signals\": [...]}",
-                    len(decision),
-                )
-                decision = {"signals": decision}
-
-            signals  = self._parse_signals(decision, context)
-
-            latency_ms = int(
-                (datetime.utcnow() - started_at).total_seconds() * 1000
+            payload = json.loads(self._extract_json(raw_text))
+        except Exception as exc:
+            return self._heuristic_evaluation_result(
+                candidates,
+                context,
+                operating_mode=operating_mode,
+                commentary=f"Fallback evaluation used because AI evaluation failed: {exc}",
             )
 
-            # fix 10: update anti-repetition state
-            self._last_cycle_symbols    = {s.symbol for s in signals if s.is_actionable}
-            self._last_cycle_directions = {
-                s.symbol: s.action.value
-                for s in signals if s.is_actionable
-            }
+        market_regime = str(payload.get("market_regime") or context.market_trend)
+        operating_mode = self._normalize_operating_mode(payload.get("operating_mode")) or operating_mode
+        constraints = self._mode_constraints(operating_mode)
+        evaluations = self._sanitize_candidate_evaluations(
+            payload.get("candidate_evaluations", []),
+            candidates,
+            constraints,
+        )
+        return AIEvaluationResult(
+            candidate_evaluations=evaluations,
+            market_regime=market_regime,
+            operating_mode=operating_mode,
+            market_commentary=str(payload.get("market_commentary") or f"Evaluated {len(candidates)} candidate(s)."),
+            mode_constraints=constraints,
+        )
 
-            normalized_signals = [
-                {
-                    "action":        s.action.value,
-                    "symbol":        s.symbol,
-                    "exchange":      s.exchange,
-                    "strategy":      s.strategy,
-                    "quantity":      s.quantity,
-                    "entry_price":   float(s.entry_price)  if s.entry_price  is not None else None,
-                    "stop_loss":     float(s.stop_loss)    if s.stop_loss    is not None else None,
-                    "target":        float(s.target)       if s.target       is not None else None,
-                    "confidence":    s.confidence,
-                    "rationale":     s.rationale,
-                    "risk_reward":   s.risk_reward,
-                    "timeframe":     s.timeframe,
-                    "product":       s.product,
-                    "priority":      s.priority,
-                    "tags":          s.tags,
-                    "is_actionable": s.is_actionable,
-                }
-                for s in signals
-            ]
-
-            record = {
-                "timestamp":              context.timestamp.isoformat(),
-                "market_regime":          decision.get("market_regime"),
-                "commentary":             decision.get("market_commentary"),
-                "market_commentary":      decision.get("market_commentary"),
-                "risk_assessment":        decision.get("risk_assessment"),
-                "signals_count":          len(signals),
-                "signals":                normalized_signals,
-                "signals_raw":            decision.get("signals", []),
-                "positions_to_exit":      decision.get("positions_to_exit", []),
-                "session_recommendation": decision.get("session_recommendation"),
-                "raw_response":           decision,
-                "model_used":             model_used,
-                "model_requested":        self.model,
-                "latency_ms":             latency_ms,
-            }
-            self.decision_history.append(record)
-
-            if len(self.decision_history) > MAX_DECISION_HISTORY:
-                self.decision_history = self.decision_history[-MAX_DECISION_HISTORY:]
-
-            logger.info(
-                "AI Decision | Regime: %s | Signals: %d | Risk: %s | "
-                "Latency: %dms | Model: %s",
-                decision.get("market_regime"),
-                len(signals),
-                decision.get("risk_assessment"),
-                latency_ms,
-                model_used,
+    async def check_provider_health(self) -> bool:
+        """Run a minimal live provider probe for engine preflight checks."""
+        if not str(getattr(self, "model", "") or "").strip():
+            return False
+        try:
+            response, _model_used = await self._generate_text(
+                "Reply with OK.",
+                temperature=0.0,
+                max_tokens=8,
+                expect_json=False,
             )
+        except Exception:
+            return False
+        return bool(str(response or "").strip())
 
-            # fix 9: regime-adaptive threshold
-            adaptive_threshold = self._get_adaptive_confidence_threshold(
-                vix=context.india_vix,
-                market_trend=context.market_trend,
-            )
-            actionable = [
-                s for s in signals
-                if s.confidence >= adaptive_threshold
-            ]
-            logger.info(
-                "%d/%d signals above adaptive threshold (%.2f | VIX=%.1f)",
-                len(actionable), len(signals), adaptive_threshold, context.india_vix,
-            )
-            return actionable
+    async def evaluate_candidate_pipeline(
+        self, context: MarketContext, candidates: Optional[list[TradeCandidate]] = None
+    ) -> tuple[list[TradeCandidate], AIEvaluationResult, list[ApprovedCandidate]]:
+        supplied_candidates = candidates
+        if supplied_candidates is None:
+            raw_supplied = getattr(context, "trade_candidates", None)
+            supplied_candidates = raw_supplied if isinstance(raw_supplied, list) else self._candidates_from_watchlist(context)
 
-        except json.JSONDecodeError as e:
-            logger.error("Failed to parse AI response as JSON: %s", e)
-            return []
-        except Exception as e:
-            err = str(e).lower()
-            if "api key" in err and "missing" in err:
-                logger.error("AI agent disabled: missing GEMINI_API_KEY.")
-            elif self._is_rate_limited_error(e):
-                logger.error("AI agent failed: all models are rate-limited.")
+        evaluation_result = await self.evaluate_candidates(supplied_candidates, context)
+        candidate_by_id = {candidate.candidate_id: candidate for candidate in supplied_candidates}
+        approved_candidates: list[ApprovedCandidate] = []
+        for evaluation in evaluation_result.candidate_evaluations:
+            if not evaluation.approved:
+                continue
+            candidate = candidate_by_id.get(evaluation.candidate_id)
+            if candidate is None:
+                continue
+            approved_candidates.append(ApprovedCandidate(candidate=candidate, evaluation=evaluation))
+        return supplied_candidates, evaluation_result, approved_candidates
+
+    def _candidates_from_watchlist(self, context: MarketContext) -> list[TradeCandidate]:
+        reserve = max(self.min_cash_reserve, context.available_capital * 0.05)
+        spendable = max(0.0, context.available_capital - reserve)
+        candidates: list[TradeCandidate] = []
+        for idx, item in enumerate(context.watchlist_data, start=1):
+            indicators = item.get("indicators", {})
+            signal = str(indicators.get("overall_signal") or "neutral")
+            if signal not in {"buy", "strong_buy", "sell", "strong_sell"}:
+                continue
+            side = "BUY" if signal in {"buy", "strong_buy"} else "SHORT"
+            symbol = str(item.get("symbol") or "").upper()
+            ltp = Decimal(str(item.get("ltp") or 0))
+            if ltp <= 0:
+                continue
+            levels = item.get("levels", {})
+            if side == "BUY":
+                stop = Decimal(str(levels.get("s1") or (float(ltp) * 0.99)))
+                target = Decimal(str(levels.get("r1") or (float(ltp) * 1.02)))
             else:
-                logger.error("AI agent error: %s", e, exc_info=True)
-            return []
+                stop = Decimal(str(levels.get("r1") or (float(ltp) * 1.01)))
+                target = Decimal(str(levels.get("s1") or (float(ltp) * 0.98)))
+            risk = abs(float(ltp - stop))
+            reward = abs(float(target - ltp))
+            risk_reward = round(reward / risk, 2) if risk > 0 else 0.0
+            max_affordable_qty = int(spendable // float(ltp)) if float(ltp) > 0 else 0
+            candidates.append(TradeCandidate(
+                candidate_id=f"{symbol}:{side}:{context.timestamp.isoformat()}",
+                symbol=symbol,
+                exchange=str(item.get("exchange") or "NSE"),
+                side=side,
+                setup_type="watchlist_candidate",
+                strategy="ai_wrapper",
+                timeframe="day",
+                product="MIS",
+                entry_price=ltp,
+                stop_loss=stop,
+                target=target,
+                risk_reward=risk_reward,
+                signal_strength=max(0.0, min(float(item.get("score") or 0.0) / 100.0, 1.0)),
+                trend_score=0.5 if side == "BUY" else -0.5,
+                liquidity_score=max(0.0, min(float(indicators.get("volume_ratio") or 0.0), 10.0)),
+                volatility_regime="normal",
+                sector_tag=None,
+                ltp_reference=ltp,
+                max_affordable_qty=max_affordable_qty,
+                generated_at=context.timestamp,
+                priority=max(1, 1000 - idx),
+                caution_flags=[],
+                event_flags=[],
+            ))
+        return candidates
+
+    async def analyze_and_decide(self, context: MarketContext) -> list[TradingSignal]:
+        started_at = datetime.utcnow()
+        candidates, evaluation_result, approved_candidates = await self.evaluate_candidate_pipeline(context)
+        candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        signals: list[TradingSignal] = []
+
+        for approved in approved_candidates:
+            evaluation = approved.evaluation
+            candidate = candidate_by_id.get(approved.candidate_id)
+            if not candidate:
+                continue
+            qty = min(
+                candidate.max_affordable_qty,
+                self._fallback_quantity_for_signal({
+                    "symbol": candidate.symbol,
+                    "entry_price": str(candidate.entry_price),
+                }, context),
+            )
+            if qty <= 0:
+                continue
+            action = SignalAction.BUY if candidate.side == "BUY" else SignalAction.SHORT
+            signals.append(TradingSignal(
+                action=action,
+                symbol=candidate.symbol,
+                exchange=candidate.exchange,
+                strategy=candidate.strategy,
+                quantity=qty,
+                entry_price=candidate.entry_price,
+                stop_loss=candidate.stop_loss,
+                target=candidate.target,
+                confidence=evaluation.confidence,
+                rationale=evaluation.rationale,
+                risk_reward=candidate.risk_reward,
+                timeframe=candidate.timeframe,
+                product=candidate.product,
+                priority=evaluation.priority,
+                tags=list(candidate.caution_flags) + list(candidate.event_flags),
+            ))
+
+        self.decision_history.append({
+            "timestamp": started_at.isoformat(),
+            "market_regime": evaluation_result.market_regime,
+            "operating_mode": evaluation_result.operating_mode,
+            "mode_constraints": dict(evaluation_result.mode_constraints),
+            "signals": [
+                {
+                    "symbol": signal.symbol,
+                    "action": signal.action.value,
+                    "confidence": signal.confidence,
+                    "quantity": signal.quantity,
+                }
+                for signal in signals
+            ],
+        })
+        if len(self.decision_history) > MAX_DECISION_HISTORY:
+            self.decision_history = self.decision_history[-MAX_DECISION_HISTORY:]
+
+        return signals
 
     # ── Strategy review ───────────────────────────────────────────────────────
 
@@ -1475,10 +1751,9 @@ Position: {json.dumps(position, indent=2)}
         if resolved_price is None or resolved_price <= 0:
             return 0
 
-        # fix 13: use spendable not raw capital
+        # preserve compatibility: fallback sizing uses available capital directly
         capital   = Decimal(str(max(ctx.available_capital, 0.0)))
-        reserve   = Decimal(str(max(self.min_cash_reserve, float(capital) * 0.05)))
-        spendable = max(Decimal("0"), capital - reserve)
+        spendable = capital
 
         per_trade_budget = spendable * Decimal(
             str(self.max_capital_per_trade_pct / 100.0)
