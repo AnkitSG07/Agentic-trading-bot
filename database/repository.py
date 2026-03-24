@@ -295,6 +295,15 @@ class PositionRepository:
             )
 
     @staticmethod
+    async def update_entry_price(position_id: str, entry_price: Decimal) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(Position)
+                .where(Position.id == uuid.UUID(position_id))
+                .values(entry_price=entry_price)
+            )
+
+    @staticmethod
     async def get_open_positions() -> list[Position]:
         async with get_session() as session:
             result = await session.execute(
