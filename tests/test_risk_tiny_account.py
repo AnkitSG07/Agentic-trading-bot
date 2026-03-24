@@ -6,7 +6,7 @@ from brokers.base import Funds
 from risk.manager import RiskConfig, RiskManager
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_check_pre_trade_adjusts_quantity_then_still_applies_auto_sl():
     mgr = RiskManager(RiskConfig(max_capital_per_trade_pct=50.0, max_order_value_absolute=1200.0, min_cash_buffer=300.0))
     await mgr.initialize(Funds(available_cash=Decimal("5000"), used_margin=Decimal("0"), total_balance=Decimal("5000")))
@@ -27,7 +27,7 @@ async def test_check_pre_trade_adjusts_quantity_then_still_applies_auto_sl():
     assert "auto stop-loss applied" in result.reason
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_tiny_account_mode_enforces_stricter_spend_limit():
     mgr = RiskManager(RiskConfig(max_capital_per_trade_pct=90.0, min_cash_buffer=100.0, tiny_account_mode=True))
     await mgr.initialize(Funds(available_cash=Decimal("1000"), used_margin=Decimal("0"), total_balance=Decimal("1000")))
