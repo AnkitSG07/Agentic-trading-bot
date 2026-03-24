@@ -86,7 +86,10 @@ class IndicatorsEngine:
         avg_gain = gain.ewm(alpha=1 / length, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1 / length, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, pd.NA)
-        return 100 - (100 / (1 + rs))
+        rsi = 100 - (100 / (1 + rs))
+        rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+        rsi = rsi.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
+        return rsi
 
     @staticmethod
     def _macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
@@ -326,20 +329,85 @@ class IndicatorsEngine:
 
     def _compute_signals(self, b: IndicatorBundle) -> None:
         """Aggregate indicators into directional signals."""
-        score = 0
-        max_score = 0
+        score = 0.0
+        max_score = 0.0
+
+        if b.rsi is not None:
+            if b.rsi <= 35:
+                b.rsi_signal = "oversold"
+                score += 1.0
+            elif b.rsi >= 65:
+                b.rsi_signal = "overbought"
+                score -= 1.0
+            else:
+                b.rsi_signal = "neutral"
+            max_score += 1.0
+
+        if b.macd is not None and b.macd_signal is not None:
+            macd_delta = b.macd - b.macd_signal
+            if macd_delta > 0:
+                b.macd_signal_str = "crossover_up" if b.macd_histogram and b.macd_histogram > 0 else "bullish"
+                score += 1.5
+            elif macd_delta < 0:
+                b.macd_signal_str = "crossover_down" if b.macd_histogram and b.macd_histogram < 0 else "bearish"
+                score -= 1.5
+            else:
+                b.macd_signal_str = "neutral"
+            max_score += 1.5
+
+        if b.bb_upper is not None and b.bb_lower is not None and b.bb_middle is not None and b.ltp is not None:
+            band_range = b.bb_upper - b.bb_lower
+            if band_range > 0:
+                lower_zone = b.bb_lower + (band_range * 0.2)
+                upper_zone = b.bb_upper - (band_range * 0.2)
+                if b.ltp <= lower_zone:
+                    b.bb_signal = "lower_touch"
+                    score += 1.0
+                elif b.ltp >= upper_zone:
+                    b.bb_signal = "upper_touch"
+                    score -= 1.0
+                elif b.bb_width is not None and b.bb_width < 5:
+                    b.bb_signal = "squeeze"
+                else:
+                    b.bb_signal = "neutral"
+                max_score += 1.0
+
+        if b.trend == "bullish":
+            score += 1.0
+            max_score += 1.0
+        elif b.trend == "bearish":
+            score -= 1.0
+            max_score += 1.0
+
+        if b.supertrend_direction == 1:
+            score += 1.5
+            max_score += 1.5
+        elif b.supertrend_direction == -1:
+            score -= 1.5
+            max_score += 1.5
+
+        if b.volume_ratio is not None:
+            if b.volume_ratio >= 1.2:
+                if score > 0:
+                    score += 0.5
+                elif score < 0:
+                    score -= 0.5
+            elif b.volume_ratio < 0.8:
+                score *= 0.85
+            max_score += 0.5
+
         if max_score == 0:
             b.overall_signal = "neutral"
             return
 
         ratio = score / max_score
-        if ratio >= 0.7:
+        if ratio >= 0.55:
             b.overall_signal = "strong_buy"
-        elif ratio >= 0.4:
+        elif ratio >= 0.2:
             b.overall_signal = "buy"
-        elif ratio <= -0.7:
+        elif ratio <= -0.55:
             b.overall_signal = "strong_sell"
-        elif ratio <= -0.4:
+        elif ratio <= -0.2:
             b.overall_signal = "sell"
         else:
             b.overall_signal = "neutral"
