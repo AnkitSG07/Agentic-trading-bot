@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pandas as pd
+
 
 logger = logging.getLogger("core.replay")
 
@@ -49,18 +51,117 @@ class ReplayConfig:
     fee_pct: float = 0.0003
     slippage_pct: float = 0.0005
     latency_slippage_bps: float = 2.0
-    partial_fill_probability: float = 0.15
     # fix 5: default 1 — evaluate every candle. Users can increase via UI
     # to reduce total API calls at the cost of fewer trading decisions.
     ai_every_n_candles: int = 1
     confidence_threshold: float | None = None
+    market_order_fill_basis: str = "open"
+    ambiguity_rule: str = "stop_first"
+
+
+@dataclass(slots=True)
+class ReplayFillResult:
+    filled: bool
+    fill_price: Decimal | None = None
+    trigger_reason: str | None = None
+    slippage_pct: float = 0.0
+
+
+class ReplayFillModel:
+    """Deterministic replay fill rules shared across entry/exit simulation."""
+
+    def __init__(self, cfg: ReplayConfig) -> None:
+        self.cfg = cfg
+
+    def market_fill(self, candle: dict, side: str) -> ReplayFillResult:
+        base_key = "open" if str(self.cfg.market_order_fill_basis).lower() == "open" else "close"
+        base_price = Decimal(str(candle.get(base_key) or candle.get("close") or candle.get("open") or 0))
+        if base_price <= 0:
+            return ReplayFillResult(filled=False, trigger_reason="missing_price")
+        slip = Decimal(str(_estimate_replay_slippage_pct(candle, self.cfg)))
+        direction = Decimal("1") if side in {"BUY", "COVER"} else Decimal("-1")
+        fill_price = (base_price * (Decimal("1") + (direction * slip))).quantize(Decimal("0.01"))
+        return ReplayFillResult(filled=True, fill_price=fill_price, trigger_reason="market", slippage_pct=float(slip))
+
+    def limit_fill(self, candle: dict, side: str, limit_price: Decimal) -> ReplayFillResult:
+        low = Decimal(str(candle.get("low") or candle.get("close") or 0))
+        high = Decimal(str(candle.get("high") or candle.get("close") or 0))
+        open_price = Decimal(str(candle.get("open") or candle.get("close") or 0))
+
+        if side in {"BUY", "COVER"}:
+            if low <= limit_price <= high:
+                return ReplayFillResult(filled=True, fill_price=limit_price, trigger_reason="limit")
+            if high < limit_price:
+                # Candle traded entirely below the limit price, so the order is
+                # marketable for the full candle. Use the better deterministic
+                # price between the candle open and the limit ceiling.
+                return ReplayFillResult(
+                    filled=True,
+                    fill_price=min(limit_price, open_price if open_price > 0 else limit_price),
+                    trigger_reason="limit_improved",
+                )
+        if side in {"SELL", "SHORT"}:
+            if low <= limit_price <= high:
+                return ReplayFillResult(filled=True, fill_price=limit_price, trigger_reason="limit")
+            if low > limit_price:
+                # Candle traded entirely above the sell limit price, so the
+                # order is marketable for the full candle. Use the better
+                # deterministic price between the candle open and the limit floor.
+                return ReplayFillResult(
+                    filled=True,
+                    fill_price=max(limit_price, open_price if open_price > 0 else limit_price),
+                    trigger_reason="limit_improved",
+                )
+        return ReplayFillResult(filled=False, trigger_reason="limit_not_reached")
+
+    def resolve_entry(self, candle: dict, plan) -> ReplayFillResult:
+        order_type = str(plan.order_type or "LIMIT").upper()
+        if order_type == "MARKET":
+            return self.market_fill(candle, plan.side)
+        return self.limit_fill(candle, plan.side, Decimal(plan.entry_price))
+
+    def resolve_protective_exit(self, candle: dict, position: dict) -> ReplayFillResult:
+        side = "BUY" if Decimal(position["qty"]) > 0 else "SHORT"
+        stop_loss = position.get("stop_loss")
+        target = position.get("target")
+        if stop_loss is None and target is None:
+            return ReplayFillResult(filled=False, trigger_reason="no_exit_levels")
+
+        low = Decimal(str(candle.get("low") or candle.get("close") or 0))
+        high = Decimal(str(candle.get("high") or candle.get("close") or 0))
+        stop_hit = False
+        target_hit = False
+        if side == "BUY":
+            stop_hit = stop_loss is not None and low <= Decimal(stop_loss)
+            target_hit = target is not None and high >= Decimal(target)
+        else:
+            stop_hit = stop_loss is not None and high >= Decimal(stop_loss)
+            target_hit = target is not None and low <= Decimal(target)
+
+        if stop_hit and target_hit:
+            # Conservative deterministic ambiguity rule:
+            # when the same candle touches both stop and target, assume stop first.
+            chosen = "stop_loss" if self.cfg.ambiguity_rule == "stop_first" else "target"
+            price = Decimal(stop_loss if chosen == "stop_loss" else target)
+            return ReplayFillResult(filled=True, fill_price=price, trigger_reason=chosen)
+        if stop_hit:
+            return ReplayFillResult(filled=True, fill_price=Decimal(stop_loss), trigger_reason="stop_loss")
+        if target_hit:
+            return ReplayFillResult(filled=True, fill_price=Decimal(target), trigger_reason="target")
+        return ReplayFillResult(filled=False, trigger_reason="no_trigger")
 
 
 class ReplayEngine:
     def __init__(self, app_config: dict):
         self.config = app_config
         from agents.brain import TradingAgent
+        from capital_manager import CapitalManager
+        from core.candidate_builder import CandidateBuilder, CandidateBuilderConfig
+        from core.session_guard import SessionBlockWindow, SessionGuard, SessionGuardConfig
+        from core.signal_validator import SignalValidator, SignalValidatorConfig
+        from data.news_classifier import NewsClassifier, NewsClassifierConfig
         from risk.manager import RiskConfig, RiskManager
+        from risk.portfolio_guard import PortfolioGuard, PortfolioGuardConfig
 
         agent_cfg = dict(app_config.get("agent", {}))
         replay_fallbacks = agent_cfg.get("replay_fallback_models")
@@ -84,6 +185,36 @@ class ReplayEngine:
         )
 
         self.agent = TradingAgent(agent_cfg)
+        session_cfg = app_config.get("session", {})
+        risk_cfg = app_config.get("risk", {})
+        news_cfg = app_config.get("news", {})
+        session_windows = tuple(
+            SessionBlockWindow(
+                start=datetime.strptime(str(window.get("start", "09:15")), "%H:%M").time(),
+                end=datetime.strptime(str(window.get("end", "09:30")), "%H:%M").time(),
+                reason=str(window.get("reason", "Entry block")),
+            )
+            for window in session_cfg.get("blocked_entry_windows", [])
+        )
+        self.candidate_builder = CandidateBuilder(CandidateBuilderConfig(
+            exchange=str(app_config.get("market", {}).get("exchange", "NSE") or "NSE"),
+            timeframe=str(app_config.get("market", {}).get("timeframe", "day") or "day"),
+            product="MIS",
+            capital_budget=0.0,
+            max_candidates=int(app_config.get("engine", {}).get("max_auto_pick_symbols", 10) or 10),
+        ), news_classifier=NewsClassifier(NewsClassifierConfig(
+            enabled=bool(news_cfg.get("enabled", True)),
+            freshness_limit_minutes=int(news_cfg.get("freshness_limit_minutes", 240) or 240),
+            confidence_modifier_cap=float(news_cfg.get("confidence_modifier_cap", 0.2) or 0.2),
+        )))
+        self.capital_manager = CapitalManager(app_config.get("agent", {}))
+        self.signal_validator = SignalValidator(SignalValidatorConfig(
+            min_risk_reward=float(risk_cfg.get("min_risk_reward", 1.5) or 1.5),
+        ))
+        self.session_guard = SessionGuard(SessionGuardConfig(
+            entry_block_windows=session_windows or SessionGuardConfig().entry_block_windows,
+            exits_allowed_during_entry_blocks=bool(session_cfg.get("allow_exits_during_entry_blocks", True)),
+        ))
 
         replay_risk_cfg = RiskConfig(
             max_capital_per_trade_pct=95.0,
@@ -100,9 +231,114 @@ class ReplayEngine:
             replay_risk_cfg.max_capital_per_trade_pct,
             replay_risk_cfg.max_open_positions,
         )
+        self.portfolio_guard = PortfolioGuard(PortfolioGuardConfig(
+            max_open_positions=replay_risk_cfg.max_open_positions,
+            max_per_sector=int(risk_cfg.get("sector_concentration_cap", 2) or 2),
+            correlation_cap=int(risk_cfg.get("correlation_cap", 2) or 2),
+            max_long_positions=int(risk_cfg.get("long_bias_cap", 10) or 10),
+            max_short_positions=int(risk_cfg.get("short_bias_cap", 10) or 10),
+            max_strategy_allocation=float(risk_cfg.get("strategy_family_cap", 0.5) or 0.5),
+        ))
+
+    @staticmethod
+    def _approved_candidates_from_result(candidates, evaluation_result):
+        from core.pipeline_models import ApprovedCandidate
+
+        candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        approved: list[ApprovedCandidate] = []
+        for evaluation in evaluation_result.candidate_evaluations:
+            if not evaluation.approved:
+                continue
+            candidate = candidate_by_id.get(evaluation.candidate_id)
+            if candidate is None:
+                continue
+            approved.append(ApprovedCandidate(candidate=candidate, evaluation=evaluation))
+        return approved
+
+    async def _prepare_replay_pipeline(
+        self,
+        *,
+        cfg: ReplayConfig,
+        ts: datetime,
+        context,
+        frames: dict[str, pd.DataFrame],
+        funds,
+        positions: dict[str, dict],
+    ) -> dict[str, object]:
+        from core.pipeline_models import AIEvaluationResult
+
+        self.candidate_builder.config.capital_budget = float(max(Decimal(funds.available_cash), Decimal("0")))
+        self.candidate_builder.config.max_candidates = len(cfg.symbols)
+        price_references = {
+            symbol: float(frame["close"].iloc[-1])
+            for symbol, frame in frames.items()
+            if frame is not None and not frame.empty
+        }
+        candidates = self.candidate_builder.build_candidates(
+            frames,
+            price_references=price_references,
+            symbols=cfg.symbols,
+            generated_at=ts,
+            regime=context.market_trend,
+            session_name=context.session,
+        )
+        evaluation_result = await self.agent.evaluate_candidates(candidates, context)
+        approved_candidates = self._approved_candidates_from_result(candidates, evaluation_result)
+        approved_by_id = {approved.candidate_id: approved for approved in approved_candidates}
+
+        session_block_reason = self.session_guard.active_block_reason(ts)
+        if session_block_reason:
+            approved_candidates = []
+            approved_by_id = {}
+        order_plans = self.capital_manager.plan_from_candidates(
+            approved_candidates,
+            funds,
+            open_position_symbols={symbol.upper() for symbol in positions},
+        )
+
+        validated_order_plans = []
+        for plan in order_plans:
+            validation = self.signal_validator.validate(
+                plan,
+                current_price_reference=Decimal(str(price_references.get(plan.symbol, float(plan.entry_price)))),
+                available_capital=Decimal(funds.available_cash),
+            )
+            if validation.all_passed:
+                validated_order_plans.append(plan)
+
+        self.portfolio_guard.config.max_open_positions = self.risk.config.max_open_positions
+        portfolio_result = self.portfolio_guard.check(
+            validated_order_plans,
+            candidate_lookup=approved_by_id,
+            open_position_symbols={symbol.upper() for symbol in positions},
+            open_positions_count=len(positions),
+            open_positions=[
+                {
+                    "symbol": symbol,
+                    "side": "BUY" if Decimal(str(position.get("qty", 0))) >= 0 else "SHORT",
+                    "strategy": position.get("strategy"),
+                    "sector_tag": position.get("sector_tag"),
+                }
+                for symbol, position in positions.items()
+            ],
+        )
+        surviving_candidate_ids = {plan.source_candidate_id for plan in portfolio_result.approved}
+        filtered_approved_candidates = [
+            approved for approved in approved_candidates
+            if approved.candidate_id in surviving_candidate_ids
+        ]
+
+        return {
+            "candidates": candidates,
+            "evaluation_result": evaluation_result if candidates else AIEvaluationResult(candidate_evaluations=[], market_regime=context.market_trend, operating_mode="selective", market_commentary="No replay candidates.", mode_constraints={}),
+            "approved_candidates": filtered_approved_candidates,
+            "order_plans": portfolio_result.approved,
+            "session_block_reason": session_block_reason,
+            "portfolio_result": portfolio_result,
+        }
 
     async def run(self, run_id: str, cfg: ReplayConfig) -> dict:
-        from agents.brain import MarketContext, SignalAction
+        from agents.brain import MarketContext
         from brokers.base import (
             Exchange, Funds, Instrument, InstrumentType,
             OrderSide, Position, ProductType,
@@ -153,6 +389,7 @@ class ReplayEngine:
                     total_balance=cash,
                 )
             )
+            fill_model = ReplayFillModel(cfg)
 
             sorted_ts    = sorted(by_ts)
             total_points = len(sorted_ts)
@@ -191,6 +428,47 @@ class ReplayEngine:
                 if len(nifty_history) > 50:
                     nifty_history = nifty_history[-50:]
                 market_trend = _detect_trend(nifty_history, india_vix)
+
+                # ── Protective exits first: replay must keep exit behavior alive
+                # even if SessionGuard later blocks fresh entries. When the same
+                # candle hits both target and stop, ReplayFillModel assumes stop-loss
+                # first by default (conservative ambiguity rule).
+                for symbol, pos in list(positions.items()):
+                    candle = snap.get(symbol) or last_seen.get(symbol)
+                    if not candle:
+                        continue
+                    exit_fill = fill_model.resolve_protective_exit(candle, pos)
+                    if not exit_fill.filled or exit_fill.fill_price is None:
+                        continue
+
+                    qty = abs(Decimal(pos["qty"]))
+                    fee = exit_fill.fill_price * qty * Decimal(str(cfg.fee_pct))
+                    entry_fee_alloc = _entry_fee_allocation(pos, qty)
+                    if Decimal(pos["qty"]) > 0:
+                        pnl = (exit_fill.fill_price - pos["entry_price"]) * qty - fee - entry_fee_alloc
+                        cash += exit_fill.fill_price * qty - fee
+                        action = "SELL"
+                    else:
+                        pnl = (pos["entry_price"] - exit_fill.fill_price) * qty - fee - entry_fee_alloc
+                        cash -= exit_fill.fill_price * qty + fee
+                        action = "COVER"
+                    trades.append({
+                        "run_id": run_id,
+                        "timestamp": ts,
+                        "symbol": symbol,
+                        "exchange": cfg.exchange,
+                        "action": action,
+                        "quantity": int(qty),
+                        "requested_quantity": int(qty),
+                        "price": float(exit_fill.fill_price),
+                        "fees": float(fee),
+                        "slippage_pct": exit_fill.slippage_pct,
+                        "pnl": float(pnl),
+                        "realized": True,
+                        "rationale": f"Replay {exit_fill.trigger_reason} exit",
+                    })
+                    positions.pop(symbol, None)
+                    await self.risk.record_trade(order=None, pnl=pnl)
 
                 # ── Build watchlist ──────────────────────────────────────────
                 watch = []
@@ -291,16 +569,44 @@ class ReplayEngine:
                     pcr=1.0,
                 )
 
-                # ── AI decision ──────────────────────────────────────────────
+                frames = {}
+                for symbol in cfg.symbols:
+                    candles_for_symbol = [
+                        row
+                        for row_ts in sorted_ts[:idx]
+                        for row in [by_ts.get(row_ts, {}).get(symbol)]
+                        if row is not None
+                    ]
+                    if not candles_for_symbol:
+                        continue
+                    frames[symbol] = pd.DataFrame(candles_for_symbol)
+
+                # ── Shared candidate/evaluation/planning pipeline ───────────
                 should_run_ai = max(int(cfg.ai_every_n_candles or 1), 1)
                 if idx % should_run_ai == 0:
                     try:
-                        signals = await self.agent.analyze_and_decide(context)
+                        pipeline = await self._prepare_replay_pipeline(
+                            cfg=cfg,
+                            ts=ts,
+                            context=context,
+                            frames=frames,
+                            funds=Funds(
+                                available_cash=cash,
+                                used_margin=Decimal("0"),
+                                total_balance=cash,
+                            ),
+                            positions=positions,
+                        )
                     except Exception as exc:
                         logger.warning(
-                            "AI analyze failed in replay, skipping candle: %s", exc
+                            "Replay pipeline failed, skipping candle: %s", exc
                         )
-                        signals = []
+                        pipeline = {
+                            "candidates": [],
+                            "evaluation_result": None,
+                            "approved_candidates": [],
+                            "order_plans": [],
+                        }
 
                     # Per-provider adaptive throttle between AI calls.
                     # Extract provider from the model that was actually used.
@@ -318,23 +624,18 @@ class ReplayEngine:
                     )
                     await asyncio.sleep(delay)
                 else:
-                    signals = []
+                    pipeline = {
+                        "candidates": [],
+                        "evaluation_result": None,
+                        "approved_candidates": [],
+                        "order_plans": [],
+                    }
 
-                # ── Execute signals ──────────────────────────────────────────
-                for s in signals:
-                    signal_candle = snap.get(s.symbol) or last_seen.get(s.symbol)
-                    if not s.is_actionable or not signal_candle:
+                # ── Execute order plans ─────────────────────────────────────
+                for plan in pipeline["order_plans"]:
+                    signal_candle = snap.get(plan.symbol) or last_seen.get(plan.symbol)
+                    if not signal_candle:
                         continue
-
-                    price = Decimal(str(signal_candle["close"]))
-                    dyn_slip = _estimate_replay_slippage_pct(signal_candle, cfg)
-                    exec_price = price * (
-                        Decimal("1") + Decimal(str(
-                            dyn_slip if s.action in (
-                                SignalAction.BUY, SignalAction.COVER
-                            ) else -dyn_slip
-                        ))
-                    )
 
                     funds = Funds(
                         available_cash=cash,
@@ -342,115 +643,68 @@ class ReplayEngine:
                         total_balance=cash,
                     )
                     check = await self.risk.check_pre_trade(
-                        s.symbol, s.action.value, s.quantity,
-                        exec_price, s.stop_loss, open_positions, funds,
+                        plan.symbol,
+                        plan.side,
+                        plan.quantity,
+                        plan.entry_price,
+                        plan.stop_loss,
+                        open_positions,
+                        funds,
                     )
                     if not check.approved:
                         logger.warning(
-                            "Replay trade REJECTED: symbol=%s action=%s qty=%s "
+                            "Replay order plan REJECTED: symbol=%s action=%s qty=%s "
                             "price=%.2f cash=%.2f reason=%s",
-                            s.symbol, s.action.value, s.quantity,
-                            float(exec_price), float(cash), check.reason,
+                            plan.symbol, plan.side, plan.quantity,
+                            float(plan.entry_price), float(cash), check.reason,
                         )
                         continue
 
-                    requested_qty = Decimal(str(check.adjusted_quantity or s.quantity or 1))
-                    qty = _simulate_partial_fill(requested_qty, idx, ts, s.symbol, cfg)
-                    if qty <= 0:
+                    requested_qty = Decimal(str(check.adjusted_quantity or plan.quantity or 1))
+                    entry_fill = fill_model.resolve_entry(signal_candle, plan)
+                    if not entry_fill.filled or entry_fill.fill_price is None:
                         continue
 
-                    fee           = exec_price * qty * Decimal(str(cfg.fee_pct))
-                    action        = s.action.value
-                    fee_remaining = fee
-                    qty_remaining = qty
-                    trade_pnl     = Decimal("0")
-                    realized      = False
-
-                    if action in ("BUY", "COVER"):
-                        pos = positions.get(s.symbol)
-                        if pos and pos["qty"] < 0 and qty_remaining > 0:
-                            short_abs   = abs(pos["qty"])
-                            close_qty   = min(short_abs, qty_remaining)
-                            fee_alloc   = fee * (close_qty / qty) if qty > 0 else Decimal("0")
-                            ef_alloc    = _entry_fee_allocation(pos, close_qty)
-                            pnl         = (pos["entry_price"] - exec_price) * close_qty - fee_alloc - ef_alloc
-                            cash       -= exec_price * close_qty + fee_alloc
-                            pos["qty"] += close_qty
-                            pos["entry_fees"] = max(Decimal("0"), pos.get("entry_fees", Decimal("0")) - ef_alloc)
-                            qty_remaining -= close_qty
-                            fee_remaining -= fee_alloc
-                            trade_pnl += pnl
-                            realized   = True
-                            if pos["qty"] == 0:
-                                positions.pop(s.symbol, None)
-                            await self.risk.record_trade(order=None, pnl=pnl)
-
-                        if qty_remaining > 0:
-                            cash -= exec_price * qty_remaining + fee_remaining
-                            pos   = positions.get(s.symbol)
-                            if pos and pos["qty"] > 0:
-                                pos["qty"], pos["entry_price"] = _merge_position(
-                                    pos["qty"], pos["entry_price"],
-                                    qty_remaining, exec_price,
-                                )
-                                pos["entry_fees"] = pos.get("entry_fees", Decimal("0")) + fee_remaining
-                            else:
-                                positions[s.symbol] = {
-                                    "qty":        qty_remaining,
-                                    "entry_price": exec_price,
-                                    "entry_fees":  fee_remaining,
-                                }
-
-                    elif action in ("SELL", "SHORT"):
-                        pos = positions.get(s.symbol)
-                        if pos and pos["qty"] > 0 and qty_remaining > 0:
-                            close_qty   = min(pos["qty"], qty_remaining)
-                            fee_alloc   = fee * (close_qty / qty) if qty > 0 else Decimal("0")
-                            ef_alloc    = _entry_fee_allocation(pos, close_qty)
-                            pnl         = (exec_price - pos["entry_price"]) * close_qty - fee_alloc - ef_alloc
-                            cash       += exec_price * close_qty - fee_alloc
-                            pos["qty"] -= close_qty
-                            pos["entry_fees"] = max(Decimal("0"), pos.get("entry_fees", Decimal("0")) - ef_alloc)
-                            qty_remaining -= close_qty
-                            fee_remaining -= fee_alloc
-                            trade_pnl += pnl
-                            realized   = True
-                            if pos["qty"] == 0:
-                                positions.pop(s.symbol, None)
-                            await self.risk.record_trade(order=None, pnl=pnl)
-
-                        if action == "SHORT" and qty_remaining > 0:
-                            cash += exec_price * qty_remaining - fee_remaining
-                            pos   = positions.get(s.symbol)
-                            if pos and pos["qty"] < 0:
-                                ea    = abs(pos["qty"])
-                                na    = ea + qty_remaining
-                                pos["entry_price"] = ((pos["entry_price"] * ea) + (exec_price * qty_remaining)) / na
-                                pos["qty"]         = -na
-                                pos["entry_fees"]  = pos.get("entry_fees", Decimal("0")) + fee_remaining
-                            else:
-                                positions[s.symbol] = {
-                                    "qty":        -qty_remaining,
-                                    "entry_price": exec_price,
-                                    "entry_fees":  fee_remaining,
-                                }
-                        elif action == "SELL" and qty_remaining > 0:
-                            continue
+                    qty = requested_qty
+                    fee = entry_fill.fill_price * qty * Decimal(str(cfg.fee_pct))
+                    action = plan.side
+                    if action == "BUY":
+                        cash -= entry_fill.fill_price * qty + fee
+                        positions[plan.symbol] = {
+                            "qty": qty,
+                            "entry_price": entry_fill.fill_price,
+                            "entry_fees": fee,
+                            "stop_loss": plan.stop_loss,
+                            "target": plan.target,
+                            "source_candidate_id": plan.source_candidate_id,
+                        }
+                    elif action == "SHORT":
+                        cash += entry_fill.fill_price * qty - fee
+                        positions[plan.symbol] = {
+                            "qty": -qty,
+                            "entry_price": entry_fill.fill_price,
+                            "entry_fees": fee,
+                            "stop_loss": plan.stop_loss,
+                            "target": plan.target,
+                            "source_candidate_id": plan.source_candidate_id,
+                        }
+                    else:
+                        continue
 
                     trades.append({
                         "run_id":             run_id,
                         "timestamp":          ts,
-                        "symbol":             s.symbol,
+                        "symbol":             plan.symbol,
                         "exchange":           cfg.exchange,
                         "action":             action,
                         "quantity":           int(qty),
                         "requested_quantity": int(requested_qty),
-                        "price":              float(exec_price),
+                        "price":              float(entry_fill.fill_price),
                         "fees":               float(fee),
-                        "slippage_pct":       dyn_slip,
-                        "pnl":                float(trade_pnl),
-                        "realized":           realized,
-                        "rationale":          s.rationale,
+                        "slippage_pct":       entry_fill.slippage_pct,
+                        "pnl":                0.0,
+                        "realized":           False,
+                        "rationale":          f"Replay order plan {plan.source_candidate_id}",
                     })
 
                 # ── Equity snapshot ──────────────────────────────────────────
@@ -668,14 +922,10 @@ def _derive_overall_signal(
     elif bb_signal == "above_upper":
         score -= 1
 
-    if score >= 3:
-        return "strong_buy"
     if score >= 1:
-        return "buy"
-    if score <= -3:
-        return "strong_sell"
+        return "bullish"
     if score <= -1:
-        return "sell"
+        return "bearish"
     return "neutral"
 
 
@@ -704,19 +954,6 @@ def _estimate_replay_slippage_pct(candle: dict, cfg: ReplayConfig) -> float:
         + abs(close_px - open_px) / max(open_px, 1.0) * 0.05,
         6,
     )
-
-
-def _simulate_partial_fill(
-    requested_qty: Decimal, idx: int, ts: datetime, symbol: str, cfg: ReplayConfig
-) -> Decimal:
-    qty_int = int(requested_qty)
-    if qty_int <= 1:
-        return Decimal(str(max(qty_int, 0)))
-    seed      = (idx + int(ts.timestamp()) + sum(ord(ch) for ch in symbol)) % 100
-    threshold = int(float(cfg.partial_fill_probability) * 100)
-    if seed >= threshold:
-        return Decimal(str(qty_int))
-    return Decimal(str(max(1, math.floor(qty_int * 0.6))))
 
 
 def _ema(values: list[float], period: int) -> list[float]:
@@ -841,7 +1078,11 @@ async def create_and_start_replay(app_config: dict, payload: dict) -> dict:
     engine = ReplayEngine(app_config)
 
     valid_keys       = {f.name for f in dc_fields(ReplayConfig)}
-    filtered_payload = {k: v for k, v in payload.items() if k in valid_keys}
+    replay_defaults = app_config.get("replay", {}) or {}
+    filtered_payload = {
+        **{k: v for k, v in replay_defaults.items() if k in valid_keys},
+        **{k: v for k, v in payload.items() if k in valid_keys},
+    }
 
     async def _safe_replay_task() -> None:
         await engine.run(run_id, ReplayConfig(**filtered_payload))
