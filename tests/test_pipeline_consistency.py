@@ -28,7 +28,6 @@ class StubAgent:
     def __init__(self, confidence_modifier_cap: float):
         self.confidence_modifier_cap = confidence_modifier_cap
         self.evaluate_calls = 0
-        self.decision_history = []
 
     async def evaluate_candidates(self, candidates, context):
         self.evaluate_calls += 1
@@ -146,21 +145,8 @@ def _candidate(symbol: str) -> TradeCandidate:
     )
 
 
-def _build_engine_fixture(
-    *,
-    session_block_reason: str | None,
-    confidence_modifier_cap: float,
-    min_risk_reward: float,
-) -> tuple[ReplayEngine, ReplayConfig, SimpleNamespace, dict[str, pd.DataFrame], Funds]:
-    engine = ReplayEngine.__new__(ReplayEngine)
-    engine.candidate_builder = StubCandidateBuilder([_candidate("AAA"), _candidate("BBB")])
-    engine.agent = StubAgent(confidence_modifier_cap=confidence_modifier_cap)
-    engine.capital_manager = StubCapitalManager()
-    engine.signal_validator = StubSignalValidator(min_risk_reward=min_risk_reward)
-    engine.portfolio_guard = StubPortfolioGuard(min_confidence=0.7)
-    engine.session_guard = StubSessionGuard(block_reason=session_block_reason)
-    engine.risk = SimpleNamespace(config=SimpleNamespace(max_open_positions=10))
-
+@pytest.fixture
+def replay_inputs() -> tuple[ReplayConfig, SimpleNamespace, dict[str, pd.DataFrame], Funds]:
     context = SimpleNamespace(market_trend="trending_up", session="mid_session")
     frames = {
         "AAA": pd.DataFrame([
@@ -171,12 +157,35 @@ def _build_engine_fixture(
         ]),
     }
     funds = Funds(available_cash=Decimal("10000"), used_margin=Decimal("0"), total_balance=Decimal("10000"))
-    return engine, ReplayConfig(symbols=["AAA", "BBB"]), context, frames, funds
+    return ReplayConfig(symbols=["AAA", "BBB"]), context, frames, funds
+
+
+@pytest.fixture
+def make_engine_fixture():
+    def _make_engine(
+        *,
+        session_block_reason: str | None,
+        confidence_modifier_cap: float,
+        min_risk_reward: float,
+        max_open_positions: int = 10,
+    ) -> ReplayEngine:
+        engine = ReplayEngine.__new__(ReplayEngine)
+        engine.candidate_builder = StubCandidateBuilder([_candidate("AAA"), _candidate("BBB")])
+        engine.agent = StubAgent(confidence_modifier_cap=confidence_modifier_cap)
+        engine.capital_manager = StubCapitalManager()
+        engine.signal_validator = StubSignalValidator(min_risk_reward=min_risk_reward)
+        engine.portfolio_guard = StubPortfolioGuard(min_confidence=0.7)
+        engine.session_guard = StubSessionGuard(block_reason=session_block_reason)
+        engine.risk = SimpleNamespace(config=SimpleNamespace(max_open_positions=max_open_positions))
+        return engine
+
+    return _make_engine
 
 
 @pytest.mark.anyio
-async def test_replay_uses_same_core_pipeline_components():
-    engine, cfg, context, frames, funds = _build_engine_fixture(
+async def test_replay_pipeline_invokes_core_components(make_engine_fixture, replay_inputs):
+    cfg, context, frames, funds = replay_inputs
+    engine = make_engine_fixture(
         session_block_reason=None,
         confidence_modifier_cap=0.30,
         min_risk_reward=1.0,
@@ -200,13 +209,14 @@ async def test_replay_uses_same_core_pipeline_components():
 
 
 @pytest.mark.anyio
-async def test_replay_session_block_gates_candidates_and_sets_block_reason():
-    open_engine, cfg, context, frames, funds = _build_engine_fixture(
+async def test_replay_session_config_behavior_controls_entry_gating(make_engine_fixture, replay_inputs):
+    cfg, context, frames, funds = replay_inputs
+    open_engine = make_engine_fixture(
         session_block_reason=None,
         confidence_modifier_cap=0.30,
         min_risk_reward=1.0,
     )
-    blocked_engine, _, _, _, _ = _build_engine_fixture(
+    blocked_engine = make_engine_fixture(
         session_block_reason="Opening range entry block",
         confidence_modifier_cap=0.30,
         min_risk_reward=1.0,
@@ -239,13 +249,14 @@ async def test_replay_session_block_gates_candidates_and_sets_block_reason():
 
 
 @pytest.mark.anyio
-async def test_replay_min_risk_reward_controls_validation_pass_fail():
-    permissive_engine, cfg, context, frames, funds = _build_engine_fixture(
+async def test_replay_risk_config_behavior_enforces_min_risk_reward(make_engine_fixture, replay_inputs):
+    cfg, context, frames, funds = replay_inputs
+    permissive_engine = make_engine_fixture(
         session_block_reason=None,
         confidence_modifier_cap=0.10,
         min_risk_reward=1.0,
     )
-    strict_engine, _, _, _, _ = _build_engine_fixture(
+    strict_engine = make_engine_fixture(
         session_block_reason=None,
         confidence_modifier_cap=0.10,
         min_risk_reward=1.5,
@@ -274,13 +285,14 @@ async def test_replay_min_risk_reward_controls_validation_pass_fail():
 
 
 @pytest.mark.anyio
-async def test_replay_confidence_modifier_cap_changes_plan_filtering_and_block_reasons():
-    low_cap_engine, cfg, context, frames, funds = _build_engine_fixture(
+async def test_replay_news_config_behavior_changes_confidence_based_plan_outcomes(make_engine_fixture, replay_inputs):
+    cfg, context, frames, funds = replay_inputs
+    low_cap_engine = make_engine_fixture(
         session_block_reason=None,
         confidence_modifier_cap=0.05,
         min_risk_reward=1.0,
     )
-    high_cap_engine, _, _, _, _ = _build_engine_fixture(
+    high_cap_engine = make_engine_fixture(
         session_block_reason=None,
         confidence_modifier_cap=0.30,
         min_risk_reward=1.0,
@@ -309,3 +321,25 @@ async def test_replay_confidence_modifier_cap_changes_plan_filtering_and_block_r
     }
     assert {plan.symbol for plan in high_cap_bundle["order_plans"]} == {"AAA", "BBB"}
     assert high_cap_bundle["portfolio_result"].blocked == {}
+
+
+@pytest.mark.anyio
+async def test_replay_risk_position_limits_are_applied_to_portfolio_guard_config(make_engine_fixture, replay_inputs):
+    cfg, context, frames, funds = replay_inputs
+    engine = make_engine_fixture(
+        session_block_reason=None,
+        confidence_modifier_cap=0.30,
+        min_risk_reward=1.0,
+        max_open_positions=3,
+    )
+
+    await engine._prepare_replay_pipeline(
+        cfg=cfg,
+        ts=datetime(2026, 3, 23, 10, 0),
+        context=context,
+        frames=frames,
+        funds=funds,
+        positions={},
+    )
+
+    assert engine.portfolio_guard.config.max_open_positions == 3
