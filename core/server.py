@@ -287,6 +287,7 @@ def require_broker():
 @app.get("/health")
 async def health():
     engine = get_engine()
+    observability = _engine_observability_payload(engine) if engine else {}
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
@@ -297,6 +298,9 @@ async def health():
         "replication_status": engine._replication_status if engine else "disabled",
         "last_replication_error": engine._last_replication_error if engine else "",
         "kill_switch": engine.risk._kill_switch if engine else False,
+        "runtime_health_state": observability.get("runtime_health_state"),
+        "session_block": observability.get("session_block"),
+        "pause_or_block_reason": observability.get("pause_or_block_reason"),
     }
 
 
@@ -330,7 +334,19 @@ async def stop_engine():
 async def engine_status():
     engine = get_engine()
     if not engine:
-        return {"running": False, "broker": None, "positions": 0}
+        return {
+            "running": False,
+            "broker": None,
+            "positions": 0,
+            "preflight_state": None,
+            "runtime_health_state": None,
+            "reconciliation_state": None,
+            "ai_operating_mode": None,
+            "candidate_stats": {"considered": 0, "approved": 0, "executed": 0, "rejected": 0},
+            "spendable_capital": None,
+            "session_block": {"entry_allowed": True, "exit_allowed": True, "active_reason": None},
+            "pause_or_block_reason": None,
+        }
     selection_status = engine.get_engine_status()
     return {
         "running": engine._running,
@@ -344,7 +360,30 @@ async def engine_status():
         "kill_switch": engine.risk._kill_switch,
         "trading_allowed": engine.risk.is_trading_allowed,
         "broker_health": engine.get_broker_health_summary(),
+        **_engine_observability_payload(engine),
         **selection_status,
+    }
+
+
+@app.get("/api/engine/preflight")
+async def engine_preflight():
+    engine = get_engine()
+    if not engine:
+        return {"preflight_state": None}
+    return {"preflight_state": _serialize_preflight_report(getattr(engine, "_latest_startup_preflight", None))}
+
+
+@app.get("/api/engine/health")
+async def engine_health():
+    engine = get_engine()
+    if not engine:
+        return {"runtime_health_state": None, "session_block": None, "pause_or_block_reason": None}
+    payload = _engine_observability_payload(engine)
+    return {
+        "runtime_health_state": payload["runtime_health_state"],
+        "session_block": payload["session_block"],
+        "pause_or_block_reason": payload["pause_or_block_reason"],
+        "ai_operating_mode": payload["ai_operating_mode"],
     }
 
 
@@ -891,6 +930,84 @@ def _degraded_live_payload(engine: TradingEngine, ui_status: dict, reason: str) 
         "replication_enabled": engine._replication_enabled,
         "replication_status": engine._replication_status,
         "last_replication_error": engine._last_replication_error,
+    }
+
+
+def _serialize_health_status(status) -> Optional[dict]:
+    if not status:
+        return None
+    return {
+        "broker_ok": bool(status.broker_ok),
+        "data_feed_ok": bool(status.data_feed_ok),
+        "ai_ok": bool(status.ai_ok),
+        "last_checked": status.last_checked.isoformat() if getattr(status, "last_checked", None) else None,
+        "degraded_reason": status.degraded_reason,
+        "severity": status.severity,
+        "recommended_action": status.recommended_action,
+    }
+
+
+def _serialize_preflight_report(report) -> Optional[dict]:
+    if not report:
+        return None
+    return {
+        "overall_ok": bool(report.overall_ok),
+        "recommended_action": report.recommended_action,
+        "blocking_reasons": list(report.blocking_reasons),
+        "statuses": [_serialize_health_status(status) for status in getattr(report, "statuses", [])],
+    }
+
+
+def _engine_observability_payload(engine: TradingEngine) -> dict:
+    latest_decision = engine.agent.decision_history[-1] if getattr(engine.agent, "decision_history", None) else {}
+    guard_tz = getattr(getattr(engine.session_guard, "config", None), "timezone", None)
+    session_now = datetime.now(tz=guard_tz) if guard_tz is not None else datetime.now()
+    session_block_reason = engine.session_guard.active_block_reason(session_now)
+    last_funds = getattr(engine, "_last_known_funds", None)
+    spendable_capital = None
+    if last_funds is not None:
+        try:
+            spendable_capital = float(engine.capital_manager._spendable_capital(last_funds))
+        except Exception:
+            spendable_capital = None
+
+    runtime_health = _serialize_preflight_report(getattr(engine, "_latest_runtime_health", None))
+    startup_preflight = _serialize_preflight_report(getattr(engine, "_latest_startup_preflight", None))
+    reconciliation = getattr(engine, "_latest_reconciliation_status", None)
+    reconciliation_state = None if reconciliation is None else {
+        "positions_match": reconciliation.positions_match,
+        "orders_match": reconciliation.orders_match,
+        "drift_details": list(reconciliation.drift_details),
+        "action_taken": reconciliation.action_taken,
+        "replication_status": getattr(engine, "_replication_status", "disabled"),
+        "last_replication_error": getattr(engine, "_last_replication_error", ""),
+        "pending_execution_reconciliation": len(getattr(engine, "_pending_execution_reconciliation", {})),
+    }
+    risk_summary = engine.risk.get_daily_summary() if hasattr(engine, "risk") else {}
+    pause_reason = (
+        risk_summary.get("kill_switch_reason")
+        or (runtime_health or {}).get("blocking_reasons", [None])[0]
+        or session_block_reason
+    )
+    return {
+        "preflight_state": startup_preflight,
+        "runtime_health_state": runtime_health,
+        "reconciliation_state": reconciliation_state,
+        "ai_operating_mode": latest_decision.get("operating_mode"),
+        "ai_mode_constraints": latest_decision.get("mode_constraints", {}),
+        "candidate_stats": {
+            "considered": engine._agent_status.get("signals_considered"),
+            "approved": latest_decision.get("approved_candidate_count"),
+            "executed": engine._agent_status.get("signals_approved"),
+            "rejected": engine._agent_status.get("signals_rejected"),
+        },
+        "spendable_capital": spendable_capital,
+        "session_block": {
+            "entry_allowed": engine.session_guard.is_entry_allowed(session_now),
+            "exit_allowed": engine.session_guard.is_exit_allowed(session_now),
+            "active_reason": session_block_reason,
+        },
+        "pause_or_block_reason": pause_reason,
     }
 
 
