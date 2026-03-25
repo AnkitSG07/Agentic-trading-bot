@@ -136,3 +136,32 @@ def test_hard_ceiling_enforcement(monkeypatch):
     assert sum(1 for item in result.candidate_evaluations if item.approved) == 1
     assert result.mode_constraints["max_new_entries"] == 1
     assert result.mode_constraints["capital_multiplier"] == 0.6
+
+
+def test_invalid_confidence_payload_is_safely_rejected(monkeypatch):
+    agent = TradingAgent({"confidence_threshold": 0.65})
+    candidates = [_candidate("cand-1", "AAA")]
+
+    async def fake_generate_text(prompt, **kwargs):
+        return json.dumps({
+            "market_regime": "trend",
+            "operating_mode": "active_trading",
+            "market_commentary": "Malformed confidence format.",
+            "candidate_evaluations": [
+                {
+                    "candidate_id": "cand-1",
+                    "approved": True,
+                    "confidence": "Below 0.65",
+                    "rationale": "Bad confidence format",
+                    "priority": 1,
+                    "risk_notes": [],
+                }
+            ],
+        }), "mock-model"
+
+    monkeypatch.setattr(agent, "_generate_text", fake_generate_text)
+    result = asyncio.run(agent.evaluate_candidates(candidates, _context()))
+
+    assert result.candidate_evaluations[0].approved is False
+    assert result.candidate_evaluations[0].confidence == 0.0
+    assert any("invalid confidence format from model" in note.lower() for note in result.candidate_evaluations[0].risk_notes)
