@@ -1135,11 +1135,17 @@ class TradingAgent:
                 if candidate_id not in candidate_by_id or candidate_id in parsed:
                     continue
                 candidate = candidate_by_id[candidate_id]
-                confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.0) or 0.0)))
                 approved = bool(raw.get("approved", False))
                 rationale = str(raw.get("rationale") or "No rationale provided.")
                 priority_hint = int(raw.get("priority", candidate.priority or 0) or 0)
                 risk_notes = [str(note) for note in raw.get("risk_notes", [])] if isinstance(raw.get("risk_notes"), list) else []
+                try:
+                    confidence = float(raw.get("confidence", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                    approved = False
+                    risk_notes.append("Invalid confidence format from model")
+                confidence = max(0.0, min(1.0, confidence))
                 parsed[candidate_id] = (AICandidateEvaluation(
                     candidate_id=candidate_id,
                     approved=approved,
