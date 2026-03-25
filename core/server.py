@@ -1001,6 +1001,7 @@ def _engine_observability_payload(engine: TradingEngine) -> dict:
             "executed": engine._agent_status.get("signals_approved"),
             "rejected": engine._agent_status.get("signals_rejected"),
         },
+        "pipeline_counters": latest_decision.get("pipeline_counters", engine._agent_status.get("pipeline_counters", {})),
         "spendable_capital": spendable_capital,
         "session_block": {
             "entry_allowed": engine.session_guard.is_entry_allowed(session_now),
