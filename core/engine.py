@@ -258,6 +258,7 @@ class TradingEngine:
             "signals_considered": 0,
             "signals_approved": 0,
             "signals_rejected": 0,
+            "pipeline_counters": {},
         }
         self._agent_events: list[dict[str, object]] = []
         self._market_data_fallback_state: dict[str, str] = {"ohlcv": "", "ticks": ""}
@@ -706,6 +707,7 @@ class TradingEngine:
         self._agent_status["signals_considered"] = 0
         self._agent_status["signals_approved"] = 0
         self._agent_status["signals_rejected"] = 0
+        self._agent_status["pipeline_counters"] = self._empty_pipeline_counters()
 
         if not self.risk.is_trading_allowed:
             self._set_agent_stage("paused", now)
@@ -793,7 +795,37 @@ class TradingEngine:
         funds = await execution_broker.get_funds()
         self._last_known_funds = funds
         positions = await execution_broker.get_positions()
-        candidate_bundle = await self._prepare_phase4_execution(context, funds, positions)
+        try:
+            candidate_bundle = await self._prepare_phase4_execution(context, funds, positions)
+        except Exception as exc:
+            logger.warning("Phase4 execution pipeline failed; degrading safely: %s", exc, exc_info=True)
+            self._agent_status["pipeline_counters"] = self._empty_pipeline_counters(rejection_reasons={"phase4_pipeline_exception": 1})
+            fallback_result = AIEvaluationResult(
+                candidate_evaluations=[],
+                market_regime=context.market_trend,
+                operating_mode="capital_preservation",
+                market_commentary=f"Phase4 pipeline degraded after failure: {exc}",
+                mode_constraints={},
+            )
+            candidate_bundle = {
+                "candidates": [],
+                "evaluation_result": fallback_result,
+                "approved_candidates": [],
+                "order_plans": [],
+                "portfolio_result": SimpleNamespace(approved=[], blocked={}),
+                "session_block_reason": None,
+                "pipeline_counters": dict(self._agent_status["pipeline_counters"]),
+            }
+            self._record_phase4_decision(
+                context=context,
+                candidates=[],
+                evaluation_result=fallback_result,
+                approved_candidates=[],
+                portfolio_result=SimpleNamespace(approved=[], blocked={}),
+                order_plans=[],
+                session_block_reason=None,
+                pipeline_counters=dict(self._agent_status["pipeline_counters"]),
+            )
         context.trade_candidates = list(candidate_bundle["candidates"])
 
         self._set_agent_stage("calling_model")
@@ -807,6 +839,7 @@ class TradingEngine:
         evaluation_result = candidate_bundle["evaluation_result"]
         approved_candidates = candidate_bundle["approved_candidates"]
         order_plans = candidate_bundle["order_plans"]
+        self._agent_status["pipeline_counters"] = dict(candidate_bundle.get("pipeline_counters", self._empty_pipeline_counters()))
         self._agent_status["signals_considered"] = len(candidate_bundle["candidates"])
         if approved_candidates:
             self._agent_status["selected_strategy"] = approved_candidates[0].candidate.strategy
@@ -1005,7 +1038,18 @@ class TradingEngine:
         positions: list[Position],
     ) -> dict[str, object]:
         candidates = self._build_trade_candidates(context, funds)
-        evaluation_result = await self.agent.evaluate_candidates(candidates, context)
+        rejection_reasons: dict[str, int] = {}
+        try:
+            evaluation_result = await self.agent.evaluate_candidates(candidates, context)
+        except Exception as exc:
+            logger.warning("Phase4 stage ai_evaluate failed; using deterministic fallback: %s", exc, exc_info=True)
+            rejection_reasons["ai_evaluate_exception"] = rejection_reasons.get("ai_evaluate_exception", 0) + 1
+            evaluation_result = self.agent._heuristic_evaluation_result(
+                candidates,
+                context,
+                operating_mode="capital_preservation",
+                commentary=f"Fallback evaluation used because live AI evaluation failed: {exc}",
+            )
         approved_candidates = self._approved_candidates_from_result(candidates, evaluation_result)
         approved_by_id = {approved.candidate_id: approved for approved in approved_candidates}
 
@@ -1035,6 +1079,25 @@ class TradingEngine:
             approved for approved in approved_candidates
             if approved.candidate_id in surviving_candidate_ids
         ]
+        for evaluation in evaluation_result.candidate_evaluations:
+            for note in getattr(evaluation, "risk_notes", []) or []:
+                key = str(note or "").strip().lower() or "unspecified_rejection"
+                rejection_reasons[key] = rejection_reasons.get(key, 0) + 1
+        for reason, blocked_payload in (getattr(portfolio_result, "blocked", {}) or {}).items():
+            reason_key = f"portfolio_guard:{reason}"
+            increment = len(blocked_payload) if isinstance(blocked_payload, list) else 1
+            rejection_reasons[reason_key] = rejection_reasons.get(reason_key, 0) + increment
+        pipeline_counters = self._build_pipeline_counters(
+            candidates_built=len(candidates),
+            candidates_approved=len(approved_candidates),
+            order_plans_generated=len(order_plans),
+            order_plans_validated=len(validated_order_plans),
+            order_plans_after_portfolio_guard=len(portfolio_result.approved),
+            orders_executed=0,
+            rejection_reasons=rejection_reasons,
+        )
+        if hasattr(self, "_agent_status") and isinstance(self._agent_status, dict):
+            self._agent_status["pipeline_counters"] = dict(pipeline_counters)
 
         self._record_phase4_decision(
             context=context,
@@ -1044,6 +1107,7 @@ class TradingEngine:
             portfolio_result=portfolio_result,
             order_plans=portfolio_result.approved,
             session_block_reason=session_block_reason,
+            pipeline_counters=pipeline_counters,
         )
         return {
             "candidates": candidates,
@@ -1052,7 +1116,42 @@ class TradingEngine:
             "order_plans": portfolio_result.approved,
             "portfolio_result": portfolio_result,
             "session_block_reason": session_block_reason,
+            "pipeline_counters": pipeline_counters,
         }
+
+    @staticmethod
+    def _empty_pipeline_counters(*, rejection_reasons: Optional[dict[str, int]] = None) -> dict[str, object]:
+        return {
+            "candidates_built": 0,
+            "candidates_approved": 0,
+            "order_plans_generated": 0,
+            "order_plans_validated": 0,
+            "order_plans_after_portfolio_guard": 0,
+            "orders_executed": 0,
+            "rejection_reasons": dict(rejection_reasons or {}),
+        }
+
+    def _build_pipeline_counters(
+        self,
+        *,
+        candidates_built: int,
+        candidates_approved: int,
+        order_plans_generated: int,
+        order_plans_validated: int,
+        order_plans_after_portfolio_guard: int,
+        orders_executed: int,
+        rejection_reasons: Optional[dict[str, int]] = None,
+    ) -> dict[str, object]:
+        counters = self._empty_pipeline_counters(rejection_reasons=rejection_reasons)
+        counters.update({
+            "candidates_built": int(candidates_built),
+            "candidates_approved": int(candidates_approved),
+            "order_plans_generated": int(order_plans_generated),
+            "order_plans_validated": int(order_plans_validated),
+            "order_plans_after_portfolio_guard": int(order_plans_after_portfolio_guard),
+            "orders_executed": int(orders_executed),
+        })
+        return counters
 
     def _build_trade_candidates(self, context: MarketContext, funds) -> list:
         self.candidate_builder.config.capital_budget = float(max(funds.available_cash, Decimal("0")))
@@ -1194,6 +1293,7 @@ class TradingEngine:
         portfolio_result,
         order_plans: list[OrderPlan],
         session_block_reason: Optional[str],
+        pipeline_counters: Optional[dict[str, object]] = None,
     ) -> None:
         self.agent.decision_history.append({
             "timestamp": context.timestamp.isoformat(),
@@ -1214,6 +1314,7 @@ class TradingEngine:
             "approved_candidate_count": len(approved_candidates),
             "portfolio_blocked": dict(portfolio_result.blocked),
             "session_block_reason": session_block_reason,
+            "pipeline_counters": dict(pipeline_counters or self._empty_pipeline_counters()),
         })
         if len(self.agent.decision_history) > 200:
             self.agent.decision_history = self.agent.decision_history[-200:]
