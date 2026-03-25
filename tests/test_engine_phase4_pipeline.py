@@ -64,6 +64,15 @@ class StubAgent:
         self.calls += 1
         return self.evaluation_result
 
+    def _heuristic_evaluation_result(self, candidates, context, *, operating_mode, commentary):
+        return AIEvaluationResult(
+            candidate_evaluations=[],
+            market_regime=context.market_trend,
+            operating_mode=operating_mode,
+            market_commentary=commentary,
+            mode_constraints={"confidence_floor": 0.8, "max_new_entries": 1},
+        )
+
 
 class StubSessionGuard:
     def __init__(self, reason=None):
@@ -273,6 +282,41 @@ async def test_prepare_phase4_execution_respects_session_block():
     assert engine.agent.decision_history[-1]["session_block_reason"] == "Opening range entry block"
 
 
+@pytest.mark.anyio
+async def test_prepare_phase4_execution_degrades_when_ai_evaluation_raises():
+    candidate = _candidate("AAA")
+
+    class RaisingAgent(StubAgent):
+        async def evaluate_candidates(self, candidates, context):
+            self.calls += 1
+            raise ValueError("confidence parse failure")
+
+    engine = TradingEngine.__new__(TradingEngine)
+    engine.candidate_builder = StubCandidateBuilder([candidate])
+    engine.agent = RaisingAgent(None)
+    engine.session_guard = StubSessionGuard(reason=None)
+    engine.portfolio_guard = StubPortfolioGuard(PortfolioGuardResult(approved=[], blocked={}))
+    engine.capital_manager = StubCapitalManager([])
+    engine.signal_validator = StubSignalValidator()
+    engine.max_auto_pick_symbols = 10
+    engine._ohlcv_frames = {"AAA": object()}
+    engine._selected_symbols = ["AAA"]
+    engine._agent_status = {"pipeline_counters": {}}
+    engine.risk = SimpleNamespace(config=SimpleNamespace(max_open_positions=10))
+
+    bundle = await engine._prepare_phase4_execution(
+        _context(),
+        Funds(available_cash=Decimal("10000"), used_margin=Decimal("0"), total_balance=Decimal("10000")),
+        positions=[],
+    )
+
+    assert engine.agent.calls == 1
+    assert bundle["approved_candidates"] == []
+    assert bundle["order_plans"] == []
+    assert bundle["pipeline_counters"]["candidates_built"] == 1
+    assert bundle["pipeline_counters"]["candidates_approved"] == 0
+    assert bundle["pipeline_counters"]["rejection_reasons"]["ai_evaluate_exception"] == 1
+    
 class _StartupBrokerStub:
     is_connected = True
 
