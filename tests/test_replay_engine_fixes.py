@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import datetime, timezone
 import sys
 import types
 
@@ -37,6 +38,8 @@ fake_repo_mod.HistoricalCandleRepository = _DummyRepo
 sys.modules.setdefault("database.repository", fake_repo_mod)
 
 from core.replay_engine import (
+    ReplayConfig,
+    ReplayEngine,
     _build_levels,
     _compute_bb_signal,
     _compute_rsi,
@@ -551,3 +554,66 @@ def test_replay_route_supports_auto_mode_selection(monkeypatch):
     assert body["selection_summary"]["selected_symbols"] == ["AAA", "BBB"]
     assert body["payload"]["symbols"] == ["AAA", "BBB"]
     assert body["payload"]["selection_summary"]["recommendations"][0]["estimated_qty"] > 0
+
+
+@pytest.mark.asyncio
+async def test_replay_run_survives_pipeline_exception_and_reports_degraded_counters(monkeypatch):
+    from database.repository import HistoricalCandleRepository, ReplayRunRepository
+
+    candles = [
+        {"symbol": "AAA", "exchange": "NSE", "timeframe": "day", "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 100000},
+        {"symbol": "AAA", "exchange": "NSE", "timeframe": "day", "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc), "open": 101, "high": 102, "low": 100, "close": 101, "volume": 100000},
+    ]
+    saved_progress: list[dict] = []
+
+    async def fake_mark_running(run_id):
+        return None
+
+    async def fake_fetch_window(symbols, exchange, timeframe, start_date, end_date):
+        return candles
+
+    async def fake_mark_progress(run_id, metrics):
+        saved_progress.append(metrics)
+
+    async def fake_save_results(run_id, metrics, equity_curve, trades):
+        return None
+
+    async def fake_mark_failed(run_id, error):
+        raise AssertionError(f"Replay should not fail: {error}")
+
+    monkeypatch.setattr(ReplayRunRepository, "mark_running", staticmethod(fake_mark_running), raising=False)
+    monkeypatch.setattr(HistoricalCandleRepository, "fetch_window", staticmethod(fake_fetch_window), raising=False)
+    monkeypatch.setattr(ReplayRunRepository, "mark_progress", staticmethod(fake_mark_progress), raising=False)
+    monkeypatch.setattr(ReplayRunRepository, "save_results", staticmethod(fake_save_results), raising=False)
+    monkeypatch.setattr(ReplayRunRepository, "mark_failed", staticmethod(fake_mark_failed), raising=False)
+
+    engine = ReplayEngine({"agent": {}, "risk": {}, "session": {}, "engine": {}, "market": {}})
+    call_count = {"n": 0}
+
+    async def flaky_pipeline(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ValueError("malformed confidence payload")
+        return {
+            "candidates": [],
+            "evaluation_result": None,
+            "approved_candidates": [],
+            "order_plans": [],
+            "pipeline_counters": {
+                "candidates_built": 0,
+                "candidates_approved": 0,
+                "order_plans_generated": 0,
+                "order_plans_validated": 0,
+                "order_plans_after_portfolio_guard": 0,
+                "orders_executed": 0,
+                "rejection_reasons": {},
+            },
+        }
+
+    monkeypatch.setattr(engine, "_prepare_replay_pipeline", flaky_pipeline)
+
+    result = await engine.run("run-1", ReplayConfig(symbols=["AAA"], ai_every_n_candles=1))
+
+    assert result["status"] == "completed"
+    assert len(saved_progress) == 2
+    assert saved_progress[0]["pipeline"]["rejection_reasons"]["replay_pipeline_exception"] == 1
