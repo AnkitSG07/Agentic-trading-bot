@@ -267,6 +267,8 @@ class ReplayEngine:
     ) -> dict[str, object]:
         from core.pipeline_models import AIEvaluationResult
 
+        rejection_reasons: dict[str, int] = {}
+        logger.debug("Replay pipeline stage=candidate_build ts=%s", ts.isoformat())  
         self.candidate_builder.config.capital_budget = float(max(Decimal(funds.available_cash), Decimal("0")))
         self.candidate_builder.config.max_candidates = len(cfg.symbols)
         price_references = {
@@ -282,7 +284,18 @@ class ReplayEngine:
             regime=context.market_trend,
             session_name=context.session,
         )
-        evaluation_result = await self.agent.evaluate_candidates(candidates, context)
+        logger.debug("Replay pipeline stage=ai_evaluate ts=%s candidates=%d", ts.isoformat(), len(candidates))
+        try:
+            evaluation_result = await self.agent.evaluate_candidates(candidates, context)
+        except Exception as exc:
+            logger.warning("Replay pipeline stage=ai_evaluate degraded: %s", exc, exc_info=True)
+            rejection_reasons["ai_evaluate_exception"] = rejection_reasons.get("ai_evaluate_exception", 0) + 1
+            evaluation_result = self.agent._heuristic_evaluation_result(
+                candidates,
+                context,
+                operating_mode="capital_preservation",
+                commentary=f"Replay fallback evaluation used because AI evaluation failed: {exc}",
+            )
         approved_candidates = self._approved_candidates_from_result(candidates, evaluation_result)
         approved_by_id = {approved.candidate_id: approved for approved in approved_candidates}
 
@@ -290,12 +303,14 @@ class ReplayEngine:
         if session_block_reason:
             approved_candidates = []
             approved_by_id = {}
+        logger.debug("Replay pipeline stage=plan ts=%s approved_candidates=%d", ts.isoformat(), len(approved_candidates))
         order_plans = self.capital_manager.plan_from_candidates(
             approved_candidates,
             funds,
             open_position_symbols={symbol.upper() for symbol in positions},
         )
 
+        logger.debug("Replay pipeline stage=validate ts=%s generated_order_plans=%d", ts.isoformat(), len(order_plans))
         validated_order_plans = []
         for plan in order_plans:
             validation = self.signal_validator.validate(
@@ -305,8 +320,11 @@ class ReplayEngine:
             )
             if validation.all_passed:
                 validated_order_plans.append(plan)
+            else:
+                rejection_reasons["signal_validator"] = rejection_reasons.get("signal_validator", 0) + 1
 
         self.portfolio_guard.config.max_open_positions = self.risk.config.max_open_positions
+        logger.debug("Replay pipeline stage=guard ts=%s validated_order_plans=%d", ts.isoformat(), len(validated_order_plans))
         portfolio_result = self.portfolio_guard.check(
             validated_order_plans,
             candidate_lookup=approved_by_id,
@@ -327,6 +345,22 @@ class ReplayEngine:
             approved for approved in approved_candidates
             if approved.candidate_id in surviving_candidate_ids
         ]
+        for evaluation in evaluation_result.candidate_evaluations:
+            for note in getattr(evaluation, "risk_notes", []) or []:
+                reason = str(note or "").strip().lower() or "unspecified_rejection"
+                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+        for reason in (getattr(portfolio_result, "blocked", {}) or {}):
+            reason_key = f"portfolio_guard:{reason}"
+            rejection_reasons[reason_key] = rejection_reasons.get(reason_key, 0) + 1
+        pipeline_counters = {
+            "candidates_built": len(candidates),
+            "candidates_approved": len(approved_candidates),
+            "order_plans_generated": len(order_plans),
+            "order_plans_validated": len(validated_order_plans),
+            "order_plans_after_portfolio_guard": len(portfolio_result.approved),
+            "orders_executed": 0,
+            "rejection_reasons": rejection_reasons,
+        }
 
         return {
             "candidates": candidates,
@@ -335,6 +369,7 @@ class ReplayEngine:
             "order_plans": portfolio_result.approved,
             "session_block_reason": session_block_reason,
             "portfolio_result": portfolio_result,
+            "pipeline_counters": pipeline_counters,
         }
 
     async def run(self, run_id: str, cfg: ReplayConfig) -> dict:
@@ -396,6 +431,21 @@ class ReplayEngine:
 
             for idx, ts in enumerate(sorted_ts, start=1):
                 snap = by_ts[ts]
+                pipeline = {
+                    "candidates": [],
+                    "evaluation_result": None,
+                    "approved_candidates": [],
+                    "order_plans": [],
+                    "pipeline_counters": {
+                        "candidates_built": 0,
+                        "candidates_approved": 0,
+                        "order_plans_generated": 0,
+                        "order_plans_validated": 0,
+                        "order_plans_after_portfolio_guard": 0,
+                        "orders_executed": 0,
+                        "rejection_reasons": {},
+                    },
+                }
 
                 # ── Update price / volume history ────────────────────────────
                 for symbol in cfg.symbols:
@@ -598,15 +648,8 @@ class ReplayEngine:
                             positions=positions,
                         )
                     except Exception as exc:
-                        logger.warning(
-                            "Replay pipeline failed, skipping candle: %s", exc
-                        )
-                        pipeline = {
-                            "candidates": [],
-                            "evaluation_result": None,
-                            "approved_candidates": [],
-                            "order_plans": [],
-                        }
+                        logger.warning("Replay pipeline failed for candle %s; degrading safely: %s", ts.isoformat(), exc, exc_info=True)
+                        pipeline["pipeline_counters"]["rejection_reasons"] = {"replay_pipeline_exception": 1}
 
                     # Per-provider adaptive throttle between AI calls.
                     # Extract provider from the model that was actually used.
@@ -706,7 +749,8 @@ class ReplayEngine:
                         "realized":           False,
                         "rationale":          f"Replay order plan {plan.source_candidate_id}",
                     })
-
+                    pipeline["pipeline_counters"]["orders_executed"] = int(pipeline["pipeline_counters"].get("orders_executed", 0)) + 1
+                  
                 # ── Equity snapshot ──────────────────────────────────────────
                 equity = cash
                 for symbol, p in positions.items():
@@ -789,6 +833,7 @@ class ReplayEngine:
                         "options_selling": 0.20, "breakout": 0.20, "scalping": 0.10,
                     },
                     "priceData": price_history,
+                    "pipelineCounters": pipeline.get("pipeline_counters", {}),  
                 }
 
                 await ReplayRunRepository.mark_progress(
@@ -801,6 +846,7 @@ class ReplayEngine:
                             "current_timestamp": ts.isoformat(),
                         },
                         "live": live_snapshot,
+                        "pipeline": pipeline.get("pipeline_counters", {}),  
                     },
                 )
 
