@@ -55,6 +55,11 @@ class ReplayConfig:
     # to reduce total API calls at the cost of fewer trading decisions.
     ai_every_n_candles: int = 1
     confidence_threshold: float | None = None
+    order_type: str = "MARKET"
+    circuit_breaker_cooldown: int = 2
+    decision_timeout_seconds: float = 4.0
+    provider_timeout_seconds: float = 1.8
+    max_models_per_decision: int = 2
     market_order_fill_basis: str = "open"
     ambiguity_rule: str = "stop_first"
 
@@ -115,7 +120,7 @@ class ReplayFillModel:
         return ReplayFillResult(filled=False, trigger_reason="limit_not_reached")
 
     def resolve_entry(self, candle: dict, plan) -> ReplayFillResult:
-        order_type = str(plan.order_type or "LIMIT").upper()
+        order_type = str(getattr(plan, "order_type", None) or self.cfg.order_type or "MARKET").upper()
         if order_type == "MARKET":
             return self.market_fill(candle, plan.side)
         return self.limit_fill(candle, plan.side, Decimal(plan.entry_price))
@@ -164,25 +169,18 @@ class ReplayEngine:
         from risk.portfolio_guard import PortfolioGuard, PortfolioGuardConfig
 
         agent_cfg = dict(app_config.get("agent", {}))
+        replay_cfg = dict(app_config.get("replay", {}))
         replay_fallbacks = agent_cfg.get("replay_fallback_models")
         if replay_fallbacks:
             agent_cfg["fallback_models"] = replay_fallbacks
-        agent_cfg["decision_timeout_seconds"] = agent_cfg.get(
-            "replay_decision_timeout_seconds",
-            agent_cfg.get("decision_timeout_seconds", 5.0),
-        )
-        agent_cfg["provider_timeout_seconds"] = agent_cfg.get(
-            "replay_provider_timeout_seconds",
-            agent_cfg.get("provider_timeout_seconds", 2.5),
-        )
+        agent_cfg["decision_timeout_seconds"] = replay_cfg.get("decision_timeout_seconds", agent_cfg.get("replay_decision_timeout_seconds", agent_cfg.get("decision_timeout_seconds", 5.0)))
+        agent_cfg["provider_timeout_seconds"] = replay_cfg.get("provider_timeout_seconds", agent_cfg.get("replay_provider_timeout_seconds", agent_cfg.get("provider_timeout_seconds", 2.5)))
         agent_cfg["max_fallback_wait_seconds"] = agent_cfg.get(
             "replay_max_fallback_wait_seconds",
             agent_cfg.get("max_fallback_wait_seconds", 0.5),
         )
-        agent_cfg["max_models_per_decision"] = agent_cfg.get(
-            "replay_max_models_per_decision",
-            agent_cfg.get("max_models_per_decision", 3),
-        )
+        agent_cfg["max_models_per_decision"] = replay_cfg.get("max_models_per_decision", agent_cfg.get("replay_max_models_per_decision", agent_cfg.get("max_models_per_decision", 3)))
+        agent_cfg["circuit_breaker_cooldown"] = replay_cfg.get("circuit_breaker_cooldown", agent_cfg.get("circuit_breaker_cooldown", 2))
 
         self.agent = TradingAgent(agent_cfg)
         session_cfg = app_config.get("session", {})
@@ -210,6 +208,7 @@ class ReplayEngine:
         self.capital_manager = CapitalManager(app_config.get("agent", {}))
         self.signal_validator = SignalValidator(SignalValidatorConfig(
             min_risk_reward=float(risk_cfg.get("min_risk_reward", 1.5) or 1.5),
+            min_expected_edge_score=float(risk_cfg.get("min_expected_edge_score", 0.55) or 0.55),
         ))
         self.session_guard = SessionGuard(SessionGuardConfig(
             entry_block_windows=session_windows or SessionGuardConfig().entry_block_windows,
@@ -267,7 +266,14 @@ class ReplayEngine:
     ) -> dict[str, object]:
         from core.pipeline_models import AIEvaluationResult
 
-        rejection_reasons: dict[str, int] = {}
+        stage_rejections: dict[str, dict[str, int]] = {
+            "candidate_builder": {},
+            "ai": {},
+            "validator": {},
+            "portfolio": {},
+            "risk": {},
+            "pipeline": {},
+        }
         logger.debug("Replay pipeline stage=candidate_build ts=%s", ts.isoformat())  
         self.candidate_builder.config.capital_budget = float(max(Decimal(funds.available_cash), Decimal("0")))
         self.candidate_builder.config.max_candidates = len(cfg.symbols)
@@ -289,7 +295,7 @@ class ReplayEngine:
             evaluation_result = await self.agent.evaluate_candidates(candidates, context)
         except Exception as exc:
             logger.warning("Replay pipeline stage=ai_evaluate degraded: %s", exc, exc_info=True)
-            rejection_reasons["ai_evaluate_exception"] = rejection_reasons.get("ai_evaluate_exception", 0) + 1
+            stage_rejections["ai"]["ai_evaluate_exception"] = stage_rejections["ai"].get("ai_evaluate_exception", 0) + 1
             evaluation_result = self.agent._heuristic_evaluation_result(
                 candidates,
                 context,
@@ -321,7 +327,8 @@ class ReplayEngine:
             if validation.all_passed:
                 validated_order_plans.append(plan)
             else:
-                rejection_reasons["signal_validator"] = rejection_reasons.get("signal_validator", 0) + 1
+                for reason in getattr(validation, "blocking_reasons", []) or ["signal_validator"]:
+                    stage_rejections["validator"][str(reason)] = stage_rejections["validator"].get(str(reason), 0) + 1
 
         self.portfolio_guard.config.max_open_positions = self.risk.config.max_open_positions
         logger.debug("Replay pipeline stage=guard ts=%s validated_order_plans=%d", ts.isoformat(), len(validated_order_plans))
@@ -348,18 +355,20 @@ class ReplayEngine:
         for evaluation in evaluation_result.candidate_evaluations:
             for note in getattr(evaluation, "risk_notes", []) or []:
                 reason = str(note or "").strip().lower() or "unspecified_rejection"
-                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                stage_rejections["ai"][reason] = stage_rejections["ai"].get(reason, 0) + 1
         for reason in (getattr(portfolio_result, "blocked", {}) or {}):
-            reason_key = f"portfolio_guard:{reason}"
-            rejection_reasons[reason_key] = rejection_reasons.get(reason_key, 0) + 1
+            reason_key = f"{reason}"
+            stage_rejections["portfolio"][reason_key] = stage_rejections["portfolio"].get(reason_key, 0) + 1
         pipeline_counters = {
             "candidates_built": len(candidates),
-            "candidates_approved": len(approved_candidates),
-            "order_plans_generated": len(order_plans),
-            "order_plans_validated": len(validated_order_plans),
-            "order_plans_after_portfolio_guard": len(portfolio_result.approved),
-            "orders_executed": 0,
-            "rejection_reasons": rejection_reasons,
+            "ai_approved": len(approved_candidates),
+            "planned_orders": len(order_plans),
+            "validator_passed": len(validated_order_plans),
+            "portfolio_passed": len(portfolio_result.approved),
+            "risk_passed": 0,
+            "submitted_orders": 0,
+            "filled_orders": 0,
+            "rejected_reasons_by_stage": stage_rejections,
         }
 
         return {
@@ -438,12 +447,14 @@ class ReplayEngine:
                     "order_plans": [],
                     "pipeline_counters": {
                         "candidates_built": 0,
-                        "candidates_approved": 0,
-                        "order_plans_generated": 0,
-                        "order_plans_validated": 0,
-                        "order_plans_after_portfolio_guard": 0,
-                        "orders_executed": 0,
-                        "rejection_reasons": {},
+                        "ai_approved": 0,
+                        "planned_orders": 0,
+                        "validator_passed": 0,
+                        "portfolio_passed": 0,
+                        "risk_passed": 0,
+                        "submitted_orders": 0,
+                        "filled_orders": 0,
+                        "rejected_reasons_by_stage": {"pipeline": {}},
                     },
                 }
 
@@ -649,7 +660,23 @@ class ReplayEngine:
                         )
                     except Exception as exc:
                         logger.warning("Replay pipeline failed for candle %s; degrading safely: %s", ts.isoformat(), exc, exc_info=True)
-                        pipeline["pipeline_counters"]["rejection_reasons"] = {"replay_pipeline_exception": 1}
+                        pipeline = {
+                            "candidates": [],
+                            "evaluation_result": None,
+                            "approved_candidates": [],
+                            "order_plans": [],
+                            "pipeline_counters": {
+                                "candidates_built": 0,
+                                "ai_approved": 0,
+                                "planned_orders": 0,
+                                "validator_passed": 0,
+                                "portfolio_passed": 0,
+                                "risk_passed": 0,
+                                "submitted_orders": 0,
+                                "filled_orders": 0,
+                                "rejected_reasons_by_stage": {"pipeline": {"replay_pipeline_exception": 1}},
+                            },
+                        }
 
                     # Per-provider adaptive throttle between AI calls.
                     # Extract provider from the model that was actually used.
@@ -676,6 +703,7 @@ class ReplayEngine:
 
                 # ── Execute order plans ─────────────────────────────────────
                 for plan in pipeline["order_plans"]:
+                    plan.order_type = str(cfg.order_type or plan.order_type or "MARKET").upper()
                     signal_candle = snap.get(plan.symbol) or last_seen.get(plan.symbol)
                     if not signal_candle:
                         continue
@@ -701,11 +729,18 @@ class ReplayEngine:
                             plan.symbol, plan.side, plan.quantity,
                             float(plan.entry_price), float(cash), check.reason,
                         )
+                        rejected = pipeline["pipeline_counters"].setdefault("rejected_reasons_by_stage", {}).setdefault("risk", {})
+                        rejected[str(check.reason or "risk_rejection")] = rejected.get(str(check.reason or "risk_rejection"), 0) + 1
                         continue
+                    pipeline["pipeline_counters"]["risk_passed"] = int(pipeline["pipeline_counters"].get("risk_passed", 0)) + 1
 
                     requested_qty = Decimal(str(check.adjusted_quantity or plan.quantity or 1))
                     entry_fill = fill_model.resolve_entry(signal_candle, plan)
+                    pipeline["pipeline_counters"]["submitted_orders"] = int(pipeline["pipeline_counters"].get("submitted_orders", 0)) + 1
                     if not entry_fill.filled or entry_fill.fill_price is None:
+                        rejected = pipeline["pipeline_counters"].setdefault("rejected_reasons_by_stage", {}).setdefault("execution", {})
+                        reason = str(entry_fill.trigger_reason or "unfilled")
+                        rejected[reason] = rejected.get(reason, 0) + 1
                         continue
 
                     qty = requested_qty
@@ -749,7 +784,7 @@ class ReplayEngine:
                         "realized":           False,
                         "rationale":          f"Replay order plan {plan.source_candidate_id}",
                     })
-                    pipeline["pipeline_counters"]["orders_executed"] = int(pipeline["pipeline_counters"].get("orders_executed", 0)) + 1
+                    pipeline["pipeline_counters"]["filled_orders"] = int(pipeline["pipeline_counters"].get("filled_orders", 0)) + 1
                   
                 # ── Equity snapshot ──────────────────────────────────────────
                 equity = cash
