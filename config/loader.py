@@ -26,6 +26,7 @@ DEFAULT_CONFIG: dict = {
     },
     "risk": {
         "min_risk_reward": 1.5,
+        "min_expected_edge_score": 0.55,
         "sector_concentration_cap": 2,
         "correlation_cap": 2,
         "long_bias_cap": 10,
@@ -42,11 +43,21 @@ DEFAULT_CONFIG: dict = {
     "agent": {
         "ai_absolute_max_new_entries": 1,
         "ai_absolute_capital_multiplier": 1.0,
+        "min_expected_edge_score": 0.55,
+        "fallback_min_trend_liquidity": 0.50,
+        "fallback_replay_allow_top1": True,
+        "fallback_replay_confidence_floor": 0.60,
+        "max_new_entries_per_cycle": 2,
     },
     "replay": {
         "slippage_pct": 0.0005,
         "latency_slippage_bps": 2.0,
         "stop_target_precedence": "stop_first",
+        "order_type": "MARKET",
+        "circuit_breaker_cooldown": 2,
+        "decision_timeout_seconds": 4.0,
+        "provider_timeout_seconds": 1.8,
+        "max_models_per_decision": 2,
     },
     "news": {
         "enabled": True,
