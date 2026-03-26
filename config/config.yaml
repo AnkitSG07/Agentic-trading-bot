@@ -136,14 +136,14 @@ agent:
   # the entire quality-heavy chain when providers are slow or rate-limited.
   replay_fallback_models:
     - "gemini/gemini-2.5-flash-lite"
-    - "groq/llama-3.1-70b-versatile"       # ← ADD THIS
-    - "groq/llama-3.3-70b-specdec"
     - "openrouter/stepfun/step-3.5-flash:free"
+    - "groq/llama-3.1-70b-versatile"
     - "gemini/gemini-2.0-flash"
+    - "groq/llama-3.3-70b-specdec"
   replay_decision_timeout_seconds: 5.0
   replay_provider_timeout_seconds: 2.5
   replay_max_fallback_wait_seconds: 0.5
-  replay_max_models_per_decision: 3
+  replay_max_models_per_decision: 5
   replay_preserve_cooldowns: true
   
   # ── Decision Timing ─────────────────────────────────────────
@@ -252,7 +252,7 @@ replay:
   circuit_breaker_cooldown: 5
   decision_timeout_seconds: 6.0
   provider_timeout_seconds: 2.5
-  max_models_per_decision: 3
+  max_models_per_decision: 5
 
 ## ─── NEWS MODIFIERS ────────────────────────────────────────
 news:
