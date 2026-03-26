@@ -33,10 +33,10 @@ logger = logging.getLogger("core.replay")
 # These values act as minimum pacing after each completed AI decision.
 # Replay still enforces a strict end-to-end decision budget in TradingAgent.
 REPLAY_AI_CALL_DELAY_BY_PROVIDER = {
-    "gemini": 0.75,
+    "gemini": 3.0,
     "groq": 0.50,
     "openrouter": 0.25,
-    "default": 1.00,
+    "default": 2.00,
 }
 
 
