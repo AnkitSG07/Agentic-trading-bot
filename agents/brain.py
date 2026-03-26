@@ -765,6 +765,24 @@ class TradingAgent:
         self._call_counter += 1
         started_at = time.monotonic()
 
+        # If every candidate model is in circuit-breaker cooldown, force exactly one probe
+        # (the model with the nearest cooldown expiry) so the chain can recover instead of
+        # hard-looping on all-skipped outcomes forever.
+        cooling_models = [
+            (model_id, self._model_skip_until.get(model_id, 0))
+            for model_id in all_models
+            if self._model_skip_until.get(model_id, 0) > self._call_counter
+        ]
+        if cooling_models and len(cooling_models) == len(all_models):
+            probe_model, probe_until = min(cooling_models, key=lambda item: item[1])
+            remaining = max(0, probe_until - self._call_counter)
+            logger.warning(
+                "All models are in circuit-breaker cooldown; forcing probe for %s (remaining_skip_calls=%d).",
+                probe_model,
+                remaining,
+            )
+            self._model_skip_until[probe_model] = self._call_counter
+
         for idx, model_id in enumerate(all_models):
             elapsed = time.monotonic() - started_at
             remaining_budget = self.decision_timeout_seconds - elapsed
