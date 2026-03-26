@@ -874,6 +874,21 @@ class TradingAgent:
                     continue
 
                 if self._is_unavailable_model_error(e):
+                    prev_fails = self._model_consecutive_failures.get(model_id, 0)
+                    self._model_consecutive_failures[model_id] = prev_fails + 1
+                    if self._model_consecutive_failures[model_id] >= self.circuit_breaker_threshold:
+                        self._model_skip_until[model_id] = (
+                            self._call_counter + self.circuit_breaker_cooldown
+                        )
+                        logger.warning(
+                            "Circuit breaker TRIPPED for %s after %d unavailable/permission failures — "
+                            "skipping for next %d calls.",
+                            model_id,
+                            self._model_consecutive_failures[model_id],
+                            self.circuit_breaker_cooldown,
+                        )
+                        failure_reasons.append(f"{model_id}=circuit_breaker_tripped_unavailable")
+                        continue
                     logger.warning(
                         "Model %s unavailable/no permission; trying fallback.", model_id
                     )
