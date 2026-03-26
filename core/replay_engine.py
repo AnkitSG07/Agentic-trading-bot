@@ -175,9 +175,12 @@ class ReplayEngine:
             agent_cfg["fallback_models"] = replay_fallbacks
         agent_cfg["decision_timeout_seconds"] = replay_cfg.get("decision_timeout_seconds", agent_cfg.get("replay_decision_timeout_seconds", agent_cfg.get("decision_timeout_seconds", 5.0)))
         agent_cfg["provider_timeout_seconds"] = replay_cfg.get("provider_timeout_seconds", agent_cfg.get("replay_provider_timeout_seconds", agent_cfg.get("provider_timeout_seconds", 2.5)))
-        agent_cfg["max_fallback_wait_seconds"] = agent_cfg.get(
-            "replay_max_fallback_wait_seconds",
-            agent_cfg.get("max_fallback_wait_seconds", 0.5),
+        agent_cfg["max_fallback_wait_seconds"] = replay_cfg.get(
+            "max_fallback_wait_seconds",
+            agent_cfg.get(
+                "replay_max_fallback_wait_seconds",
+                agent_cfg.get("max_fallback_wait_seconds", 0.5),
+            ),
         )
         agent_cfg["max_models_per_decision"] = replay_cfg.get("max_models_per_decision", agent_cfg.get("replay_max_models_per_decision", agent_cfg.get("max_models_per_decision", 3)))
         agent_cfg["circuit_breaker_cooldown"] = replay_cfg.get("circuit_breaker_cooldown", agent_cfg.get("circuit_breaker_cooldown", 2))
