@@ -481,6 +481,12 @@ class TradingAgent:
         seen: set[str] = {self.model}
         resolved: list[str] = []
 
+        explicit_fallbacks = config.get("fallback_models", []) or []
+        for model in explicit_fallbacks:
+            if isinstance(model, str) and model and model not in seen:
+                seen.add(model)
+                resolved.append(model)
+
         tiered = config.get("model_tiers", self.DEFAULT_MODEL_TIERS) or {}
         for models in tiered.values():
             if not isinstance(models, list):
@@ -489,11 +495,6 @@ class TradingAgent:
                 if isinstance(model, str) and model and model not in seen:
                     seen.add(model)
                     resolved.append(model)
-
-        for model in config.get("fallback_models", []):
-            if isinstance(model, str) and model and model not in seen:
-                seen.add(model)
-                resolved.append(model)
 
         if not resolved:
             for models in self.DEFAULT_MODEL_TIERS.values():
