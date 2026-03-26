@@ -29,7 +29,8 @@ class TradeCandidate:
     priority: int = 0
     caution_flags: list[str] = field(default_factory=list)
     event_flags: list[str] = field(default_factory=list)
-
+    expected_edge_score: float = 0.0
+    
 
 @dataclass(slots=True)
 class AICandidateEvaluation:
@@ -88,7 +89,8 @@ class OrderPlan:
     risk_reward: float
     confidence: float
     source_candidate_id: str
-
+    expected_edge_score: float = 0.0
+    
 
 @dataclass(slots=True)
 class ExecutionFill:
