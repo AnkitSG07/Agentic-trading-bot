@@ -192,6 +192,23 @@ def test_replay_uses_dedicated_latency_first_model_policy():
     assert 'replay_decision_timeout_seconds' in replay
 
 
+def test_explicit_fallback_models_are_applied_before_tiers():
+    src = Path("agents/brain.py").read_text()
+    explicit_block = """explicit_fallbacks = config.get("fallback_models", []) or []
+        for model in explicit_fallbacks:"""
+    tier_block = """tiered = config.get("model_tiers", self.DEFAULT_MODEL_TIERS) or {}
+        for models in tiered.values():"""
+    assert explicit_block in src
+    assert tier_block in src
+    assert src.index(explicit_block) < src.index(tier_block)
+
+
+def test_replay_max_fallback_wait_seconds_prefers_replay_section():
+    src = Path("core/replay_engine.py").read_text()
+    expected = """agent_cfg["max_fallback_wait_seconds"] = replay_cfg.get(
+            "max_fallback_wait_seconds","""
+    assert expected in src
+
 def test_replay_no_longer_clears_model_cooldown_each_candle():
     replay = Path("core/replay_engine.py").read_text()
     assert "_model_consecutive_failures.clear()" not in replay
