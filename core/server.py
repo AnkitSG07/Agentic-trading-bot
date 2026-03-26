@@ -1562,11 +1562,16 @@ async def replay_run_status(run_id: str):
     row = await ReplayRunRepository.get(run_id)
     if not row:
         raise HTTPException(404, "Run not found")
+    metrics = row.metrics or {}
+    pipeline = {}
+    if isinstance(metrics, dict):
+        pipeline = (metrics.get("pipeline") or metrics.get("live", {}).get("pipelineCounters") or {})
     return {
         "id": row.id,
         "status": row.status,
         "config": row.config,
-        "metrics": row.metrics,
+        "metrics": metrics,
+        "pipeline_counters": pipeline,
         "error": row.error,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "started_at": row.started_at.isoformat() if row.started_at else None,
@@ -1579,9 +1584,14 @@ async def replay_run_results(run_id: str):
     row = await ReplayRunRepository.get(run_id)
     if not row:
         raise HTTPException(404, "Run not found")
+    summary = row.metrics or {}
+    pipeline = {}
+    if isinstance(summary, dict):
+        pipeline = (summary.get("pipeline") or summary.get("live", {}).get("pipelineCounters") or {})
     trades = await ReplayRunRepository.get_trades(run_id)
     return {
-        "summary": row.metrics or {},
+        "summary": summary,
+        "pipeline_counters": pipeline,
         "equity_curve": row.equity_curve or [],
         "trades": [
             {
