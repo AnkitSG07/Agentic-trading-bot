@@ -18,8 +18,10 @@ class CapitalManagerConfig:
     max_capital_per_trade_pct: Decimal = Decimal("0.80")
     max_order_value_absolute: Optional[Decimal] = None
     min_risk_reward: float = 1.5
+    min_expected_edge_score: float = 0.55
     transaction_cost_pct: Decimal = Decimal("0.0015")
     order_type: str = "LIMIT"
+    max_new_entries_per_cycle: int = 2
 
 
 class CapitalManager:
@@ -38,8 +40,10 @@ class CapitalManager:
             max_capital_per_trade_pct=Decimal(str(config.get("max_capital_per_trade_pct", 0.80))),
             max_order_value_absolute=(Decimal(str(max_order_value_absolute)) if max_order_value_absolute is not None else None),
             min_risk_reward=float(config.get("min_risk_reward", 1.5)),
+            min_expected_edge_score=float(config.get("min_expected_edge_score", 0.55)),
             transaction_cost_pct=Decimal(str(config.get("transaction_cost_pct", 0.0015))),
             order_type=str(config.get("order_type", "LIMIT") or "LIMIT"),
+            max_new_entries_per_cycle=max(0, int(config.get("max_new_entries_per_cycle", 2))),
         )
 
     def plan_from_candidates(
@@ -58,10 +62,15 @@ class CapitalManager:
         remaining_capital = spendable_capital
 
         for approved in self._ranked_candidates(approved_candidates):
+            if len(plans) >= int(self.config.max_new_entries_per_cycle):
+                break
             candidate = approved.candidate
             if candidate.symbol.upper() in open_position_symbols:
                 continue
             if candidate.risk_reward < self.config.min_risk_reward:
+                continue
+            expected_edge_score = float(getattr(candidate, "expected_edge_score", 0.0))
+            if expected_edge_score > 0 and expected_edge_score < self.config.min_expected_edge_score:
                 continue
             if candidate.max_affordable_qty <= 0:
                 continue
@@ -141,6 +150,7 @@ class CapitalManager:
             risk_reward=candidate.risk_reward,
             confidence=approved.evaluation.confidence,
             source_candidate_id=candidate.candidate_id,
+            expected_edge_score=float(getattr(candidate, "expected_edge_score", 0.0)),
         )
 
     def _ranked_candidates(self, approved_candidates: Iterable[ApprovedCandidate]) -> list[ApprovedCandidate]:
