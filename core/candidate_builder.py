@@ -24,6 +24,10 @@ class CandidateBuilderConfig:
     min_rank_score: float = -999999.0
     max_candidates: int = 10
     risk_reward_target: float = 2.0
+    min_risk_reward: float = 1.5
+    min_expected_edge_score: float = 0.35
+    side_fallback_min_quality: float = 0.30
+    side_fallback_min_vote_margin: int = 1
     selector_config: SelectorConfig = field(default_factory=SelectorConfig)
 
 
@@ -73,7 +77,7 @@ class CandidateBuilder:
             if df is None or df.empty:
                 continue
             bundle = self.indicators_engine.compute(df, symbol=symbol, timeframe=self.config.timeframe)
-            side = self._resolve_side(bundle, item)
+            side = self._resolve_side(bundle, item, self.config)
             if side is None:
                 continue
 
@@ -88,6 +92,8 @@ class CandidateBuilder:
             risk_unit = self._risk_unit(bundle, entry_price)
             stop_loss, target = self._levels(side, entry_price, risk_unit)
             risk_reward = self._risk_reward(entry_price, stop_loss, target)
+            if risk_reward < float(self.config.min_risk_reward):
+                continue
             max_affordable_qty = self._affordable_qty(entry_price)
             signal_strength = self._signal_strength(bundle, ranked_by_symbol[symbol], modifier)
             trend_score = self._trend_score(bundle)
@@ -99,6 +105,17 @@ class CandidateBuilder:
             event_flags = list(modifier.event_flags)
             if regime:
                 event_flags.append(f"regime:{regime}")
+            expected_edge_score = self._expected_edge_score(
+                risk_reward=risk_reward,
+                trend_score=trend_score,
+                signal_strength=signal_strength,
+                liquidity_score=liquidity_score,
+                caution_flags=caution_flags,
+                event_flags=event_flags,
+                news_confidence_delta=float(modifier.confidence_delta or 0.0),
+            )
+            if expected_edge_score < float(self.config.min_expected_edge_score):
+                continue
 
             priority = self._priority(item, modifier)
 
@@ -126,12 +143,13 @@ class CandidateBuilder:
                 priority=priority,
                 caution_flags=caution_flags,
                 event_flags=event_flags,
+                expected_edge_score=expected_edge_score,
             ))
         candidates.sort(key=lambda candidate: (-candidate.priority, -candidate.signal_strength, candidate.symbol))
         return candidates
 
     @staticmethod
-    def _resolve_side(bundle, rank_item: dict) -> Optional[str]:
+    def _resolve_side(bundle, rank_item: dict, config: CandidateBuilderConfig) -> Optional[str]:
         mapping = {
             "buy": "BUY",
             "strong_buy": "BUY",
@@ -166,7 +184,24 @@ class CandidateBuilder:
             return "BUY"
         if bearish_votes >= 2 and bearish_votes > bullish_votes:
             return "SHORT"
+
+        total_votes = bullish_votes + bearish_votes
+        vote_margin = abs(bullish_votes - bearish_votes)
+        quality = CandidateBuilder._vote_quality_score(rank_item, bundle, total_votes)
+        if vote_margin >= max(int(config.side_fallback_min_vote_margin), 1) and quality >= float(config.side_fallback_min_quality):
+            if bullish_votes > bearish_votes:
+                return "BUY"
+            if bearish_votes > bullish_votes:
+                return "SHORT"
         return None
+
+    @staticmethod
+    def _vote_quality_score(rank_item: dict, bundle, total_votes: int) -> float:
+        momentum = min(max(abs(float(rank_item.get("momentum_20") or 0.0)) / 5.0, 0.0), 1.0)
+        trend_bonus = min(max(abs(float(rank_item.get("trend_bonus") or 0.0)) / 2.0, 0.0), 1.0)
+        atr_pct = min(max(abs(float(getattr(bundle, "atr_pct", 0.0) or 0.0)) / 5.0, 0.0), 1.0)
+        vote_quality = min(max(total_votes / 4.0, 0.0), 1.0)
+        return round((0.45 * vote_quality) + (0.25 * momentum) + (0.20 * trend_bonus) + (0.10 * atr_pct), 4)
 
     @staticmethod
     def _decimal_price(value: float | Decimal) -> Decimal:
@@ -239,6 +274,26 @@ class CandidateBuilder:
         rank_component = min(max(float(rank_item.get("score") or 0.0) / 100.0, 0.0), 0.3)
         value = base + rank_component + float(modifier.confidence_delta or 0.0)
         return round(max(0.0, min(value, 1.0)), 4)
+
+    @staticmethod
+    def _expected_edge_score(
+        *,
+        risk_reward: float,
+        trend_score: float,
+        signal_strength: float,
+        liquidity_score: float,
+        caution_flags: list[str],
+        event_flags: list[str],
+        news_confidence_delta: float = 0.0,
+    ) -> float:
+        rr_component = min(max((risk_reward - 1.0) / 2.0, 0.0), 1.0)
+        trend_component = min(max((trend_score + 1.0) / 2.0, 0.0), 1.0)
+        liquidity_component = min(max(liquidity_score / 10.0, 0.0), 1.0)
+        caution_penalty = min(0.20, 0.05 * len(caution_flags))
+        event_penalty = min(0.20, 0.03 * len([flag for flag in event_flags if "high_volatility" in str(flag)]))
+        news_adjustment = max(-0.10, min(0.10, news_confidence_delta * 0.5))
+        base = (0.35 * rr_component) + (0.25 * signal_strength) + (0.20 * trend_component) + (0.20 * liquidity_component)
+        return round(max(0.0, min(1.0, base + news_adjustment - caution_penalty - event_penalty)), 4)
 
     @staticmethod
     def _priority(rank_item: dict, modifier) -> int:
