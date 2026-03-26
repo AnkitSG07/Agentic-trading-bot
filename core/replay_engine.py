@@ -186,6 +186,13 @@ class ReplayEngine:
         agent_cfg["circuit_breaker_cooldown"] = replay_cfg.get("circuit_breaker_cooldown", agent_cfg.get("circuit_breaker_cooldown", 2))
 
         self.agent = TradingAgent(agent_cfg)
+        effective_models = [self.agent.model] + [m for m in self.agent.fallback_models if m != self.agent.model]
+        tried_models = effective_models[: self.agent.max_models_per_decision]
+        logger.info(
+            "Replay AI attempt window configured | max_models_per_decision=%d | tried_models=%s",
+            self.agent.max_models_per_decision,
+            ",".join(tried_models),
+        )
         session_cfg = app_config.get("session", {})
         risk_cfg = app_config.get("risk", {})
         news_cfg = app_config.get("news", {})
