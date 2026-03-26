@@ -229,6 +229,23 @@ def test_brain_classifies_timeout_errors_explicitly():
     assert '"read timed out"' in src
 
 
+def test_unavailable_model_errors_now_trip_circuit_breaker():
+    src = Path("agents/brain.py").read_text()
+    assert "circuit_breaker_tripped_unavailable" in src
+    assert "unavailable/permission failures" in src
+    assert "self._model_skip_until[model_id]" in src
+
+
+def test_replay_defaults_try_more_models_and_prioritise_provider_diversity():
+    cfg = Path("config/config.yaml").read_text()
+    assert "replay_max_models_per_decision: 5" in cfg
+    assert "max_models_per_decision: 5" in cfg
+    replay_block = cfg.split("replay_fallback_models:", 1)[1].split("replay_decision_timeout_seconds:", 1)[0]
+    assert replay_block.index('    - "openrouter/stepfun/step-3.5-flash:free"') < replay_block.index(
+        '    - "groq/llama-3.1-70b-versatile"'
+    )
+
+
 def test_last_model_preserves_timeout_and_rate_limit_reason():
     src = Path("agents/brain.py").read_text()
     timeout_block = """if self._is_timeout_error(e):
