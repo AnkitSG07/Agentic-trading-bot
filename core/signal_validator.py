@@ -9,6 +9,7 @@ from core.pipeline_models import OrderPlan, PreflightCheck, PreflightResult
 @dataclass(slots=True)
 class SignalValidatorConfig:
     min_risk_reward: float = 1.5
+    min_expected_edge_score: float = 0.55
     price_tolerance_pct: float = 0.02
     valid_exchanges: tuple[str, ...] = ("NSE", "BSE", "NFO", "MCX")
     valid_products: tuple[str, ...] = ("MIS", "CNC", "NRML")
@@ -28,6 +29,7 @@ class SignalValidator:
         checks = [
             self._geometry_check(order_plan),
             self._risk_reward_check(order_plan),
+            self._expected_edge_check(order_plan),
             self._price_tolerance_check(order_plan, current_price_reference),
             self._quantity_check(order_plan),
             self._affordability_check(order_plan, available_capital),
@@ -62,6 +64,17 @@ class SignalValidator:
             severity="blocking",
             message="Risk/reward meets threshold" if passed else f"Risk/reward {order_plan.risk_reward:.2f} below minimum {self.config.min_risk_reward:.2f}",
             recommended_action="Raise target or tighten stop loss",
+        )
+
+    def _expected_edge_check(self, order_plan: OrderPlan) -> PreflightCheck:
+        score = float(getattr(order_plan, "expected_edge_score", 0.0))
+        passed = score >= float(self.config.min_expected_edge_score)
+        return PreflightCheck(
+            check_name="expected_edge",
+            passed=passed,
+            severity="blocking",
+            message="Expected edge score meets threshold" if passed else f"Expected edge {score:.2f} below minimum {self.config.min_expected_edge_score:.2f}",
+            recommended_action="Only submit higher edge setups",
         )
 
     def _price_tolerance_check(self, order_plan: OrderPlan, current_price_reference: Decimal) -> PreflightCheck:
