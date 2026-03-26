@@ -30,6 +30,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -415,6 +416,13 @@ class TradingAgent:
         self.ai_absolute_capital_multiplier: float = max(
             0.0, min(1.0, float(config.get("ai_absolute_capital_multiplier", 1.0)))
         )
+        self.min_risk_reward: float = max(0.5, float(config.get("min_risk_reward", 1.5)))
+        self.fallback_min_trend_liquidity: float = max(0.0, min(1.0, float(config.get("fallback_min_trend_liquidity", 0.50))))
+        self.fallback_replay_allow_top1: bool = bool(config.get("fallback_replay_allow_top1", True))
+        self.fallback_replay_confidence_floor: float = max(
+            MIN_CONFIDENCE_THRESHOLD,
+            min(MAX_CONFIDENCE_THRESHOLD, float(config.get("fallback_replay_confidence_floor", 0.60))),
+        )
       
         # fix 10: anti-repetition tracking
         self._last_cycle_symbols:    set[str]       = set()
@@ -431,7 +439,7 @@ class TradingAgent:
         # circuit_breaker_cooldown: calls to skip after threshold failures
         # 10 = safe for live trading (60s interval × 10 = 10 min blackout max)
         # 30 was too aggressive for replay where each "call" = one candle
-        self.circuit_breaker_cooldown: int = 10
+        self.circuit_breaker_cooldown: int = max(1, int(config.get("circuit_breaker_cooldown", 10)))
 
         logger.info(
             "AI model chain configured | primary=%s | fallbacks=%d | "
@@ -1078,24 +1086,39 @@ class TradingAgent:
         constraints = self._mode_constraints(operating_mode)
         floor = float(constraints["confidence_floor"])
         allowed = int(constraints["max_new_entries"])
+        dynamic_floor = self._get_adaptive_confidence_threshold(context.india_vix, context.market_trend)
+        effective_floor = max(floor, dynamic_floor)
+        if self.fallback_replay_allow_top1 and context.session == "mid_session":
+            effective_floor = max(self.fallback_replay_confidence_floor, min(effective_floor, self.fallback_replay_confidence_floor))
+            allowed = max(allowed, 1)
         ranked = sorted(candidates, key=lambda candidate: (-candidate.priority, -candidate.signal_strength, candidate.symbol))
         evaluations: list[AICandidateEvaluation] = []
         approvals = 0
         for idx, candidate in enumerate(ranked, start=1):
             confidence = round(max(0.0, min(candidate.signal_strength, 1.0)), 4)
+            liquidity_component = float(candidate.liquidity_score)
+            if liquidity_component > 1.0:
+                liquidity_component = min(max(liquidity_component / 10.0, 0.0), 1.0)
+            trend_liquidity_quality = (
+                max(0.0, min((candidate.trend_score + 1.0) / 2.0, 1.0))
+                + max(0.0, min(liquidity_component, 1.0))
+            ) / 2.0
             approved = (
                 approvals < allowed
-                and confidence >= floor
+                and confidence >= effective_floor
                 and candidate.max_affordable_qty > 0
-                and candidate.risk_reward >= 1.5
+                and candidate.risk_reward >= self.min_risk_reward
+                and trend_liquidity_quality >= self.fallback_min_trend_liquidity
             )
             risk_notes: list[str] = []
-            if confidence < floor:
-                risk_notes.append(f"Below confidence floor {floor:.2f}")
+            if confidence < effective_floor:
+                risk_notes.append(f"Below confidence floor {effective_floor:.2f}")
             if candidate.max_affordable_qty <= 0:
                 risk_notes.append("Unaffordable candidate")
-            if candidate.risk_reward < 1.5:
+            if candidate.risk_reward < self.min_risk_reward:
                 risk_notes.append("Risk/reward below minimum")
+            if trend_liquidity_quality < self.fallback_min_trend_liquidity:
+                risk_notes.append("Trend and liquidity quality below fallback minimum")
             if approved:
                 approvals += 1
             evaluations.append(AICandidateEvaluation(
@@ -1118,6 +1141,28 @@ class TradingAgent:
             mode_constraints=constraints,
         )
 
+    @staticmethod
+    def _parse_numeric(value: Any, default: float = 0.0) -> tuple[float, bool]:
+        if value is None:
+            return default, False
+        if isinstance(value, (int, float)):
+            if not math.isfinite(float(value)):
+                return default, False
+            return float(value), True
+        text = str(value).strip()
+        if not text:
+            return default, False
+        try:
+            return float(text), True
+        except (TypeError, ValueError):
+            match = re.search(r"-?\d+(?:\.\d+)?", text)
+            if not match:
+                return default, False
+            try:
+                return float(match.group(0)), True
+            except (TypeError, ValueError):
+                return default, False
+
     def _sanitize_candidate_evaluations(
         self,
         raw_evaluations: Any,
@@ -1137,11 +1182,11 @@ class TradingAgent:
                 candidate = candidate_by_id[candidate_id]
                 approved = bool(raw.get("approved", False))
                 rationale = str(raw.get("rationale") or "No rationale provided.")
-                priority_hint = int(raw.get("priority", candidate.priority or 0) or 0)
+                priority_raw, priority_ok = self._parse_numeric(raw.get("priority", candidate.priority or 0), default=float(candidate.priority or 0))
+                priority_hint = int(priority_raw) if priority_ok else int(candidate.priority or 0)
                 risk_notes = [str(note) for note in raw.get("risk_notes", [])] if isinstance(raw.get("risk_notes"), list) else []
-                try:
-                    confidence = float(raw.get("confidence", 0.0) or 0.0)
-                except (TypeError, ValueError):
+                confidence, confidence_ok = self._parse_numeric(raw.get("confidence", 0.0), default=0.0)
+                if not confidence_ok:
                     confidence = 0.0
                     approved = False
                     risk_notes.append("Invalid confidence format from model")
@@ -1175,9 +1220,13 @@ class TradingAgent:
             if candidate.max_affordable_qty <= 0:
                 evaluation.approved = False
                 evaluation.risk_notes.append("Unaffordable candidate")
-            if candidate.risk_reward < 1.5:
+            if candidate.risk_reward < self.min_risk_reward:
                 evaluation.approved = False
                 evaluation.risk_notes.append("Risk/reward below minimum")
+            expected_edge_score = float(getattr(candidate, "expected_edge_score", 0.0))
+            if expected_edge_score > 0 and expected_edge_score < float(self.config.get("min_expected_edge_score", 0.55)):
+                evaluation.approved = False
+                evaluation.risk_notes.append("Expected edge score below minimum")
             ranked.append((evaluation, candidate))
 
         ranked.sort(key=lambda item: (-int(item[0].approved), -item[0].confidence, -(item[0].priority or 0), -item[1].signal_strength, item[1].symbol))
