@@ -484,6 +484,13 @@ class TradingAgent:
         # 10 = safe for live trading (60s interval × 10 = 10 min blackout max)
         # 30 was too aggressive for replay where each "call" = one candle
         self.circuit_breaker_cooldown: int = max(1, int(config.get("circuit_breaker_cooldown", 10)))
+        self.unavailable_circuit_breaker_threshold: int = max(
+            1, int(config.get("unavailable_circuit_breaker_threshold", 1))
+        )
+        self.unavailable_circuit_breaker_cooldown: int = max(
+            self.circuit_breaker_cooldown,
+            int(config.get("unavailable_circuit_breaker_cooldown", max(15, self.circuit_breaker_cooldown * 3))),
+        )
         self.circuit_breaker_error_rate_threshold: float = max(
             0.05,
             min(1.0, float(config.get("circuit_breaker_error_rate_threshold", 0.25))),
@@ -514,7 +521,7 @@ class TradingAgent:
             "AI model chain configured | primary=%s | fallbacks=%d | "
             "thinking_budget=%d | max_tokens=%d | temperature=%.3f | "
             "decision_timeout=%.1fs | provider_timeout=%.1fs | max_models=%d | "
-            "max_capital_pct=%.1f%% | cb_cooldown=%d | retries=%d",
+            "max_capital_pct=%.1f%% | cb_cooldown=%d | unavailable_cb=%d/%d | retries=%d",
             self.model,
             len(self.fallback_models),
             self.thinking_budget,
@@ -525,6 +532,8 @@ class TradingAgent:
             self.max_models_per_decision,
             self.max_capital_per_trade_pct,
             self.circuit_breaker_cooldown,
+            self.unavailable_circuit_breaker_threshold,
+            self.unavailable_circuit_breaker_cooldown,
             self.max_retries_per_model,
         )
 
@@ -546,6 +555,14 @@ class TradingAgent:
         }
         if not key_by_provider.get(provider):
             raise RuntimeError(f"Missing API key for provider '{provider}'.")
+
+    def _has_provider_key(self, provider: str) -> bool:
+        key_by_provider = {
+            "gemini": bool(self.gemini_api_key),
+            "groq": bool(self.groq_api_key),
+            "openrouter": bool(self.openrouter_api_key),
+        }
+        return key_by_provider.get(provider, False)
 
     def _resolve_fallback_models(self, config: dict) -> list[str]:
         seen: set[str] = {self.model}
@@ -907,6 +924,18 @@ class TradingAgent:
             raise RuntimeError("No models configured for generation.")
         last_error: Exception | None = None
         failure_reasons: list[str] = []
+        filtered_models: list[str] = []
+        for model_id in all_models:
+            provider, _ = self._parse_model_identifier(model_id)
+            if self._has_provider_key(provider):
+                filtered_models.append(model_id)
+            else:
+                failure_reasons.append(f"{model_id}=missing_api_key")
+        all_models = filtered_models
+        if not all_models:
+            raise RuntimeError(
+                "No models configured with valid provider API keys for generation."
+            )
         self._call_counter += 1
         started_at = time.monotonic()
 
@@ -1061,16 +1090,16 @@ class TradingAgent:
                 if self._is_unavailable_model_error(e):
                     prev_fails = self._model_consecutive_failures.get(model_id, 0)
                     self._model_consecutive_failures[model_id] = prev_fails + 1
-                    if self._model_consecutive_failures[model_id] >= self.circuit_breaker_threshold:
+                    if self._model_consecutive_failures[model_id] >= self.unavailable_circuit_breaker_threshold:
                         self._model_skip_until[model_id] = (
-                            self._call_counter + self.circuit_breaker_cooldown
+                            self._call_counter + self.unavailable_circuit_breaker_cooldown
                         )
                         logger.warning(
                             "Circuit breaker TRIPPED for %s after %d unavailable/permission failures — "
                             "skipping for next %d calls.",
                             model_id,
                             self._model_consecutive_failures[model_id],
-                            self.circuit_breaker_cooldown,
+                            self.unavailable_circuit_breaker_cooldown,
                         )
                         failure_reasons.append(f"{model_id}=circuit_breaker_tripped_unavailable")
                         continue
