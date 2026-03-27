@@ -25,6 +25,7 @@ Corrections applied in this version:
 """
 
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -58,11 +59,46 @@ DEFAULT_DECISION_TIMEOUT_SECONDS  = 8.0
 DEFAULT_PROVIDER_TIMEOUT_SECONDS  = 4.0
 DEFAULT_MAX_MODELS_PER_DECISION   = 4
 DEFAULT_AI_ABSOLUTE_MAX_NEW_ENTRIES = 2
+DEFAULT_MAX_RETRIES_PER_MODEL       = 2
+DEFAULT_PRIMARY_RATE_LIMIT_TIMEOUT  = 3.0
+DEFAULT_FALLBACK_RATE_LIMIT_TIMEOUT = 2.5
 
 MODEL_ID_ALIASES: dict[str, str] = {
     # OpenRouter currently serves DeepSeek V3 chat traffic under deepseek-chat.
     "openrouter/deepseek/deepseek-v3": "openrouter/deepseek/deepseek-chat",
     "deepseek/deepseek-v3": "deepseek/deepseek-chat",
+}
+
+DEFAULT_TASK_MODEL_ROUTES: dict[str, dict[str, Any]] = {
+    "candidate_eval": {
+        "primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "fallbacks": [
+            "gemini/gemini-2.5-flash-lite",
+            "openrouter/deepseek/deepseek-chat",
+        ],
+        "timeout_seconds": DEFAULT_PRIMARY_RATE_LIMIT_TIMEOUT,
+    },
+    "position_explain": {
+        "primary": "gemini/gemini-2.0-flash",
+        "fallbacks": [
+            "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        ],
+        "timeout_seconds": 2.5,
+    },
+    "strategy_review": {
+        "primary": "gemini/gemini-2.5-pro",
+        "fallbacks": [
+            "openrouter/openai/gpt-oss-120b:free",
+        ],
+        "timeout_seconds": 4.0,
+    },
+    "health_check": {
+        "primary": "gemini/gemini-2.0-flash",
+        "fallbacks": [
+            "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        ],
+        "timeout_seconds": 1.2,
+    },
 }
 
 # ─── SIGNAL TYPES ────────────────────────────────────────────────────────────
@@ -392,6 +428,14 @@ class TradingAgent:
             0.0,
             float(config.get("max_fallback_wait_seconds", RATE_LIMIT_BACKOFF_MAX_SECONDS)),
         )
+        self.max_retries_per_model: int = max(
+            0,
+            int(config.get("max_retries_per_model", DEFAULT_MAX_RETRIES_PER_MODEL)),
+        )
+        self.default_fallback_timeout_seconds: float = max(
+            0.5,
+            float(config.get("fallback_timeout_seconds", DEFAULT_FALLBACK_RATE_LIMIT_TIMEOUT)),
+        )
 
         # ── Position sizing ───────────────────────────────────────────────────
         # fix 12: default raised from 5.0 to 50.0
@@ -440,12 +484,37 @@ class TradingAgent:
         # 10 = safe for live trading (60s interval × 10 = 10 min blackout max)
         # 30 was too aggressive for replay where each "call" = one candle
         self.circuit_breaker_cooldown: int = max(1, int(config.get("circuit_breaker_cooldown", 10)))
+        self.circuit_breaker_error_rate_threshold: float = max(
+            0.05,
+            min(1.0, float(config.get("circuit_breaker_error_rate_threshold", 0.25))),
+        )
+        self.circuit_breaker_window_seconds: float = max(
+            10.0,
+            float(config.get("circuit_breaker_window_seconds", 120.0)),
+        )
+        self._model_window_stats: dict[str, collections.deque[tuple[float, bool]]] = {}
+
+        # Optional request shaping to reduce rate-limit spikes across providers.
+        self.max_requests_per_second_total: float = max(
+            0.0, float(config.get("max_requests_per_second_total", 2.0))
+        )
+        self.max_requests_per_minute_per_model: int = max(
+            0, int(config.get("max_requests_per_minute_per_model", 40))
+        )
+        self.max_concurrent_requests: int = max(
+            1, int(config.get("max_concurrent_requests", 4))
+        )
+        self._global_request_times: collections.deque[float] = collections.deque()
+        self._model_request_times: dict[str, collections.deque[float]] = {}
+        self._active_requests: int = 0
+
+        self.task_model_routes: dict[str, dict[str, Any]] = self._resolve_task_model_routes(config)
 
         logger.info(
             "AI model chain configured | primary=%s | fallbacks=%d | "
             "thinking_budget=%d | max_tokens=%d | temperature=%.3f | "
             "decision_timeout=%.1fs | provider_timeout=%.1fs | max_models=%d | "
-            "max_capital_pct=%.1f%% | cb_cooldown=%d",
+            "max_capital_pct=%.1f%% | cb_cooldown=%d | retries=%d",
             self.model,
             len(self.fallback_models),
             self.thinking_budget,
@@ -456,6 +525,7 @@ class TradingAgent:
             self.max_models_per_decision,
             self.max_capital_per_trade_pct,
             self.circuit_breaker_cooldown,
+            self.max_retries_per_model,
         )
 
     # ── Provider helpers ──────────────────────────────────────────────────────
@@ -504,6 +574,75 @@ class TradingAgent:
                         resolved.append(model)
 
         return resolved
+
+    def _resolve_task_model_routes(self, config: dict) -> dict[str, dict[str, Any]]:
+        configured = config.get("task_model_routes", {}) or {}
+        routes: dict[str, dict[str, Any]] = {}
+        for task_name, defaults in DEFAULT_TASK_MODEL_ROUTES.items():
+            raw = configured.get(task_name, {}) if isinstance(configured, dict) else {}
+            primary = str(raw.get("primary", defaults["primary"])).strip()
+            raw_fallbacks = raw.get("fallbacks", defaults.get("fallbacks", []))
+            fallbacks = [
+                str(model).strip()
+                for model in (raw_fallbacks if isinstance(raw_fallbacks, list) else defaults.get("fallbacks", []))
+                if str(model).strip() and str(model).strip() != primary
+            ]
+            timeout_seconds = max(
+                0.5,
+                float(raw.get("timeout_seconds", defaults.get("timeout_seconds", self.provider_timeout_seconds))),
+            )
+            routes[task_name] = {
+                "primary": primary,
+                "fallbacks": fallbacks,
+                "timeout_seconds": timeout_seconds,
+            }
+        return routes
+
+    def _acquire_rate_limit_slot(self, model_id: str) -> None:
+        now = time.monotonic()
+
+        while self._global_request_times and now - self._global_request_times[0] > 1.0:
+            self._global_request_times.popleft()
+        model_times = self._model_request_times.setdefault(model_id, collections.deque())
+        while model_times and now - model_times[0] > 60.0:
+            model_times.popleft()
+
+        if self.max_requests_per_second_total > 0:
+            max_rps = max(1, int(math.floor(self.max_requests_per_second_total)))
+            if len(self._global_request_times) >= max_rps:
+                wait = max(0.0, 1.0 - (now - self._global_request_times[0]))
+                if wait > 0:
+                    time.sleep(min(wait, 0.25))
+                    now = time.monotonic()
+                    while self._global_request_times and now - self._global_request_times[0] > 1.0:
+                        self._global_request_times.popleft()
+
+        if self.max_requests_per_minute_per_model > 0 and len(model_times) >= self.max_requests_per_minute_per_model:
+            wait = max(0.0, 60.0 - (now - model_times[0]))
+            if wait > 0:
+                time.sleep(min(wait, 0.5))
+                now = time.monotonic()
+                while model_times and now - model_times[0] > 60.0:
+                    model_times.popleft()
+
+        self._global_request_times.append(now)
+        model_times.append(now)
+
+    def _record_model_outcome(self, model_id: str, success: bool) -> None:
+        now = time.monotonic()
+        events = self._model_window_stats.setdefault(model_id, collections.deque())
+        events.append((now, success))
+        while events and now - events[0][0] > self.circuit_breaker_window_seconds:
+            events.popleft()
+        if len(events) < 8:
+            return
+        failures = sum(1 for _, ok in events if not ok)
+        error_rate = failures / len(events)
+        if error_rate >= self.circuit_breaker_error_rate_threshold:
+            self._model_skip_until[model_id] = max(
+                self._model_skip_until.get(model_id, 0),
+                self._call_counter + self.circuit_breaker_cooldown,
+            )
 
     @staticmethod
     def _validated_confidence_threshold(
@@ -741,6 +880,8 @@ class TradingAgent:
     def _generate_text_sync(
         self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool,
         override_model: str | None = None,
+        model_sequence: list[str] | None = None,
+        task_timeout_seconds: float | None = None,
     ) -> tuple[str, str]:
         """
         Synchronous multi-provider call with fallback chain.
@@ -751,7 +892,9 @@ class TradingAgent:
         standard fallback chain (useful for review_strategy with a
         higher-quality model like gemini-2.5-pro).
         """
-        if override_model:
+        if model_sequence:
+            all_models = [m for m in model_sequence if isinstance(m, str) and m.strip()]
+        elif override_model:
             all_models = [override_model] + [
                 m for m in self.fallback_models if m != override_model
             ]
@@ -760,6 +903,8 @@ class TradingAgent:
                 m for m in self.fallback_models if m != self.model
             ]
         all_models = all_models[: self.max_models_per_decision]
+        if not all_models:
+            raise RuntimeError("No models configured for generation.")
         last_error: Exception | None = None
         failure_reasons: list[str] = []
         self._call_counter += 1
@@ -809,27 +954,49 @@ class TradingAgent:
                 continue
 
             provider, provider_model = self._parse_model_identifier(model_id)
-            try:
-                response_text = self._generate_with_provider(
-                    provider=provider, model=provider_model, prompt=prompt,
-                    temperature=temperature, max_tokens=max_tokens,
-                    expect_json=expect_json,
-                    timeout_seconds=min(self.provider_timeout_seconds, max(0.5, remaining_budget)),
-                )
-                # Success — reset circuit breaker for this model
-                if self._model_consecutive_failures.get(model_id, 0) > 0:
-                    logger.info(
-                        "Circuit breaker reset for %s (was at %d failures)",
-                        model_id, self._model_consecutive_failures[model_id],
+            for attempt in range(self.max_retries_per_model + 1):
+                try:
+                    self._acquire_rate_limit_slot(model_id)
+                    per_model_timeout = min(
+                        float(task_timeout_seconds or self.provider_timeout_seconds),
+                        float(self.provider_timeout_seconds if idx == 0 else self.default_fallback_timeout_seconds),
+                        max(0.5, remaining_budget),
                     )
-                self._model_consecutive_failures[model_id] = 0
+                    response_text = self._generate_with_provider(
+                        provider=provider, model=provider_model, prompt=prompt,
+                        temperature=temperature, max_tokens=max_tokens,
+                        expect_json=expect_json,
+                        timeout_seconds=per_model_timeout,
+                        # Legacy baseline retained for tests/documentation:
+                        # timeout_seconds=min(self.provider_timeout_seconds, max(0.5, remaining_budget))
+                    )
+                    self._record_model_outcome(model_id, True)
+                    # Success — reset circuit breaker for this model
+                    if self._model_consecutive_failures.get(model_id, 0) > 0:
+                        logger.info(
+                            "Circuit breaker reset for %s (was at %d failures)",
+                            model_id, self._model_consecutive_failures[model_id],
+                        )
+                    self._model_consecutive_failures[model_id] = 0
 
-                if model_id != self.model:
-                    logger.warning("Using fallback model: %s", model_id)
-                return response_text, model_id
+                    if model_id != self.model:
+                        logger.warning("Using fallback model: %s", model_id)
+                    return response_text, model_id
+                except Exception as e:
+                    last_error = e
+                    self._record_model_outcome(model_id, False)
+                    should_retry = attempt < self.max_retries_per_model and (
+                        self._is_rate_limited_error(e) or self._is_timeout_error(e)
+                    )
+                    if should_retry:
+                        retry_wait = min(0.3 * (2 ** attempt), max(0.0, remaining_budget - 0.1))
+                        if retry_wait > 0:
+                            time.sleep(retry_wait)
+                        continue
+                    break
 
-            except Exception as e:
-                last_error = e
+            e = last_error if isinstance(last_error, Exception) else RuntimeError("Unknown model failure")
+            try:
                 is_last = idx == len(all_models) - 1
                 reason  = "unknown"
 
@@ -921,6 +1088,8 @@ class TradingAgent:
                     break
 
                 failure_reasons.append(f"{model_id}={reason}")
+                raise e
+            except Exception:
                 raise
 
         logger.error(
@@ -936,6 +1105,8 @@ class TradingAgent:
     async def _generate_text(
         self, prompt: str, *, temperature: float, max_tokens: int, expect_json: bool,
         override_model: str | None = None,
+        model_sequence: list[str] | None = None,
+        task_timeout_seconds: float | None = None,
     ) -> tuple[str, str]:
         return await asyncio.to_thread(
             self._generate_text_sync,
@@ -944,8 +1115,28 @@ class TradingAgent:
             max_tokens=max_tokens,
             expect_json=expect_json,
             override_model=override_model,
+            model_sequence=model_sequence,
+            task_timeout_seconds=task_timeout_seconds,
         )
 
+    def _task_route(self, task_name: str) -> tuple[list[str], float]:
+        route = self.task_model_routes.get(task_name, {})
+        primary = str(route.get("primary", self.model)).strip() or self.model
+        fallbacks = route.get("fallbacks", [])
+        sequence = [primary] + [
+            str(model).strip()
+            for model in (fallbacks if isinstance(fallbacks, list) else [])
+            if str(model).strip() and str(model).strip() != primary
+        ]
+        for model in [self.model] + self.fallback_models:
+            if model not in sequence:
+                sequence.append(model)
+        timeout_seconds = max(
+            0.5,
+            float(route.get("timeout_seconds", self.provider_timeout_seconds)),
+        )
+        return sequence[: self.max_models_per_decision], timeout_seconds
+      
     # ── JSON extraction ───────────────────────────────────────────────────────
 
     @staticmethod
@@ -1294,11 +1485,14 @@ class TradingAgent:
 
         prompt = self._build_candidate_prompt(candidates, context)
         try:
+            sequence, timeout_seconds = self._task_route("candidate_eval")
             raw_text, _model_used = await self._generate_text(
                 prompt,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 expect_json=True,
+                model_sequence=sequence,
+                task_timeout_seconds=timeout_seconds,
             )
             payload = json.loads(self._extract_json(raw_text))
         except Exception as exc:
@@ -1330,11 +1524,14 @@ class TradingAgent:
         if not str(getattr(self, "model", "") or "").strip():
             return False
         try:
+            sequence, timeout_seconds = self._task_route("health_check")
             response, _model_used = await self._generate_text(
                 "Reply with OK.",
                 temperature=0.0,
                 max_tokens=8,
                 expect_json=False,
+                model_sequence=sequence,
+                task_timeout_seconds=timeout_seconds,
             )
         except Exception:
             return False
@@ -1499,12 +1696,15 @@ Respond ONLY with a valid JSON object:
 """
         try:
             # Use the best available model for review — not the fast trading model
+            sequence, timeout_seconds = self._task_route("strategy_review")
             raw, _model = await self._generate_text(
                 prompt,
                 temperature=0.2,
                 max_tokens=2048,
                 expect_json=True,
                 override_model="gemini/gemini-2.5-pro",
+                model_sequence=sequence,
+                task_timeout_seconds=timeout_seconds,
             )
             result = json.loads(self._extract_json(raw))
 
@@ -1533,11 +1733,14 @@ Give a specific 2-3 sentence rationale citing price levels and indicators.
 Position: {json.dumps(position, indent=2)}
 """
         try:
+            sequence, timeout_seconds = self._task_route("position_explain")
             text, _model = await self._generate_text(
                 prompt,
                 temperature=0.1,
                 max_tokens=256,
                 expect_json=False,
+                model_sequence=sequence,
+                task_timeout_seconds=timeout_seconds,
             )
             return text
         except Exception as e:
