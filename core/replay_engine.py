@@ -216,9 +216,14 @@ class ReplayEngine:
             confidence_modifier_cap=float(news_cfg.get("confidence_modifier_cap", 0.2) or 0.2),
         )))
         self.capital_manager = CapitalManager(app_config.get("agent", {}))
+        replay_min_edge = replay_cfg.get(
+            "min_expected_edge_score",
+            risk_cfg.get("min_expected_edge_score", app_config.get("agent", {}).get("min_expected_edge_score", 0.55)),
+        )
         self.signal_validator = SignalValidator(SignalValidatorConfig(
-            min_risk_reward=float(risk_cfg.get("min_risk_reward", 1.5) or 1.5),
-            min_expected_edge_score=float(risk_cfg.get("min_expected_edge_score", 0.55) or 0.55),
+            min_risk_reward=float(replay_cfg.get("min_risk_reward", risk_cfg.get("min_risk_reward", 1.5)) or 1.5),
+            min_expected_edge_score=float(replay_min_edge or 0.55),
+            price_tolerance_pct=float(replay_cfg.get("price_tolerance_pct", 0.02) or 0.02),
         ))
         self.session_guard = SessionGuard(SessionGuardConfig(
             entry_block_windows=session_windows or SessionGuardConfig().entry_block_windows,
@@ -313,6 +318,20 @@ class ReplayEngine:
                 commentary=f"Replay fallback evaluation used because AI evaluation failed: {exc}",
             )
         approved_candidates = self._approved_candidates_from_result(candidates, evaluation_result)
+        if candidates and not approved_candidates:
+            logger.info("Replay AI approved 0/%d candidates at %s; applying deterministic fallback for replay continuity.", len(candidates), ts.isoformat())
+            stage_rejections["ai"]["fallback_top1_triggered"] = stage_rejections["ai"].get("fallback_top1_triggered", 0) + 1
+            fallback_result = self.agent._heuristic_evaluation_result(
+                candidates,
+                context,
+                operating_mode="selective",
+                commentary="Replay deterministic fallback engaged after zero AI approvals.",
+            )
+            fallback_approved = self._approved_candidates_from_result(candidates, fallback_result)
+            if fallback_approved:
+                evaluation_result = fallback_result
+                approved_candidates = fallback_approved
+                stage_rejections["ai"]["fallback_top1_approved"] = stage_rejections["ai"].get("fallback_top1_approved", 0) + 1
         approved_by_id = {approved.candidate_id: approved for approved in approved_candidates}
 
         session_block_reason = self.session_guard.active_block_reason(ts)
