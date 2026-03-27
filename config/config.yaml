@@ -250,7 +250,8 @@ replay:
   order_type: "MARKET"
   # Replay should not deadlock with zero fills due to strict live thresholds.
   # Use a slightly lower edge floor for historical simulation continuity.
-  min_expected_edge_score: 0.35
+  min_expected_edge_score: 0.20
+  candidate_min_expected_edge_score: 0.20
   circuit_breaker_cooldown: 5
   decision_timeout_seconds: 6.0
   provider_timeout_seconds: 2.5
