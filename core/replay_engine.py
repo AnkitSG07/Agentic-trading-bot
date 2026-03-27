@@ -305,6 +305,56 @@ class ReplayEngine:
             regime=context.market_trend,
             session_name=context.session,
         )
+        if not candidates:
+            # Replay-only adaptive relaxation:
+            # when strict edge filtering yields zero candidates, retry once with
+            # a permissive edge floor before giving up this candle.
+            original_min_edge = float(self.candidate_builder.config.min_expected_edge_score)
+            if original_min_edge > 0:
+                self.candidate_builder.config.min_expected_edge_score = 0.0
+                candidates = self.candidate_builder.build_candidates(
+                    frames,
+                    price_references=price_references,
+                    symbols=cfg.symbols,
+                    generated_at=ts,
+                    regime=context.market_trend,
+                    session_name=context.session,
+                )
+                self.candidate_builder.config.min_expected_edge_score = original_min_edge
+                if candidates:
+                    stage_rejections["candidate_builder"]["relaxed_edge_floor_applied"] = (
+                        stage_rejections["candidate_builder"].get("relaxed_edge_floor_applied", 0) + 1
+                    )
+        if not candidates:
+            stage_rejections["candidate_builder"]["no_candidates"] = (
+                stage_rejections["candidate_builder"].get("no_candidates", 0) + 1
+            )
+            return {
+                "candidates": [],
+                "evaluation_result": AIEvaluationResult(
+                    candidate_evaluations=[],
+                    market_regime=context.market_trend,
+                    operating_mode="capital_preservation",
+                    market_commentary="No replay candidates generated for this candle.",
+                    mode_constraints={},
+                ),
+                "approved_candidates": [],
+                "order_plans": [],
+                "session_block_reason": None,
+                "portfolio_result": None,
+                "pipeline_counters": {
+                    "candidates_built": 0,
+                    "ai_approved": 0,
+                    "planned_orders": 0,
+                    "validator_passed": 0,
+                    "portfolio_passed": 0,
+                    "risk_passed": 0,
+                    "submitted_orders": 0,
+                    "filled_orders": 0,
+                    "rejected_reasons_by_stage": stage_rejections,
+                },
+            }
+
         logger.debug("Replay pipeline stage=ai_evaluate ts=%s candidates=%d", ts.isoformat(), len(candidates))
         try:
             evaluation_result = await self.agent.evaluate_candidates(candidates, context)
