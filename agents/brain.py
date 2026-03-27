@@ -1523,7 +1523,8 @@ class TradingAgent:
                 model_sequence=sequence,
                 task_timeout_seconds=timeout_seconds,
             )
-            payload = json.loads(self._extract_json(raw_text))
+            parsed_payload = json.loads(self._extract_json(raw_text))
+            payload = self._normalize_candidate_eval_payload(parsed_payload)
         except Exception as exc:
             return self._heuristic_evaluation_result(
                 candidates,
@@ -1546,6 +1547,20 @@ class TradingAgent:
             operating_mode=operating_mode,
             market_commentary=str(payload.get("market_commentary") or f"Evaluated {len(candidates)} candidate(s)."),
             mode_constraints=constraints,
+        )
+
+    @staticmethod
+    def _normalize_candidate_eval_payload(parsed_payload: Any) -> dict[str, Any]:
+        if isinstance(parsed_payload, dict):
+            return parsed_payload
+
+        if isinstance(parsed_payload, list):
+            if len(parsed_payload) == 1 and isinstance(parsed_payload[0], dict):
+                return parsed_payload[0]
+            return {"candidate_evaluations": parsed_payload}
+
+        raise TypeError(
+            f"Unsupported candidate evaluation payload type: {type(parsed_payload).__name__}"
         )
 
     async def check_provider_health(self) -> bool:
