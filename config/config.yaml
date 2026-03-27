@@ -64,7 +64,7 @@ agent:
   openrouter_api_key_env: "OPENROUTER_API_KEY"
 
   # ── Primary Model ───────────────────────────────────────────
-  model: "gemini/gemini-2.5-flash"
+  model: "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
 
   # ── Thinking Mode ───────────────────────────────────────────
   # 0 = DISABLED (recommended for live trading — saves 2-8s per call)
@@ -112,12 +112,12 @@ agent:
   # Definitive fallback order when the primary model fails.
   # brain.py also reads model_tiers above, but this list takes priority.
   fallback_models:
+    - "openrouter/deepseek/deepseek-chat"
     - "gemini/gemini-2.5-flash-lite"
     - "openrouter/stepfun/step-3.5-flash:free"
     - "gemini/gemini-2.0-flash"
     - "groq/llama-3.1-70b-versatile"
     - "groq/llama-3.3-70b-specdec"
-    - "openrouter/deepseek/deepseek-chat"
     - "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
     - "openrouter/openai/gpt-oss-120b:free"
     - "openrouter/meta-llama/llama-3.3-70b-instruct:free"
@@ -129,7 +129,38 @@ agent:
   provider_timeout_seconds: 4.0
   decision_timeout_seconds: 8.0
   max_fallback_wait_seconds: 1.5
+  fallback_timeout_seconds: 2.5
+  max_retries_per_model: 2
+  max_requests_per_second_total: 2
+  max_requests_per_minute_per_model: 40
+  max_concurrent_requests: 4
+  circuit_breaker_error_rate_threshold: 0.25
+  circuit_breaker_window_seconds: 120
   max_models_per_decision: 4
+
+  # Task-specific model routes. Order placement remains deterministic code-only.
+  task_model_routes:
+    candidate_eval:
+      primary: "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      fallbacks:
+        - "openrouter/deepseek/deepseek-chat"
+        - "gemini/gemini-2.5-flash-lite"
+      timeout_seconds: 3.0
+    health_check:
+      primary: "gemini/gemini-2.0-flash"
+      fallbacks:
+        - "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      timeout_seconds: 1.2
+    position_explain:
+      primary: "gemini/gemini-2.0-flash"
+      fallbacks:
+        - "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      timeout_seconds: 2.5
+    strategy_review:
+      primary: "gemini/gemini-2.5-pro"
+      fallbacks:
+        - "openrouter/openai/gpt-oss-120b:free"
+      timeout_seconds: 4.0
 
   # ── Replay policy ───────────────────────────────────────────
   # Replay should behave like a real market: fail fast instead of walking
