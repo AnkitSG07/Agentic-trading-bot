@@ -64,7 +64,7 @@ agent:
   openrouter_api_key_env: "OPENROUTER_API_KEY"
 
   # ── Primary Model ───────────────────────────────────────────
-  model: "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+  model: "gemini/gemini-2.5-flash"
 
   # ── Thinking Mode ───────────────────────────────────────────
   # 0 = DISABLED (recommended for live trading — saves 2-8s per call)
@@ -72,56 +72,24 @@ agent:
   thinking_budget: 0
 
   # ── Model Tiers ─────────────────────────────────────────────
-  # All models ≥70B or Gemini-class. No sub-32B model in the chain.
-  #
-  # Removed models (reason):
-  #   xiaomimimo/mimo-v2-flash          — unverified financial reasoning, 7B-class
-  #   groq/llama-3.1-8b-instant        — 8B hallucinates prices
-  #   groq/mixtral-8x7b-32768          — Groq deprecated endpoint
-  #   openrouter/mistralai/mistral-7b   — 7B too small
-  #   openrouter/mistralai/mistral-nemo — poor financial reasoning
-  #   openrouter/qwen/qwen-2.5-7b       — 7B invalid SL values
-  #   gemini/gemini-1.5-flash           — replaced by 2.0-flash
+  # Gemini-only model tiers for trading reliability + cost control.
   model_tiers:
     ultra_fast:
-      # Fastest Gemini fallback when primary is rate-limited
       - "gemini/gemini-2.5-flash-lite"
-      # OpenRouter free MoE model with high recent free-router usage
-      - "openrouter/stepfun/step-3.5-flash:free"
     fast:
-      # Reliable, works on cloud IPs, strong JSON adherence
       - "gemini/gemini-2.0-flash"
-      # DeepSeek V2 — excellent financial domain, very cheap
-      - "openrouter/deepseek/deepseek-chat"
-      # Groq 70B — 30 RPM free, ~0.4s latency
-      - "groq/llama-3.1-70b-versatile"
-      # Groq speculative decoding — best Groq JSON adherence
-      - "groq/llama-3.3-70b-specdec"
     balanced:
-      # 80B free instruct model optimized for stable long-context outputs
-      - "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
-      # Free 120B MoE with structured outputs and tool-use support
-      - "openrouter/openai/gpt-oss-120b:free"
+      - "gemini/gemini-2.5-flash"
     quality:
-      # Free 70B fallback with broad provider support
-      - "openrouter/meta-llama/llama-3.3-70b-instruct:free"
-      # Large free MoE with strong long-context / agent harness behavior
-      - "openrouter/arcee-ai/trinity-large-preview:free"
+      - "gemini/gemini-2.5-pro"
 
   # ── Explicit Fallback List ──────────────────────────────────
-  # Definitive fallback order when the primary model fails.
+  # Gemini-only fallback order when the primary model fails.
   # brain.py also reads model_tiers above, but this list takes priority.
   fallback_models:
-    - "openrouter/deepseek/deepseek-chat"
-    - "gemini/gemini-2.5-flash-lite"
-    - "openrouter/stepfun/step-3.5-flash:free"
     - "gemini/gemini-2.0-flash"
-    - "groq/llama-3.1-70b-versatile"
-    - "groq/llama-3.3-70b-specdec"
-    - "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
-    - "openrouter/openai/gpt-oss-120b:free"
-    - "openrouter/meta-llama/llama-3.3-70b-instruct:free"
-    - "openrouter/arcee-ai/trinity-large-preview:free"
+    - "gemini/gemini-2.5-flash-lite"
+    - "gemini/gemini-2.5-pro"
 
   # ── Generation Parameters ───────────────────────────────────
   max_tokens: 2048
@@ -143,25 +111,25 @@ agent:
   # Task-specific model routes. Order placement remains deterministic code-only.
   task_model_routes:
     candidate_eval:
-      primary: "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      primary: "gemini/gemini-2.5-flash"
       fallbacks:
-        - "openrouter/deepseek/deepseek-chat"
+        - "gemini/gemini-2.0-flash"
         - "gemini/gemini-2.5-flash-lite"
       timeout_seconds: 3.0
     health_check:
       primary: "gemini/gemini-2.0-flash"
       fallbacks:
-        - "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+        - "gemini/gemini-2.5-flash-lite"
       timeout_seconds: 1.2
     position_explain:
       primary: "gemini/gemini-2.0-flash"
       fallbacks:
-        - "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+        - "gemini/gemini-2.5-flash-lite"
       timeout_seconds: 2.5
     strategy_review:
       primary: "gemini/gemini-2.5-pro"
       fallbacks:
-        - "openrouter/openai/gpt-oss-120b:free"
+        - "gemini/gemini-2.5-flash"
       timeout_seconds: 4.0
 
   # ── Replay policy ───────────────────────────────────────────
@@ -169,10 +137,8 @@ agent:
   # the entire quality-heavy chain when providers are slow or rate-limited.
   replay_fallback_models:
     - "gemini/gemini-2.5-flash-lite"
-    - "openrouter/stepfun/step-3.5-flash:free"
-    - "groq/llama-3.1-70b-versatile"
     - "gemini/gemini-2.0-flash"
-    - "groq/llama-3.3-70b-specdec"
+    - "gemini/gemini-2.5-pro"
   replay_decision_timeout_seconds: 5.0
   replay_provider_timeout_seconds: 2.5
   replay_max_fallback_wait_seconds: 0.5
